@@ -1,5 +1,6 @@
 import { execa } from "execa";
 import {
+  ComposeInput,
   FixCiInput,
   HealthcheckInput,
   ImplementInput,
@@ -9,6 +10,7 @@ import {
 } from "./tool-schemas.js";
 import { implementPrompt, planPrompt, reviewPrompt } from "../core/prompt.js";
 import { runAndCapture } from "../mimo/mimo-runner.js";
+import { runComposeWorkflow } from "../compose/runner.js";
 
 export async function mimoHealthcheck(input: unknown) {
   const parsed = HealthcheckInput.parse(input);
@@ -106,4 +108,9 @@ export async function mimoResume(input: unknown) {
     commands: result.commands,
     risks: result.errors
   };
+}
+
+export async function mimoCompose(input: unknown) {
+  const parsed = ComposeInput.parse(input);
+  return await runComposeWorkflow(parsed);
 }

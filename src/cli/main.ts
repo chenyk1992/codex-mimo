@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { runFixCi, runImplement, runPlan, runReview } from "./commands.js";
+import { runComposeWorkflow } from "../compose/runner.js";
 import { execa } from "execa";
 import { SessionStore } from "../core/sessions.js";
 
@@ -12,6 +13,17 @@ function extractFlag(flag: string): string | undefined {
   const value = rest[idx + 1];
   rest.splice(idx, 2);
   return value;
+}
+
+function extractRepeatedFlag(flag: string): string[] {
+  const values: string[] = [];
+  let idx = rest.indexOf(flag);
+  while (idx !== -1 && idx + 1 < rest.length) {
+    values.push(rest[idx + 1]);
+    rest.splice(idx, 2);
+    idx = rest.indexOf(flag);
+  }
+  return values;
 }
 
 function hasFlag(flag: string): boolean {
@@ -28,10 +40,18 @@ const dryRun = hasFlag("--dry-run");
 const jsonOutput = hasFlag("--json");
 const ciMode = hasFlag("--ci");
 
+// Extract compose-specific flags before building task
+const workflowFlag = command === "compose" ? extractFlag("--workflow") : undefined;
+const modelFlag = command === "compose" ? extractFlag("--model") : undefined;
+const attachFlag = command === "compose" ? extractFlag("--attach") : undefined;
+const reportDirFlag = command === "compose" ? extractFlag("--report-dir") : undefined;
+const verifyCommands = command === "compose" ? extractRepeatedFlag("--verify") : [];
+const forkFlag = command === "compose" ? hasFlag("--fork") : false;
+
 const task = rest.join(" ").trim();
 
 if (!command) {
-  console.error("Usage: codex-mimo <plan|implement|review|fix-ci|healthcheck|sessions|resume> [task]");
+  console.error("Usage: codex-mimo <plan|implement|review|fix-ci|compose|healthcheck|sessions|resume> [task]");
   process.exit(2);
 }
 
@@ -73,6 +93,46 @@ if (command === "healthcheck") {
     process.exit(0);
   }
   await runFixCi(cwd, fileFlag, task || undefined, extraFiles);
+} else if (command === "compose") {
+  if (!workflowFlag) {
+    console.error("Usage: codex-mimo compose --workflow <dev|fix|fix-ci|plan|execute-plan|review|parallel> [task]");
+    process.exit(2);
+  }
+
+  const result = await runComposeWorkflow({
+    cwd,
+    workflow: workflowFlag as any,
+    task: task || undefined,
+    file: fileFlag,
+    since: baseFlag,
+    model: modelFlag,
+    attach: attachFlag,
+    session: sessionFlag,
+    fork: forkFlag,
+    verification: verifyCommands.length > 0 ? verifyCommands : undefined,
+    dryRun,
+    reportDir: reportDirFlag
+  });
+
+  if (jsonOutput) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log(`Workflow: ${result.workflow}`);
+    console.log(`Status: ${result.status}`);
+    console.log(`Changed files: ${result.changedFiles.length}`);
+    if (result.changedFiles.length > 0) {
+      for (const file of result.changedFiles) {
+        console.log(`  - ${file}`);
+      }
+    }
+    if (result.verification.length > 0) {
+      console.log("Verification:");
+      for (const v of result.verification) {
+        console.log(`  ${v.passed ? "PASS" : "FAIL"} ${v.command} exit=${v.exitCode}`);
+      }
+    }
+    console.log(`Report: ${result.reportPaths.markdown}`);
+  }
 } else if (command === "sessions") {
   const store = new SessionStore(cwd);
   const sessions = store.list();

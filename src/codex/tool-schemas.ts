@@ -34,3 +34,18 @@ export const ResumeInput = z.object({
 export const HealthcheckInput = z.object({
   cwd: z.string().optional()
 });
+
+export const ComposeInput = z.object({
+  cwd: z.string(),
+  workflow: z.enum(["dev", "fix", "fix-ci", "plan", "execute-plan", "review", "parallel"]),
+  task: z.string().optional(),
+  file: z.string().optional(),
+  since: z.string().optional(),
+  model: z.string().optional(),
+  attach: z.string().optional(),
+  session: z.string().optional(),
+  fork: z.boolean().default(false),
+  verification: z.array(z.string()).optional(),
+  dryRun: z.boolean().default(false),
+  reportDir: z.string().optional()
+});

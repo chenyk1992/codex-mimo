@@ -27,6 +27,26 @@ codex-mimo review
 codex-mimo healthcheck
 ```
 
+## Compose Workflow Launcher
+
+Use `codex-mimo compose` when you want MiMoCode to run a skill-driven workflow:
+
+```bash
+codex-mimo compose --workflow dev "Implement login throttling"
+codex-mimo compose --workflow fix-ci --file ci.log
+codex-mimo compose --workflow execute-plan --file doc/codex-mimo-acp-integration-plan.md
+codex-mimo compose --workflow review --since HEAD
+```
+
+Reports are written to:
+
+```text
+.codex-mimo/reports/
+.codex-mimo/events/
+```
+
+Each report includes MiMoCode JSON events, changed files, diff stat, verification command results, and review text.
+
 ## Codex Plugin Installation
 
 The project is packaged as a Codex plugin. To install:
@@ -47,6 +67,7 @@ The MCP server exposes these tools to Codex:
 | `mimo_review` | Review current diff for bugs and regressions |
 | `mimo_fix_ci` | Fix CI failures using a log file |
 | `mimo_resume` | Resume a previous MiMoCode session |
+| `mimo_compose` | Run a MiMoCode Compose workflow and return a structured report |
 
 ## Safety Model
 

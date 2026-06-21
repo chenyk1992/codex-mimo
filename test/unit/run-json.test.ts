@@ -39,4 +39,35 @@ describe("buildMimoRunArgs", () => {
       "Fix CI"
     ]);
   });
+
+  it("builds compose run args with title, file, session, fork, and attach", () => {
+    expect(
+      buildMimoRunArgs({
+        cwd: "E:/project/app",
+        message: "Use @compose",
+        agent: "compose",
+        title: "codex-mimo compose dev",
+        session: "sess_123",
+        fork: true,
+        attach: "http://localhost:4096",
+        files: ["ci.log"]
+      })
+    ).toEqual([
+      "run",
+      "--format",
+      "json",
+      "--agent",
+      "compose",
+      "--session",
+      "sess_123",
+      "--fork",
+      "--title",
+      "codex-mimo compose dev",
+      "--attach",
+      "http://localhost:4096",
+      "--file",
+      "ci.log",
+      "Use @compose"
+    ]);
+  });
 });

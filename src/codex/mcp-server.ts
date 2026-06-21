@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import {
+  mimoCompose,
   mimoFixCi,
   mimoHealthcheck,
   mimoImplement,
@@ -95,6 +96,29 @@ export function createMcpServer(): McpServer {
     },
     async (args) => {
       const result = await mimoResume(args);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    }
+  );
+
+  server.tool(
+    "mimo_compose",
+    "Run a MiMoCode Compose workflow and return a structured report",
+    {
+      cwd: z.string().describe("Project root directory"),
+      workflow: z.enum(["dev", "fix", "fix-ci", "plan", "execute-plan", "review", "parallel"]),
+      task: z.string().optional().describe("Task description"),
+      file: z.string().optional().describe("Attached file such as CI log or plan document"),
+      since: z.string().optional().describe("Git ref for diff comparison"),
+      model: z.string().optional().describe("Model override"),
+      attach: z.string().optional().describe("Running MiMoCode server URL"),
+      session: z.string().optional().describe("MiMoCode session ID"),
+      fork: z.boolean().default(false),
+      verification: z.array(z.string()).optional().describe("Verification commands"),
+      dryRun: z.boolean().default(false),
+      reportDir: z.string().optional().describe("Report directory")
+    },
+    async (args) => {
+      const result = await mimoCompose(args);
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
     }
   );
