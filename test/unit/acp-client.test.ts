@@ -76,11 +76,11 @@ describe("AcpClient", () => {
       JSON.stringify({
         jsonrpc: "2.0",
         method: "session/update",
-        params: { sessionId: "s1", update: { type: "message", role: "agent", text: "hello" } }
+        params: { sessionId: "s1", update: { sessionUpdate: "agent_message_chunk", messageId: "msg_1", content: { type: "text", text: "hello" } } }
       }) + "\n"
     );
     expect(updates).toHaveLength(1);
-    expect(updates[0].update.type).toBe("message");
+    expect(updates[0].update.sessionUpdate).toBe("agent_message_chunk");
   });
 
   it("handles agent-to-client requests and sends response", async () => {

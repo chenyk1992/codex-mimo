@@ -1,5 +1,4 @@
 import { execa } from "execa";
-import { runImplement, runPlan, runReview } from "../cli/commands.js";
 import {
   FixCiInput,
   HealthcheckInput,
@@ -8,8 +7,8 @@ import {
   ReviewInput,
   ResumeInput
 } from "./tool-schemas.js";
-import { buildMimoRunArgs } from "../mimo/run-json.js";
 import { implementPrompt, planPrompt, reviewPrompt } from "../core/prompt.js";
+import { runAndCapture } from "../mimo/mimo-runner.js";
 
 export async function mimoHealthcheck(input: unknown) {
   const parsed = HealthcheckInput.parse(input);
@@ -28,11 +27,16 @@ export async function mimoHealthcheck(input: unknown) {
 
 export async function mimoPlan(input: unknown) {
   const parsed = PlanInput.parse(input);
-  await runPlan(parsed.cwd, parsed.task);
+  const result = await runAndCapture({
+    cwd: parsed.cwd,
+    agent: "plan",
+    message: planPrompt(parsed.task)
+  });
   return {
-    summary: "MiMoCode plan completed.",
-    changedFiles: [],
-    verification: []
+    summary: result.summary,
+    sessionId: result.sessionId,
+    changedFiles: result.changedFiles,
+    verification: result.commands
   };
 }
 
@@ -41,52 +45,65 @@ export async function mimoImplement(input: unknown) {
   if (!parsed.allowWrite) {
     throw new Error("mimo_implement requires allowWrite=true.");
   }
-  await runImplement(parsed.cwd, parsed.task);
+  const result = await runAndCapture({
+    cwd: parsed.cwd,
+    agent: "build",
+    message: implementPrompt(parsed.task)
+  });
   return {
-    summary: "MiMoCode implementation completed. Codex should inspect git diff and run verification.",
-    changedFiles: [],
-    verification: []
+    summary: result.summary,
+    sessionId: result.sessionId,
+    changedFiles: result.changedFiles,
+    commands: result.commands,
+    risks: result.errors
   };
 }
 
 export async function mimoReview(input: unknown) {
   const parsed = ReviewInput.parse(input);
   const diffResult = await execa("git", ["diff", parsed.base], { cwd: parsed.cwd });
-  await runReview(parsed.cwd, diffResult.stdout || "No changes found.");
+  const result = await runAndCapture({
+    cwd: parsed.cwd,
+    agent: "plan",
+    message: reviewPrompt(diffResult.stdout || "No changes found.")
+  });
   return {
-    findings: [],
-    summary: "Review completed."
+    summary: result.summary,
+    sessionId: result.sessionId,
+    findings: []
   };
 }
 
 export async function mimoFixCi(input: unknown) {
   const parsed = FixCiInput.parse(input);
-  const args = buildMimoRunArgs({
+  const result = await runAndCapture({
     cwd: parsed.cwd,
     agent: "build",
     message: implementPrompt(parsed.task ?? "Fix the CI failures shown in the attached log."),
     files: [parsed.file]
   });
-  await execa("mimo", args, { cwd: parsed.cwd, stdout: "inherit", stderr: "inherit" });
   return {
-    summary: "CI fix attempt completed. Codex should inspect git diff and run verification.",
-    changedFiles: [],
-    verification: []
+    summary: result.summary,
+    sessionId: result.sessionId,
+    changedFiles: result.changedFiles,
+    commands: result.commands,
+    risks: result.errors
   };
 }
 
 export async function mimoResume(input: unknown) {
   const parsed = ResumeInput.parse(input);
-  const args = buildMimoRunArgs({
+  const result = await runAndCapture({
     cwd: parsed.cwd,
     agent: "build",
     message: parsed.task,
     session: parsed.session
   });
-  await execa("mimo", args, { cwd: parsed.cwd, stdout: "inherit", stderr: "inherit" });
   return {
-    summary: "Session resumed. Codex should inspect git diff and run verification.",
-    changedFiles: [],
-    verification: []
+    summary: result.summary,
+    sessionId: result.sessionId,
+    changedFiles: result.changedFiles,
+    commands: result.commands,
+    risks: result.errors
   };
 }

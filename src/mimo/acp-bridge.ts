@@ -14,7 +14,9 @@ import type {
   TerminalWaitForExitParams,
   TerminalKillParams,
   TerminalReleaseParams,
-  RequestPermissionParams
+  RequestPermissionParams,
+  RequestPermissionResult,
+  WriteTextFileResult
 } from "./acp-types.js";
 import {
   type BridgePolicy,
@@ -51,7 +53,7 @@ export class AcpBridge {
 
   constructor(options: AcpBridgeOptions) {
     this.cwd = options.cwd;
-    this.policy = options.policy;
+    this.policy = { ...options.policy, nonInteractive: true };
     this.audit = new AuditLogger(options.logDir ?? `${options.cwd}/.codex-mimo`);
   }
 
@@ -152,42 +154,25 @@ export class AcpBridge {
 
   private handlePermissionRequest(
     params: RequestPermissionParams
-  ): { outcome: "allow" | "deny"; reason?: string } {
-    const { operation, details } = params;
-    let decision: "allow" | "deny" = "deny";
+  ): RequestPermissionResult {
+    const { toolCall, options } = params;
+    const commandLine = buildCommandLine(toolCall.input);
+    const decision = decideCommand(this.policy, commandLine);
 
-    if (operation === "terminal") {
-      const command = (details.command as string) ?? "";
-      const cmdDecision = decideCommand(this.policy, command);
-      decision = cmdDecision === "deny" ? "deny" : "allow";
-      this.audit.log({
-        type: "permission",
-        operation: "terminal",
-        command,
-        outcome: decision
-      });
-    } else if (operation === "file_write") {
-      const filePath = (details.path as string) ?? "";
-      const fileDecision = decideFileWrite(this.policy, filePath);
-      decision = fileDecision === "deny" ? "deny" : "allow";
-      this.audit.log({
-        type: "permission",
-        operation: "file_write",
-        path: filePath,
-        outcome: decision
-      });
-    } else {
-      this.audit.log({
-        type: "permission",
-        operation,
-        outcome: "deny"
-      });
+    this.audit.log({
+      type: "permission",
+      toolCallId: toolCall.toolCallId,
+      kind: toolCall.kind,
+      command: commandLine,
+      outcome: decision
+    });
+
+    if (decision === "deny") {
+      return { outcome: { outcome: "cancelled" } };
     }
 
-    return {
-      outcome: decision,
-      reason: decision === "deny" ? "Denied by bridge policy" : undefined
-    };
+    const allowOption = options.find((o) => o.id === "allow") ?? options[0];
+    return { outcome: { outcome: "selected", optionId: allowOption?.id ?? "allow" } };
   }
 
   private handleFileRead(
@@ -218,7 +203,7 @@ export class AcpBridge {
 
   private handleFileWrite(
     params: WriteTextFileParams
-  ): { bytes: number } | { error: string } {
+  ): WriteTextFileResult | { error: string } {
     const normalized = normalizePath(params.path);
     const decision = decideFileWrite(this.policy, normalized);
 
@@ -235,7 +220,7 @@ export class AcpBridge {
 
     try {
       fs.writeFileSync(normalized, params.content, "utf-8");
-      return { bytes: Buffer.byteLength(params.content, "utf-8") };
+      return null;
     } catch (err) {
       return {
         error: `Failed to write file: ${err instanceof Error ? err.message : String(err)}`
@@ -246,49 +231,51 @@ export class AcpBridge {
   private handleTerminalCreate(
     params: TerminalCreateParams
   ): { terminalId: string } | { error: string } {
-    const command = params.command;
-    const decision = decideCommand(this.policy, command);
+    const commandLine = buildCommandLineFromParts(params.command, params.args);
+    const decision = decideCommand(this.policy, commandLine);
 
     this.audit.log({
       type: "terminal_create",
-      command,
+      command: commandLine,
       outcome: decision
     });
 
     if (decision === "deny") {
-      return { error: `Command denied by policy: ${command}` };
+      return { error: `Command denied by policy: ${commandLine}` };
     }
 
     const cwd = params.cwd ? normalizePath(params.cwd) : this.cwd;
-    const terminal = this.terminals.create(command, cwd);
+    const terminal = this.terminals.create(commandLine, cwd);
     return { terminalId: terminal.id };
   }
 
   private handleTerminalOutput(
     params: TerminalOutputParams
-  ): { stdout: string; stderr: string; exitCode: number | null } {
+  ): { output: string; truncated: boolean; exitStatus: number | null } {
     const terminal = this.terminals.get(params.terminalId);
     if (!terminal) {
-      return { stdout: "", stderr: "Terminal not found", exitCode: -1 };
+      return { output: "", truncated: false, exitStatus: -1 };
     }
+    const output = terminal.stdout + terminal.stderr;
     return {
-      stdout: terminal.stdout,
-      stderr: terminal.stderr,
-      exitCode: terminal.exitCode
+      output,
+      truncated: false,
+      exitStatus: terminal.exitCode
     };
   }
 
   private async handleTerminalWait(
     params: TerminalWaitForExitParams
-  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  ): Promise<{ exitStatus: number; output: string; truncated: boolean }> {
     const terminal = await this.terminals.waitForExit(
       params.terminalId,
       params.timeoutMs
     );
+    const output = terminal.stdout + terminal.stderr;
     return {
-      exitCode: terminal.exitCode ?? -1,
-      stdout: terminal.stdout,
-      stderr: terminal.stderr
+      exitStatus: terminal.exitCode ?? -1,
+      output,
+      truncated: false
     };
   }
 
@@ -316,4 +303,15 @@ export class AcpBridge {
     this.audit.close();
     this.acp?.stop();
   }
+}
+
+function buildCommandLine(input: Record<string, unknown>): string {
+  const command = (input.command as string) ?? "";
+  const args = (input.args as string[]) ?? [];
+  return buildCommandLineFromParts(command, args);
+}
+
+function buildCommandLineFromParts(command: string, args?: string[]): string {
+  if (!args || args.length === 0) return command;
+  return [command, ...args].join(" ");
 }

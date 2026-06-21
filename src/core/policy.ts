@@ -6,10 +6,13 @@ export type Decision = "allow" | "ask" | "deny";
 export interface BridgePolicy {
   workspaceRoot: string;
   deniedFileGlobs: string[];
+  allowedReadGlobs?: string[];
+  allowedWriteGlobs?: string[];
   allowedCommands: string[];
   askCommands: string[];
   deniedCommands: string[];
   ciMode?: boolean;
+  nonInteractive?: boolean;
 }
 
 export const defaultPolicy = (workspaceRoot: string): BridgePolicy => ({
@@ -50,7 +53,7 @@ export const defaultPolicy = (workspaceRoot: string): BridgePolicy => ({
 });
 
 function resolveDecision(policy: BridgePolicy, decision: Decision): Decision {
-  if (policy.ciMode && decision === "ask") return "deny";
+  if ((policy.ciMode || policy.nonInteractive) && decision === "ask") return "deny";
   return decision;
 }
 
@@ -58,6 +61,7 @@ export function decideFileRead(policy: BridgePolicy, filePath: string): Decision
   const normalized = normalizePath(filePath);
   if (!isPathInside(policy.workspaceRoot, normalized)) return "deny";
   if (policy.deniedFileGlobs.some((glob) => minimatch(normalized, glob))) return "deny";
+  if (policy.allowedReadGlobs && !policy.allowedReadGlobs.some((glob) => minimatch(normalized, glob))) return "deny";
   return "allow";
 }
 
@@ -65,6 +69,7 @@ export function decideFileWrite(policy: BridgePolicy, filePath: string): Decisio
   const normalized = normalizePath(filePath);
   if (!isPathInside(policy.workspaceRoot, normalized)) return "deny";
   if (policy.deniedFileGlobs.some((glob) => minimatch(normalized, glob))) return "deny";
+  if (policy.allowedWriteGlobs && !policy.allowedWriteGlobs.some((glob) => minimatch(normalized, glob))) return "deny";
   return resolveDecision(policy, "ask");
 }
 

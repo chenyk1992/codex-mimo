@@ -39,14 +39,15 @@ export interface InitializeParams {
 
 export interface InitializeResult {
   protocolVersion: number;
-  capabilities: {
+  agentCapabilities: {
     fs?: { readTextFile?: boolean; writeTextFile?: boolean };
     terminal?: boolean;
   };
-  serverInfo: {
+  agentInfo: {
     name: string;
     version: string;
   };
+  authMethods?: Array<{ id: string; name: string }>;
 }
 
 export interface SessionNewParams {
@@ -73,23 +74,37 @@ export interface SessionUpdateParams {
 }
 
 export type SessionUpdate =
-  | { type: "message"; role: "agent" | "user"; text: string; messageId?: string }
-  | { type: "plan"; entries: Array<{ content: string; status: string; priority?: string }> }
-  | { type: "tool"; id: string; title: string; kind: string; status: string }
-  | { type: "diff"; path: string; oldText?: string | null; newText: string }
-  | { type: "terminal"; id: string; output: string; exitCode?: number | null }
-  | { type: "usage"; used: number; size: number; cost?: { amount: number; currency: string } };
+  | { sessionUpdate: "agent_message_chunk"; messageId: string; content: { type: string; text: string } }
+  | { sessionUpdate: "plan"; entries: Array<{ content: string; status: string; priority?: string }> }
+  | { sessionUpdate: "tool_call"; toolCallId: string; title: string; kind: string; status: string }
+  | { sessionUpdate: "tool_call_update"; toolCallId: string; title?: string; status?: string; output?: string }
+  | { sessionUpdate: "usage_update"; used: number; size: number; cost?: { amount: number; currency: string } };
 
 export interface RequestPermissionParams {
   sessionId: string;
-  operation: string;
-  details: Record<string, unknown>;
+  toolCall: {
+    toolCallId: string;
+    title: string;
+    kind: string;
+    input: Record<string, unknown>;
+  };
+  options: Array<{ id: string; label: string }>;
 }
 
-export interface RequestPermissionResult {
-  outcome: "allow" | "deny";
-  reason?: string;
+export interface RequestPermissionResultSelected {
+  outcome: {
+    outcome: "selected";
+    optionId: string;
+  };
 }
+
+export interface RequestPermissionResultCancelled {
+  outcome: {
+    outcome: "cancelled";
+  };
+}
+
+export type RequestPermissionResult = RequestPermissionResultSelected | RequestPermissionResultCancelled;
 
 export interface ReadTextFileParams {
   sessionId: string;
@@ -106,14 +121,15 @@ export interface WriteTextFileParams {
   content: string;
 }
 
-export interface WriteTextFileResult {
-  bytes: number;
-}
+export type WriteTextFileResult = null;
 
 export interface TerminalCreateParams {
   sessionId: string;
   command: string;
+  args?: string[];
+  env?: Array<{ name: string; value: string }>;
   cwd?: string;
+  outputByteLimit?: number;
 }
 
 export interface TerminalCreateResult {
@@ -126,9 +142,9 @@ export interface TerminalOutputParams {
 }
 
 export interface TerminalOutputResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
+  output: string;
+  truncated: boolean;
+  exitStatus: number | null;
 }
 
 export interface TerminalWaitForExitParams {
@@ -138,9 +154,9 @@ export interface TerminalWaitForExitParams {
 }
 
 export interface TerminalWaitForExitResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
+  exitStatus: number;
+  output: string;
+  truncated: boolean;
 }
 
 export interface TerminalKillParams {

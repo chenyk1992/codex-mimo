@@ -34,40 +34,56 @@ if (!command) {
   process.exit(2);
 }
 
+const extraFiles = fileFlag ? [fileFlag] : [];
+
 if (command === "healthcheck") {
   try {
     const result = await execa("mimo", ["--version"], { cwd });
-    console.log(JSON.stringify({ ok: true, version: result.stdout.trim() }));
+    const output = { ok: true, version: result.stdout.trim() };
+    console.log(JSON.stringify(output));
   } catch {
     console.log(JSON.stringify({ ok: false, error: "mimo not found or not working" }));
     process.exit(1);
   }
 } else if (command === "plan") {
   if (!task) { console.error("Usage: codex-mimo plan <task>"); process.exit(2); }
-  await runPlan(cwd, task);
+  if (dryRun) {
+    console.log(`[dry-run] codex-mimo plan "${task}"`);
+    process.exit(0);
+  }
+  await runPlan(cwd, task, extraFiles);
 } else if (command === "implement") {
   if (!task) { console.error("Usage: codex-mimo implement <task>"); process.exit(2); }
-  await runImplement(cwd, task);
+  if (dryRun) {
+    console.log(`[dry-run] codex-mimo implement "${task}"`);
+    process.exit(0);
+  }
+  await runImplement(cwd, task, extraFiles, ciMode);
 } else if (command === "review") {
+  if (dryRun) {
+    console.log("[dry-run] codex-mimo review");
+    process.exit(0);
+  }
   const diffResult = await execa("git", ["diff", "HEAD"], { cwd });
-  await runReview(cwd, diffResult.stdout || "No changes found.");
+  await runReview(cwd, diffResult.stdout || "No changes found.", extraFiles);
 } else if (command === "sessions") {
   const store = new SessionStore(cwd);
   const sessions = store.list();
-  if (sessions.length === 0) {
-    console.log("No sessions found.");
-  } else {
-    console.log(JSON.stringify(sessions, null, 2));
-  }
+  const output = sessions.length === 0 ? { sessions: [], message: "No sessions found." } : { sessions };
+  console.log(JSON.stringify(output, null, 2));
 } else if (command === "resume") {
   if (!sessionFlag) { console.error("Usage: codex-mimo resume --session <id> <task>"); process.exit(2); }
+  if (dryRun) {
+    console.log(`[dry-run] codex-mimo resume --session ${sessionFlag} "${task}"`);
+    process.exit(0);
+  }
   const store = new SessionStore(cwd);
   const entry = store.get(sessionFlag);
   if (!entry) { console.error(`Session not found: ${sessionFlag}`); process.exit(1); }
   const args = ["run", "--format", "json", "--agent", "build", "--session", sessionFlag];
   if (task) args.push(task);
   else args.push("Continue the previous task.");
-  await execa("mimo", args, { cwd, stdout: "inherit", stderr: "inherit" });
+  await execa("mimo", args, { cwd, stdout: "inherit", stderr: "inherit", stdin: "ignore" });
 } else {
   console.error(`Unknown command: ${command}`);
   process.exit(2);

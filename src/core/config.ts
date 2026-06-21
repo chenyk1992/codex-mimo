@@ -46,8 +46,10 @@ export function configToPolicy(cwd: string, config: ConfigFile, ciMode?: boolean
     if (config.terminal.deny) base.deniedCommands = config.terminal.deny;
   }
 
-  if (config.fileAccess?.deny) {
-    base.deniedFileGlobs = config.fileAccess.deny;
+  if (config.fileAccess) {
+    if (config.fileAccess.deny) base.deniedFileGlobs = config.fileAccess.deny;
+    if (config.fileAccess.read) base.allowedReadGlobs = config.fileAccess.read;
+    if (config.fileAccess.write) base.allowedWriteGlobs = config.fileAccess.write;
   }
 
   base.ciMode = ciMode ?? config.ci?.enabled ?? false;

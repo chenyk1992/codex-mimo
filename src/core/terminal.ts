@@ -19,27 +19,13 @@ export class TerminalManager {
     const shellArgs = isWindows ? ["/c", command] : ["-c", command];
 
     const child = spawn(shell, shellArgs, { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    return this.register(id, child);
+  }
 
-    const terminal: ManagedTerminal = {
-      id,
-      process: child,
-      stdout: "",
-      stderr: "",
-      exitCode: null
-    };
-
-    child.stdout?.on("data", (data: Buffer) => {
-      terminal.stdout += data.toString();
-    });
-    child.stderr?.on("data", (data: Buffer) => {
-      terminal.stderr += data.toString();
-    });
-    child.on("exit", (code) => {
-      terminal.exitCode = code;
-    });
-
-    this.terminals.set(id, terminal);
-    return terminal;
+  createWithArgs(command: string, args: string[], cwd: string): ManagedTerminal {
+    const id = `term_${this.nextId++}`;
+    const child = spawn(command, args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    return this.register(id, child);
   }
 
   get(id: string): ManagedTerminal | undefined {
@@ -78,5 +64,28 @@ export class TerminalManager {
         resolve(terminal);
       });
     });
+  }
+
+  private register(id: string, child: ChildProcess): ManagedTerminal {
+    const terminal: ManagedTerminal = {
+      id,
+      process: child,
+      stdout: "",
+      stderr: "",
+      exitCode: null
+    };
+
+    child.stdout?.on("data", (data: Buffer) => {
+      terminal.stdout += data.toString();
+    });
+    child.stderr?.on("data", (data: Buffer) => {
+      terminal.stderr += data.toString();
+    });
+    child.on("exit", (code) => {
+      terminal.exitCode = code;
+    });
+
+    this.terminals.set(id, terminal);
+    return terminal;
   }
 }

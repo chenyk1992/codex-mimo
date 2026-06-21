@@ -1,13 +1,13 @@
-import type { CodexMimoEvent, SessionUpdateParams, SessionUpdate } from "./acp-types.js";
+import type { CodexMimoEvent, SessionUpdateParams } from "./acp-types.js";
 
 export function convertUpdate(params: SessionUpdateParams): CodexMimoEvent {
   const update = params.update;
-  switch (update.type) {
-    case "message":
+  switch (update.sessionUpdate) {
+    case "agent_message_chunk":
       return {
         type: "message",
-        role: update.role,
-        text: update.text,
+        role: "agent",
+        text: update.content.text,
         messageId: update.messageId
       };
     case "plan":
@@ -15,29 +15,23 @@ export function convertUpdate(params: SessionUpdateParams): CodexMimoEvent {
         type: "plan",
         entries: update.entries
       };
-    case "tool":
+    case "tool_call":
       return {
         type: "tool",
-        id: update.id,
+        id: update.toolCallId,
         title: update.title,
         kind: update.kind,
         status: update.status
       };
-    case "diff":
+    case "tool_call_update":
       return {
-        type: "diff",
-        path: update.path,
-        oldText: update.oldText,
-        newText: update.newText
+        type: "tool",
+        id: update.toolCallId,
+        title: update.title ?? "",
+        kind: "",
+        status: update.status ?? "running"
       };
-    case "terminal":
-      return {
-        type: "terminal",
-        id: update.id,
-        output: update.output,
-        exitCode: update.exitCode
-      };
-    case "usage":
+    case "usage_update":
       return {
         type: "usage",
         used: update.used,
