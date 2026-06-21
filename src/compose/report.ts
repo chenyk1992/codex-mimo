@@ -4,6 +4,11 @@ import type { NormalizedMimoEvent } from "./events.js";
 import type { ComposeWorkflowName } from "./workflow.js";
 import type { VerificationResult } from "./verify.js";
 
+export interface GitStatusSnapshot {
+  short: string;
+  dirty: boolean;
+}
+
 export interface ComposeReport {
   id: string;
   createdAt: string;
@@ -16,8 +21,12 @@ export interface ComposeReport {
   events: NormalizedMimoEvent[];
   changedFiles: string[];
   diffStat: string;
+  diffPath?: string;
+  gitStatusBefore?: GitStatusSnapshot;
+  gitStatusAfter?: GitStatusSnapshot;
   verification: VerificationResult[];
   reviewText?: string;
+  error?: string;
   reportPaths: {
     json: string;
     markdown: string;
@@ -36,7 +45,7 @@ export function renderMarkdownReport(report: ComposeReport): string {
     ? ["No changed files detected."]
     : report.changedFiles.map((file) => `- \`${file}\``);
 
-  return [
+  const lines = [
     "# Codex-MiMo Compose Report",
     "",
     `Run ID: \`${report.id}\``,
@@ -58,7 +67,32 @@ export function renderMarkdownReport(report: ComposeReport): string {
     "```bash",
     `mimo ${report.mimoArgs.join(" ")}`,
     "```",
-    "",
+    ""
+  ];
+
+  if (report.gitStatusBefore) {
+    lines.push(
+      "## Git Status (Before)",
+      "",
+      "```text",
+      report.gitStatusBefore.short || "(clean)",
+      "```",
+      ""
+    );
+  }
+
+  if (report.gitStatusAfter) {
+    lines.push(
+      "## Git Status (After)",
+      "",
+      "```text",
+      report.gitStatusAfter.short || "(clean)",
+      "```",
+      ""
+    );
+  }
+
+  lines.push(
     "## Changed Files",
     "",
     changedFiles.join("\n"),
@@ -68,7 +102,19 @@ export function renderMarkdownReport(report: ComposeReport): string {
     "```text",
     report.diffStat || "No diff stat.",
     "```",
-    "",
+    ""
+  );
+
+  if (report.diffPath) {
+    lines.push(
+      "## Full Diff",
+      "",
+      `Full diff saved to: \`${report.diffPath}\``,
+      ""
+    );
+  }
+
+  lines.push(
     "## Verification",
     "",
     verificationLines.join("\n"),
@@ -76,14 +122,30 @@ export function renderMarkdownReport(report: ComposeReport): string {
     "## Review",
     "",
     report.reviewText || "No review text was captured.",
-    "",
+    ""
+  );
+
+  if (report.error) {
+    lines.push(
+      "## Error",
+      "",
+      "```text",
+      report.error,
+      "```",
+      ""
+    );
+  }
+
+  lines.push(
     "## Report Files",
     "",
     `- JSON: \`${report.reportPaths.json}\``,
     `- Markdown: \`${report.reportPaths.markdown}\``,
     `- Events JSONL: \`${report.reportPaths.eventsJsonl}\``,
     ""
-  ].join("\n");
+  );
+
+  return lines.join("\n");
 }
 
 export function writeComposeReport(report: ComposeReport): void {

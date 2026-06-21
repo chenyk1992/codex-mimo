@@ -70,4 +70,23 @@ describe("buildMimoRunArgs", () => {
       "Use @compose"
     ]);
   });
+
+  it("includes --continue flag when set", () => {
+    expect(
+      buildMimoRunArgs({
+        cwd: "E:/project/app",
+        message: "Continue task",
+        agent: "compose",
+        continue: true
+      })
+    ).toEqual([
+      "run",
+      "--format",
+      "json",
+      "--agent",
+      "compose",
+      "--continue",
+      "Continue task"
+    ]);
+  });
 });

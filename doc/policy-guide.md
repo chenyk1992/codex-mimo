@@ -1,39 +1,39 @@
-# Policy Guide
+# 策略指南
 
-## Default Policy
+## 默认策略
 
-The bridge enforces a conservative default policy:
+桥接层强制执行保守的默认策略：
 
-### File Access
+### 文件访问
 
-| Pattern | Read | Write |
+| 模式 | 读取 | 写入 |
 |---------|------|-------|
-| `${workspaceRoot}/**` | allow | ask |
-| `**/.env`, `**/.env.*` | deny | deny |
-| `**/id_rsa`, `**/id_ed25519` | deny | deny |
-| `**/.npmrc`, `**/.pypirc` | deny | deny |
-| Outside workspace | deny | deny |
+| `${workspaceRoot}/**` | 允许 | 询问 |
+| `**/.env`、`**/.env.*` | 拒绝 | 拒绝 |
+| `**/id_rsa`、`**/id_ed25519` | 拒绝 | 拒绝 |
+| `**/.npmrc`、`**/.pypirc` | 拒绝 | 拒绝 |
+| 工作区外 | 拒绝 | 拒绝 |
 
-### Terminal Commands
+### 终端命令
 
-| Pattern | Decision |
+| 模式 | 决策 |
 |---------|----------|
-| `git status*`, `git diff*`, `git log*` | allow |
-| `npm test*`, `npm run test*`, `npm run lint*`, `npm run typecheck*` | allow |
-| `pnpm test*`, `pnpm lint*`, `pnpm typecheck*` | allow |
-| `npm install*`, `pnpm install*` | ask |
-| `npm run build*`, `pnpm build*` | ask |
-| `rm *`, `del *`, `Remove-Item *` | deny |
-| `git push*`, `git reset*`, `git checkout --*` | deny |
-| `curl *`, `wget *`, `ssh *`, `scp *` | deny |
+| `git status*`、`git diff*`、`git log*` | 允许 |
+| `npm test*`、`npm run test*`、`npm run lint*`、`npm run typecheck*` | 允许 |
+| `pnpm test*`、`pnpm lint*`、`pnpm typecheck*` | 允许 |
+| `npm install*`、`pnpm install*` | 询问 |
+| `npm run build*`、`pnpm build*` | 询问 |
+| `rm *`、`del *`、`Remove-Item *` | 拒绝 |
+| `git push*`、`git reset*`、`git checkout --*` | 拒绝 |
+| `curl *`、`wget *`、`ssh *`、`scp *` | 拒绝 |
 
-### Network
+### 网络
 
-Default: deny. Network access is not enabled unless a workflow explicitly permits it.
+默认：拒绝。除非工作流明确启用，否则不允许网络访问。
 
-## Customizing Policy
+## 自定义策略
 
-Override defaults by providing a `codex-mimo.config.json` in your project root:
+在项目根目录提供 `codex-mimo.config.json` 来覆盖默认值：
 
 ```jsonc
 {
@@ -51,9 +51,9 @@ Override defaults by providing a `codex-mimo.config.json` in your project root:
 }
 ```
 
-## Audit Logs
+## 审计日志
 
-Every invocation writes a JSONL audit log to `.codex-mimo/audit.jsonl`:
+每次调用都会将 JSONL 审计日志写入 `.codex-mimo/audit.jsonl`：
 
 ```json
 {"type":"session_start","workflow":"implement","cwd":"E:/project/app","agent":"build"}

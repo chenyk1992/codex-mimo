@@ -2,6 +2,7 @@ import path from "node:path";
 import { execa } from "execa";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
 import { captureGitDiff, type GitDiffSnapshot } from "../git/diff.js";
+import { captureGitStatus, type GitStatusSnapshot } from "../git/status.js";
 import { parseMimoJsonLines } from "./events.js";
 import { writeComposeReport, type ComposeReport } from "./report.js";
 import { normalizeVerificationCommands, runVerificationCommands, type VerificationResult } from "./verify.js";
@@ -17,6 +18,7 @@ export interface ComposeRunInput {
   attach?: string;
   session?: string;
   fork?: boolean;
+  continue?: boolean;
   verification?: string[];
   dryRun?: boolean;
   reportDir?: string;
@@ -31,6 +33,7 @@ export interface MimoRunResult {
 export interface ComposeRunnerDeps {
   runMimo?: (cwd: string, args: string[]) => Promise<MimoRunResult>;
   captureDiff?: (cwd: string, base?: string) => Promise<GitDiffSnapshot>;
+  captureStatus?: (cwd: string) => Promise<GitStatusSnapshot>;
   runVerification?: (cwd: string, commands: string[]) => Promise<VerificationResult[]>;
   writeReport?: (report: ComposeReport) => void;
   now?: () => Date;
@@ -59,7 +62,8 @@ export async function runComposeWorkflow(
     session: input.session,
     fork: input.fork,
     attach: input.attach,
-    files: input.file ? [input.file] : []
+    files: input.file ? [input.file] : [],
+    continue: input.continue
   });
 
   const now = deps.now ?? (() => new Date());
@@ -67,9 +71,19 @@ export async function runComposeWorkflow(
   const id = `${createdAt.replace(/[:.]/g, "-")}-compose-${workflow.name}`;
   const reportDir = input.reportDir ?? path.join(input.cwd, ".codex-mimo", "reports");
   const eventsDir = path.join(input.cwd, ".codex-mimo", "events");
+  const diffsDir = path.join(input.cwd, ".codex-mimo", "diffs");
+  const writeReport = deps.writeReport ?? writeComposeReport;
+  const captureStatus = deps.captureStatus ?? captureGitStatus;
+
+  let gitStatusBefore: GitStatusSnapshot | undefined;
+  try {
+    gitStatusBefore = await captureStatus(input.cwd);
+  } catch {
+    // Git status capture is best-effort
+  }
 
   if (input.dryRun) {
-    return buildReport({
+    const report = buildReport({
       id,
       createdAt,
       input,
@@ -80,33 +94,119 @@ export async function runComposeWorkflow(
       verification: [],
       reportDir,
       eventsDir,
-      status: "needs_review"
+      diffsDir,
+      status: "needs_review",
+      gitStatusBefore
     });
+    writeReport(report);
+    return report;
   }
 
   const runMimo = deps.runMimo ?? defaultRunMimo;
   const captureDiff = deps.captureDiff ?? captureGitDiff;
   const runVerification = deps.runVerification ?? runVerificationCommands;
-  const writeReport = deps.writeReport ?? writeComposeReport;
 
-  const mimo = await runMimo(input.cwd, mimoArgs);
-  const diff = await captureDiff(input.cwd, input.since ?? "HEAD");
+  let mimoResult: MimoRunResult;
+  try {
+    mimoResult = await runMimo(input.cwd, mimoArgs);
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const report = buildReport({
+      id,
+      createdAt,
+      input,
+      mimoArgs,
+      requestedSkills: workflow.skillChain,
+      eventsStdout: "",
+      diff: { changedFiles: [], diffStat: "", diff: "" },
+      verification: [],
+      reportDir,
+      eventsDir,
+      diffsDir,
+      status: "failed",
+      gitStatusBefore,
+      error: `MiMoCode startup failed: ${errorMessage}`
+    });
+    writeReport(report);
+    return report;
+  }
+
+  let diff: GitDiffSnapshot;
+  try {
+    diff = await captureDiff(input.cwd, input.since ?? "HEAD");
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    diff = { changedFiles: [], diffStat: "", diff: "" };
+    const report = buildReport({
+      id,
+      createdAt,
+      input,
+      mimoArgs,
+      requestedSkills: workflow.skillChain,
+      eventsStdout: mimoResult.stdout,
+      diff,
+      verification: [],
+      reportDir,
+      eventsDir,
+      diffsDir,
+      status: "failed",
+      gitStatusBefore,
+      error: `Git diff capture failed: ${errorMessage}`
+    });
+    writeReport(report);
+    return report;
+  }
+
+  let gitStatusAfter: GitStatusSnapshot | undefined;
+  try {
+    gitStatusAfter = await captureStatus(input.cwd);
+  } catch {
+    // Git status capture is best-effort
+  }
+
   const verificationCommands = normalizeVerificationCommands(input.verification, workflow.defaultVerification);
-  const verification = await runVerification(input.cwd, verificationCommands);
+  let verification: VerificationResult[] = [];
+  try {
+    verification = await runVerification(input.cwd, verificationCommands);
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const report = buildReport({
+      id,
+      createdAt,
+      input,
+      mimoArgs,
+      requestedSkills: workflow.skillChain,
+      eventsStdout: mimoResult.stdout,
+      diff,
+      verification: [],
+      reportDir,
+      eventsDir,
+      diffsDir,
+      status: "failed",
+      gitStatusBefore,
+      gitStatusAfter,
+      error: `Verification execution failed: ${errorMessage}`
+    });
+    writeReport(report);
+    return report;
+  }
 
-  const status = determineStatus(mimo.exitCode, diff.changedFiles, verification);
+  const status = determineStatus(mimoResult.exitCode, diff.changedFiles, verification);
   const report = buildReport({
     id,
     createdAt,
     input,
     mimoArgs,
     requestedSkills: workflow.skillChain,
-    eventsStdout: mimo.stdout,
+    eventsStdout: mimoResult.stdout,
     diff,
     verification,
     reportDir,
     eventsDir,
-    status
+    diffsDir,
+    status,
+    gitStatusBefore,
+    gitStatusAfter
   });
 
   writeReport(report);
@@ -157,9 +257,21 @@ function buildReport(input: {
   verification: VerificationResult[];
   reportDir: string;
   eventsDir: string;
+  diffsDir: string;
   status: "passed" | "failed" | "needs_review";
+  gitStatusBefore?: GitStatusSnapshot;
+  gitStatusAfter?: GitStatusSnapshot;
+  error?: string;
 }): ComposeReport {
   const events = parseMimoJsonLines(input.eventsStdout);
+  const diffPath = input.diff.diff ? path.join(input.diffsDir, `${input.id}.diff`) : undefined;
+
+  if (diffPath && input.diff.diff) {
+    const fs = require("node:fs");
+    fs.mkdirSync(input.diffsDir, { recursive: true });
+    fs.writeFileSync(diffPath, input.diff.diff, "utf-8");
+  }
+
   return {
     id: input.id,
     createdAt: input.createdAt,
@@ -172,8 +284,12 @@ function buildReport(input: {
     events,
     changedFiles: input.diff.changedFiles,
     diffStat: input.diff.diffStat,
+    diffPath,
+    gitStatusBefore: input.gitStatusBefore,
+    gitStatusAfter: input.gitStatusAfter,
     verification: input.verification,
     reviewText: extractReviewText(events),
+    error: input.error,
     reportPaths: {
       json: path.join(input.reportDir, `${input.id}.json`),
       markdown: path.join(input.reportDir, `${input.id}.md`),

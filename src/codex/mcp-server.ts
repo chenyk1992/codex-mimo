@@ -113,6 +113,7 @@ export function createMcpServer(): McpServer {
       attach: z.string().optional().describe("Running MiMoCode server URL"),
       session: z.string().optional().describe("MiMoCode session ID"),
       fork: z.boolean().default(false),
+      continue: z.boolean().default(false).describe("Continue previous session"),
       verification: z.array(z.string()).optional().describe("Verification commands"),
       dryRun: z.boolean().default(false),
       reportDir: z.string().optional().describe("Report directory")

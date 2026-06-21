@@ -1797,3 +1797,52 @@ Use this one-liner in MiMoCode Compose mode:
 请严格按照 E:\ideaProjects\codex-mimo\doc\compose-workflow-launcher-iteration-plan.md 执行本轮迭代，优先实现 codex-mimo compose 工作流启动器、JSON 事件解析、git diff 捕获、验证命令执行和结构化报告生成，按任务顺序用 TDD 推进，每步运行对应测试并记录结果，不要扩展到完整 ACP 桥接或自动提交。
 ```
 
+---
+
+## 10. Execution Results
+
+**Executed:** 2026-06-21
+
+### Verification Summary
+
+| Check | Result |
+|-------|--------|
+| `npm run build` | ✅ Pass |
+| `npm run lint` | ✅ Pass |
+| `npm test` | ✅ 93 tests pass (15 test files) |
+| `codex-mimo compose --workflow dev --dry-run "smoke test"` | ✅ Report generated |
+
+### Reliability Improvements
+
+| Feature | Status |
+|---------|--------|
+| dry-run 落盘报告 | ✅ 已实现 |
+| MiMoCode 启动失败落盘报告 | ✅ 已实现 |
+| 运行异常落盘报告 | ✅ 已实现 |
+| 验证失败落盘报告 | ✅ 已实现 |
+| before/after git status | ✅ 已实现 |
+| 完整 diff 持久化路径 | ✅ 已实现 |
+| --continue 参数支持 | ✅ 已实现 |
+| 错误信息记录到报告 | ✅ 已实现 |
+
+### New Test Coverage
+
+| Test File | Tests Added |
+|-----------|-------------|
+| compose-runner.test.ts | +7 (error scenarios, --continue, git status) |
+| compose-report.test.ts | +3 (git status, diff path, error section) |
+| run-json.test.ts | +1 (--continue flag) |
+
+### Files Modified (Reliability Fix)
+
+- `src/compose/runner.ts` - Error handling, git status, diff persistence
+- `src/compose/report.ts` - GitStatusSnapshot, diffPath, error fields
+- `src/git/status.ts` - Added captureGitStatus export
+- `src/mimo/run-json.ts` - Added continue option
+- `src/cli/main.ts` - Added --continue flag parsing
+- `src/codex/tool-schemas.ts` - Added continue to ComposeInput
+- `src/codex/mcp-server.ts` - Added continue to mimo_compose tool
+- `test/unit/compose-runner.test.ts` - Comprehensive error scenario tests
+- `test/unit/compose-report.test.ts` - New field rendering tests
+- `test/unit/run-json.test.ts` - Continue flag test
+

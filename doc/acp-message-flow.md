@@ -1,13 +1,13 @@
-# ACP Message Flow
+# ACP 消息流
 
-## Overview
+## 概述
 
-ACP (Agent Communication Protocol) is a JSON-RPC protocol over stdio between a client and an agent.
+ACP（代理通信协议）是客户端与代理之间通过 stdio 传输的 JSON-RPC 协议。
 
-## Lifecycle
+## 生命周期
 
 ```
-Client                          Agent (MiMoCode)
+客户端                          代理 (MiMoCode)
   |                                |
   |--- initialize ---------------->|
   |<-- protocolVersion + caps -----|
@@ -25,7 +25,7 @@ Client                          Agent (MiMoCode)
   |                                |
 ```
 
-## Key Methods
+## 核心方法
 
 ### initialize
 
@@ -72,25 +72,25 @@ Client                          Agent (MiMoCode)
   "method": "session/prompt",
   "params": {
     "sessionId": "sess_abc123",
-    "prompt": [{ "type": "text", "text": "Fix the failing test." }]
+    "prompt": [{ "type": "text", "text": "修复失败的测试。" }]
   }
 }
 ```
 
-## Client-Side Handlers
+## 客户端处理器
 
-| ACP Method | Bridge Behavior |
+| ACP 方法 | 桥接行为 |
 |------------|-----------------|
-| `session/request_permission` | Evaluate policy, auto-allow safe ops |
-| `fs/read_text_file` | Normalize path, verify, return content |
-| `fs/write_text_file` | Normalize path, verify write permission, write |
-| `terminal/create` | Normalize cwd, validate command, start process |
-| `terminal/output` | Return stdout/stderr and exit status |
-| `terminal/wait_for_exit` | Await completion with timeout |
-| `terminal/kill` | Stop process |
-| `terminal/release` | Stop if running, release resources |
+| `session/request_permission` | 评估策略，自动允许安全操作 |
+| `fs/read_text_file` | 规范化路径，验证，返回内容 |
+| `fs/write_text_file` | 规范化路径，验证写入权限，执行写入 |
+| `terminal/create` | 规范化工作目录，验证命令，启动进程 |
+| `terminal/output` | 返回 stdout/stderr 和退出状态 |
+| `terminal/wait_for_exit` | 等待完成（带超时） |
+| `terminal/kill` | 停止进程 |
+| `terminal/release` | 如果正在运行则停止，释放资源 |
 
-## Event Types
+## 事件类型
 
 ```typescript
 type CodexMimoEvent =

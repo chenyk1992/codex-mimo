@@ -47,6 +47,7 @@ const attachFlag = command === "compose" ? extractFlag("--attach") : undefined;
 const reportDirFlag = command === "compose" ? extractFlag("--report-dir") : undefined;
 const verifyCommands = command === "compose" ? extractRepeatedFlag("--verify") : [];
 const forkFlag = command === "compose" ? hasFlag("--fork") : false;
+const continueFlag = command === "compose" ? hasFlag("--continue") : false;
 
 const task = rest.join(" ").trim();
 
@@ -109,6 +110,7 @@ if (command === "healthcheck") {
     attach: attachFlag,
     session: sessionFlag,
     fork: forkFlag,
+    continue: continueFlag,
     verification: verifyCommands.length > 0 ? verifyCommands : undefined,
     dryRun,
     reportDir: reportDirFlag

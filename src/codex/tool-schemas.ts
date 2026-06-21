@@ -45,6 +45,7 @@ export const ComposeInput = z.object({
   attach: z.string().optional(),
   session: z.string().optional(),
   fork: z.boolean().default(false),
+  continue: z.boolean().default(false),
   verification: z.array(z.string()).optional(),
   dryRun: z.boolean().default(false),
   reportDir: z.string().optional()

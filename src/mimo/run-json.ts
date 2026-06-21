@@ -8,6 +8,7 @@ export interface MimoRunOptions {
   title?: string;
   attach?: string;
   files?: string[];
+  continue?: boolean;
 }
 
 export function buildMimoRunArgs(options: MimoRunOptions): string[] {
@@ -18,6 +19,7 @@ export function buildMimoRunArgs(options: MimoRunOptions): string[] {
   if (options.fork) args.push("--fork");
   if (options.title) args.push("--title", options.title);
   if (options.attach) args.push("--attach", options.attach);
+  if (options.continue) args.push("--continue");
   for (const file of options.files ?? []) args.push("--file", file);
   args.push(options.message);
   return args;

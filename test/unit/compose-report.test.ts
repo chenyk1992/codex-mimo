@@ -37,4 +37,84 @@ describe("compose report", () => {
     expect(markdown).toContain("src/login.ts");
     expect(markdown).toContain("npm test");
   });
+
+  it("renders git status before and after", () => {
+    const markdown = renderMarkdownReport({
+      id: "run_2",
+      createdAt: "2026-06-21T18:40:00.000Z",
+      workflow: "dev",
+      cwd: "E:/project/app",
+      task: "Test task",
+      mimoArgs: ["run", "--agent", "compose"],
+      requestedSkills: ["compose:tdd"],
+      status: "passed",
+      events: [],
+      changedFiles: [],
+      diffStat: "",
+      verification: [],
+      gitStatusBefore: { short: " M src/a.ts", dirty: true },
+      gitStatusAfter: { short: "M  src/a.ts", dirty: true },
+      reportPaths: {
+        json: "report.json",
+        markdown: "report.md",
+        eventsJsonl: "events.jsonl"
+      }
+    });
+
+    expect(markdown).toContain("## Git Status (Before)");
+    expect(markdown).toContain("## Git Status (After)");
+    expect(markdown).toContain("M src/a.ts");
+  });
+
+  it("renders diff path when present", () => {
+    const markdown = renderMarkdownReport({
+      id: "run_3",
+      createdAt: "2026-06-21T18:40:00.000Z",
+      workflow: "dev",
+      cwd: "E:/project/app",
+      task: "Test task",
+      mimoArgs: ["run", "--agent", "compose"],
+      requestedSkills: ["compose:tdd"],
+      status: "passed",
+      events: [],
+      changedFiles: ["src/a.ts"],
+      diffStat: " src/a.ts | 5 +++++",
+      verification: [],
+      diffPath: ".codex-mimo/diffs/run_3.diff",
+      reportPaths: {
+        json: "report.json",
+        markdown: "report.md",
+        eventsJsonl: "events.jsonl"
+      }
+    });
+
+    expect(markdown).toContain("## Full Diff");
+    expect(markdown).toContain(".codex-mimo/diffs/run_3.diff");
+  });
+
+  it("renders error section when error present", () => {
+    const markdown = renderMarkdownReport({
+      id: "run_4",
+      createdAt: "2026-06-21T18:40:00.000Z",
+      workflow: "dev",
+      cwd: "E:/project/app",
+      task: "Test task",
+      mimoArgs: ["run", "--agent", "compose"],
+      requestedSkills: ["compose:tdd"],
+      status: "failed",
+      events: [],
+      changedFiles: [],
+      diffStat: "",
+      verification: [],
+      error: "MiMoCode startup failed: mimo not found",
+      reportPaths: {
+        json: "report.json",
+        markdown: "report.md",
+        eventsJsonl: "events.jsonl"
+      }
+    });
+
+    expect(markdown).toContain("## Error");
+    expect(markdown).toContain("MiMoCode startup failed: mimo not found");
+  });
 });

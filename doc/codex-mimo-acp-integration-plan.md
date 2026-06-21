@@ -1,43 +1,43 @@
-# Codex-MiMo ACP Integration Implementation Plan
+# Codex-MiMo ACP 集成实现计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **致智能体工作者：** 必须使用子技能：superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 来逐任务实施此计划。步骤使用复选框（`- [ ]`）语法进行跟踪。
 
-**Goal:** Build a practical bridge that lets Codex invoke MiMoCode during software development, first through a script-based MVP and then through a Codex plugin that drives MiMoCode over ACP.
+**目标：** 构建一个实用的桥接层，使 Codex 能在软件开发过程中调用 MiMoCode，首先通过基于脚本的 MVP 实现，然后通过 Codex 插件驱动 MiMoCode 的 ACP 通信。
 
-**Architecture:** Codex remains the orchestrator and reviewer. MiMoCode is treated as a specialist coding agent. The MVP invokes `mimo run --format json` for fast validation; the production path implements an ACP client bridge that launches `mimo acp`, manages sessions, handles file/terminal requests, enforces policy, and exposes high-level tools to Codex.
+**架构：** Codex 作为编排者和审查者。MiMoCode 被视为专业编码代理。MVP 通过 `mimo run --format json` 进行快速验证；生产路径实现 ACP 客户端桥接，启动 `mimo acp`，管理会话，处理文件/终端请求，强制执行策略，并向 Codex 暴露高级工具。
 
-**Tech Stack:** Node.js/TypeScript, MiMoCode CLI, ACP JSON-RPC over stdio, Codex plugin MCP server, JSONL logs, local policy config, Git-based diff verification.
-
----
-
-## 1. Background And Scope
-
-MiMoCode currently provides two useful integration surfaces:
-
-- `mimo run [message ..]`: non-interactive execution, supports `--format json`, `--agent`, `--model`, `--session`, `--continue`, `--fork`, `--file`, `--attach`, and `--dangerously-skip-permissions`.
-- `mimo acp`: ACP agent entry point, supports `--cwd`, `--port`, and `--hostname`.
-
-ACP is a JSON-RPC protocol between a client and an agent. A client initializes the agent, creates or resumes a session, sends prompts, receives streaming updates, and responds to agent requests such as permission checks, file reads/writes, and terminal execution.
-
-This project should produce:
-
-1. A script MVP named `codex-mimo` that Codex can call during development.
-2. A reusable ACP bridge library.
-3. A Codex plugin that exposes MiMoCode as tools such as `mimo_plan`, `mimo_implement`, and `mimo_review`.
-4. A security model that prevents MiMoCode from writing outside the project or running dangerous commands by default.
-
-Non-goals for the first release:
-
-- Do not implement a full UI.
-- Do not replace Codex's planning and verification loop.
-- Do not enable unconditional shell execution.
-- Do not require MiMoCode source modification.
+**技术栈：** Node.js/TypeScript、MiMoCode CLI、ACP JSON-RPC over stdio、Codex 插件 MCP 服务器、JSONL 日志、本地策略配置、基于 Git 的 diff 验证。
 
 ---
 
-## 2. Recommended Repository Layout
+## 1. 背景与范围
 
-Create the project under `E:\ideaProjects\codex-mimo`.
+MiMoCode 目前提供两个有用的集成接口：
+
+- `mimo run [message ..]`：非交互式执行，支持 `--format json`、`--agent`、`--model`、`--session`、`--continue`、`--fork`、`--file`、`--attach` 和 `--dangerously-skip-permissions`。
+- `mimo acp`：ACP 代理入口，支持 `--cwd`、`--port` 和 `--hostname`。
+
+ACP 是客户端与代理之间的 JSON-RPC 协议。客户端初始化代理、创建或恢复会话、发送提示、接收流式更新，并响应代理请求（如权限检查、文件读写和终端执行）。
+
+本项目应产出：
+
+1. 一个名为 `codex-mimo` 的脚本 MVP，供 Codex 在开发过程中调用。
+2. 一个可复用的 ACP 桥接库。
+3. 一个 Codex 插件，将 MiMoCode 暴露为 `mimo_plan`、`mimo_implement` 和 `mimo_review` 等工具。
+4. 一个安全模型，默认阻止 MiMoCode 写入项目外或运行危险命令。
+
+首版非目标：
+
+- 不实现完整 UI。
+- 不替换 Codex 的规划和验证循环。
+- 不启用无条件 shell 执行。
+- 不要求修改 MiMoCode 源码。
+
+---
+
+## 2. 推荐仓库结构
+
+在 `E:\ideaProjects\codex-mimo` 下创建项目。
 
 ```text
 codex-mimo/
@@ -89,71 +89,71 @@ codex-mimo/
         codex-mimo-cli.test.ts
 ```
 
-### File Responsibilities
+### 文件职责
 
-- `src/cli/main.ts`: CLI entry point for `codex-mimo`.
-- `src/cli/commands.ts`: maps CLI subcommands to core workflows.
-- `src/cli/output.ts`: prints human-readable or JSON output.
-- `src/core/config.ts`: loads project config from `codex-mimo.config.json`.
-- `src/core/policy.ts`: evaluates file and terminal permissions.
-- `src/core/paths.ts`: normalizes and validates absolute paths.
-- `src/core/prompt.ts`: builds prompts for plan, implement, review, and fix-ci workflows.
-- `src/core/sessions.ts`: stores MiMoCode session IDs and metadata.
-- `src/mimo/run-json.ts`: wraps `mimo run --format json`.
-- `src/mimo/acp-client.ts`: JSON-RPC ACP client.
-- `src/mimo/acp-process.ts`: starts and supervises `mimo acp`.
-- `src/mimo/acp-types.ts`: local ACP TypeScript types for methods used by this bridge.
-- `src/mimo/acp-updates.ts`: converts ACP updates into Codex-friendly events.
-- `src/codex/mcp-server.ts`: MCP server exposed by the Codex plugin.
-- `src/codex/tools.ts`: high-level tools such as `mimo_plan` and `mimo_implement`.
-- `src/codex/tool-schemas.ts`: input schemas for Codex-facing tools.
-- `src/git/diff.ts`: captures before/after diffs.
-- `src/git/status.ts`: captures dirty worktree state.
+- `src/cli/main.ts`：`codex-mimo` 的 CLI 入口。
+- `src/cli/commands.ts`：将 CLI 子命令映射到核心工作流。
+- `src/cli/output.ts`：打印人类可读或 JSON 输出。
+- `src/core/config.ts`：从 `codex-mimo.config.json` 加载项目配置。
+- `src/core/policy.ts`：评估文件和终端权限。
+- `src/core/paths.ts`：规范化和验证绝对路径。
+- `src/core/prompt.ts`：为 plan、implement、review 和 fix-ci 工作流构建提示。
+- `src/core/sessions.ts`：存储 MiMoCode 会话 ID 和元数据。
+- `src/mimo/run-json.ts`：封装 `mimo run --format json`。
+- `src/mimo/acp-client.ts`：JSON-RPC ACP 客户端。
+- `src/mimo/acp-process.ts`：启动和管理 `mimo acp` 进程。
+- `src/mimo/acp-types.ts`：本桥接使用的 ACP 方法的本地 TypeScript 类型。
+- `src/mimo/acp-updates.ts`：将 ACP 更新转换为 Codex 友好的事件。
+- `src/codex/mcp-server.ts`：Codex 插件暴露的 MCP 服务器。
+- `src/codex/tools.ts`：`mimo_plan` 和 `mimo_implement` 等高级工具。
+- `src/codex/tool-schemas.ts`：面向 Codex 的工具输入 schema。
+- `src/git/diff.ts`：捕获前后 diff。
+- `src/git/status.ts`：捕获脏工作区状态。
 
 ---
 
-## 3. Product Design
+## 3. 产品设计
 
-Codex should not hand over the entire task blindly. The intended collaboration model is:
+Codex 不应盲目移交整个任务。预期的协作模型是：
 
-1. Codex receives the user's development request.
-2. Codex determines whether MiMoCode is useful.
-3. Codex calls MiMoCode for specialized codebase work.
-4. MiMoCode proposes or applies changes.
-5. Codex verifies, reviews, and reports the outcome.
+1. Codex 接收用户的开发请求。
+2. Codex 判断 MiMoCode 是否有用。
+3. Codex 调用 MiMoCode 进行专业的代码库工作。
+4. MiMoCode 提议或应用变更。
+5. Codex 验证、审查并报告结果。
 
-### Roles
+### 角色
 
-| Role | Responsibility |
+| 角色 | 职责 |
 | --- | --- |
-| User | Defines product intent and approves risky operations |
-| Codex | Orchestrates task, validates outputs, runs final verification |
-| Codex-MiMo bridge | Translates Codex tool calls into MiMoCode CLI/ACP interactions |
-| MiMoCode | Explores repo, plans code changes, edits files, runs narrow checks |
-| Policy layer | Controls paths, commands, permissions, and session scope |
+| 用户 | 定义产品意图并批准高风险操作 |
+| Codex | 编排任务，验证输出，运行最终验证 |
+| Codex-MiMo 桥接 | 将 Codex 工具调用转换为 MiMoCode CLI/ACP 交互 |
+| MiMoCode | 探索仓库，规划代码变更，编辑文件，运行精确检查 |
+| 策略层 | 控制路径、命令、权限和会话范围 |
 
-### Workflows
+### 工作流
 
-| Workflow | First implementation | Production implementation |
+| 工作流 | 首版实现 | 生产实现 |
 | --- | --- | --- |
-| Plan | `mimo run --agent plan --format json` | ACP `session/prompt` with plan mode |
-| Implement | `mimo run --agent build --format json` | ACP session with fs/terminal policy enforcement |
-| Review | `mimo run --agent plan --format json` with git diff prompt | ACP prompt with embedded diff/resource |
-| Fix CI | `mimo run --file ci.log --format json` | ACP prompt with CI log resource |
-| Resume | `mimo run --session <id>` | ACP `session/load` or `session/resume` when supported |
+| 规划 | `mimo run --agent plan --format json` | ACP `session/prompt` 使用 plan 模式 |
+| 实现 | `mimo run --agent build --format json` | ACP 会话，带 fs/terminal 策略执行 |
+| 审查 | `mimo run --agent plan --format json` 配合 git diff 提示 | ACP 提示，嵌入 diff/资源 |
+| 修复 CI | `mimo run --file ci.log --format json` | ACP 提示，附带 CI 日志资源 |
+| 恢复 | `mimo run --session <id>` | ACP `session/load` 或 `session/resume`（支持时） |
 
 ---
 
-## 4. Security Model
+## 4. 安全模型
 
-The bridge must be conservative by default. There are two layers of protection:
+桥接层必须默认保守。有两层保护：
 
-1. MiMoCode permission configuration.
-2. Bridge-side policy enforcement.
+1. MiMoCode 权限配置。
+2. 桥接侧策略执行。
 
-The bridge-side policy is mandatory because ACP allows the agent to request client filesystem and terminal operations.
+桥接侧策略是强制的，因为 ACP 允许代理请求客户端文件系统和终端操作。
 
-### Default Policy
+### 默认策略
 
 ```jsonc
 {
@@ -208,22 +208,22 @@ The bridge-side policy is mandatory because ACP allows the agent to request clie
 }
 ```
 
-### Permission Decisions
+### 权限决策
 
-| Request | Default outcome |
+| 请求 | 默认结果 |
 | --- | --- |
-| Read file under workspace | allow |
-| Read `.env` or secret-like file | deny |
-| Write file under workspace | ask in interactive mode, deny in CI unless explicitly enabled |
-| Write outside workspace | deny |
-| Run tests/lint/typecheck | allow |
-| Install packages | ask |
-| Push/reset/delete | deny |
-| Network fetch | deny unless workflow explicitly enables it |
+| 读取工作区内文件 | 允许 |
+| 读取 `.env` 或类似密钥的文件 | 拒绝 |
+| 写入工作区内文件 | 交互模式下询问，CI 模式下拒绝（除非显式启用） |
+| 写入工作区外 | 拒绝 |
+| 运行测试/lint/类型检查 | 允许 |
+| 安装包 | 询问 |
+| 推送/重置/删除 | 拒绝 |
+| 网络请求 | 拒绝，除非工作流明确启用 |
 
-### Required Audit Events
+### 必需审计事件
 
-Every invocation should write a JSONL audit log:
+每次调用都应写入 JSONL 审计日志：
 
 ```json
 {"type":"session_start","workflow":"implement","cwd":"E:/project/app","agent":"build"}
@@ -234,51 +234,51 @@ Every invocation should write a JSONL audit log:
 
 ---
 
-## 5. CLI MVP Specification
+## 5. CLI MVP 规范
 
-The MVP CLI should be useful even before ACP is fully implemented.
+MVP CLI 应在 ACP 完全实现之前就能使用。
 
-### Commands
+### 命令
 
 ```bash
 codex-mimo healthcheck
-codex-mimo plan "Add login rate limiting"
-codex-mimo implement "Fix failing user-session test"
+codex-mimo plan "添加登录速率限制"
+codex-mimo implement "修复失败的用户会话测试"
 codex-mimo review --since HEAD
 codex-mimo fix-ci --file ./ci.log
-codex-mimo resume --session <mimo-session-id> "Continue the previous task"
+codex-mimo resume --session <mimo-session-id> "继续之前的任务"
 ```
 
-### CLI Options
+### CLI 选项
 
 ```text
---cwd <path>              Project root. Defaults to process cwd.
---agent <name>            MiMoCode agent. Defaults by workflow.
---model <provider/model>  Optional model override.
---json                    Output machine-readable JSON.
---dry-run                 Build and print the MiMoCode command without executing it.
---session <id>            Continue a MiMoCode session.
---fork                    Fork the session when continuing.
---allow-write             Allow MiMoCode to write files.
---allow-install           Allow package install commands.
---log-dir <path>          Directory for JSONL logs.
+--cwd <path>              项目根目录。默认为进程 cwd。
+--agent <name>            MiMoCode 代理。按工作流默认。
+--model <provider/model>  可选的模型覆盖。
+--json                    输出机器可读的 JSON。
+--dry-run                 构建并打印 MiMoCode 命令但不执行。
+--session <id>            继续 MiMoCode 会话。
+--fork                    继续时 fork 会话。
+--allow-write             允许 MiMoCode 写入文件。
+--allow-install           允许包安装命令。
+--log-dir <path>          JSONL 日志目录。
 ```
 
-### Command Mapping
+### 命令映射
 
-`plan` should call:
+`plan` 应调用：
 
 ```bash
 mimo run --format json --agent plan --title "codex-mimo plan" "<prompt>"
 ```
 
-`implement` should call:
+`implement` 应调用：
 
 ```bash
 mimo run --format json --agent build --title "codex-mimo implement" "<prompt>"
 ```
 
-`review` should call:
+`review` 应调用：
 
 ```bash
 git diff --stat HEAD
@@ -286,13 +286,13 @@ git diff HEAD
 mimo run --format json --agent plan --title "codex-mimo review" "<prompt with diff summary>"
 ```
 
-`fix-ci` should call:
+`fix-ci` 应调用：
 
 ```bash
 mimo run --format json --agent build --file ./ci.log --title "codex-mimo fix-ci" "<prompt>"
 ```
 
-### Prompt Template: Plan
+### 提示模板：Plan
 
 ```text
 You are being invoked by Codex as a specialist MiMoCode planning agent.
@@ -308,7 +308,7 @@ Rules:
 - If the task is ambiguous, state assumptions instead of broadening scope.
 ```
 
-### Prompt Template: Implement
+### 提示模板：Implement
 
 ```text
 You are being invoked by Codex as a specialist MiMoCode implementation agent.
@@ -324,7 +324,7 @@ Rules:
 - Return changed files, commands run, results, and remaining risks.
 ```
 
-### Prompt Template: Review
+### 提示模板：Review
 
 ```text
 You are being invoked by Codex as a specialist MiMoCode review agent.
@@ -341,15 +341,15 @@ Rules:
 
 ---
 
-## 6. ACP Bridge Specification
+## 6. ACP 桥接规范
 
-The ACP bridge is the production integration layer. It should run MiMoCode as a subprocess:
+ACP 桥接是生产集成层。它应将 MiMoCode 作为子进程运行：
 
 ```bash
 mimo acp --cwd <absolute-project-root>
 ```
 
-### Minimum ACP Lifecycle
+### 最小 ACP 生命周期
 
 ```mermaid
 sequenceDiagram
@@ -375,7 +375,7 @@ sequenceDiagram
     Bridge-->>Codex: summary + events + changed files
 ```
 
-### Initialization Request
+### 初始化请求
 
 ```json
 {
@@ -400,7 +400,7 @@ sequenceDiagram
 }
 ```
 
-### Session New Request
+### 新建会话请求
 
 ```json
 {
@@ -414,7 +414,7 @@ sequenceDiagram
 }
 ```
 
-### Prompt Request
+### 提示请求
 
 ```json
 {
@@ -426,31 +426,31 @@ sequenceDiagram
     "prompt": [
       {
         "type": "text",
-        "text": "Fix the failing user-session test. Keep changes surgical."
+        "text": "修复失败的用户会话测试。保持变更精确。"
       }
     ]
   }
 }
 ```
 
-### Client-Side Request Handlers
+### 客户端请求处理器
 
-The bridge must handle these agent-to-client requests:
+桥接层必须处理以下代理到客户端的请求：
 
-| ACP method | Bridge behavior |
+| ACP 方法 | 桥接行为 |
 | --- | --- |
-| `session/request_permission` | Evaluate policy, auto-allow safe operations, reject dangerous operations, optionally ask user in interactive mode |
-| `fs/read_text_file` | Normalize path, verify it is allowed, return content |
-| `fs/write_text_file` | Normalize path, verify write permission, write content, record audit event |
-| `terminal/create` | Normalize cwd, validate command, start process, return terminal ID |
-| `terminal/output` | Return captured stdout/stderr and exit status |
-| `terminal/wait_for_exit` | Await process completion with timeout |
-| `terminal/kill` | Stop process |
-| `terminal/release` | Stop if still running, release resources |
+| `session/request_permission` | 评估策略，自动允许安全操作，拒绝危险操作，交互模式下可选询问用户 |
+| `fs/read_text_file` | 规范化路径，验证是否允许，返回内容 |
+| `fs/write_text_file` | 规范化路径，验证写入权限，写入内容，记录审计事件 |
+| `terminal/create` | 规范化工作目录，验证命令，启动进程，返回终端 ID |
+| `terminal/output` | 返回捕获的 stdout/stderr 和退出状态 |
+| `terminal/wait_for_exit` | 等待进程完成（带超时） |
+| `terminal/kill` | 停止进程 |
+| `terminal/release` | 如果仍在运行则停止，释放资源 |
 
-### Event Conversion
+### 事件转换
 
-ACP `session/update` events should become Codex-MiMo events:
+ACP `session/update` 事件应转换为 Codex-MiMo 事件：
 
 ```ts
 type CodexMimoEvent =
@@ -464,11 +464,11 @@ type CodexMimoEvent =
 
 ---
 
-## 7. Codex Plugin Specification
+## 7. Codex 插件规范
 
-The plugin should expose a local MCP server to Codex.
+插件应向 Codex 暴露本地 MCP 服务器。
 
-### Plugin Layout
+### 插件结构
 
 ```text
 codex-mimocode-plugin/
@@ -489,11 +489,11 @@ codex-mimocode-plugin/
       index.ts
 ```
 
-### MCP Tool Surface
+### MCP 工具接口
 
 #### `mimo_healthcheck`
 
-Input:
+输入：
 
 ```json
 {
@@ -501,7 +501,7 @@ Input:
 }
 ```
 
-Output:
+输出：
 
 ```json
 {
@@ -515,18 +515,18 @@ Output:
 
 #### `mimo_plan`
 
-Input:
+输入：
 
 ```json
 {
   "cwd": "E:/ideaProjects/example-app",
-  "task": "Add login rate limiting",
+  "task": "添加登录速率限制",
   "agent": "plan",
   "model": "mimo/mimo-v2.5-pro"
 }
 ```
 
-Output:
+输出：
 
 ```json
 {
@@ -540,18 +540,18 @@ Output:
 
 #### `mimo_implement`
 
-Input:
+输入：
 
 ```json
 {
   "cwd": "E:/ideaProjects/example-app",
-  "task": "Fix failing user-session test",
+  "task": "修复失败的用户会话测试",
   "allowWrite": true,
   "allowInstall": false
 }
 ```
 
-Output:
+输出：
 
 ```json
 {
@@ -570,7 +570,7 @@ Output:
 
 #### `mimo_review`
 
-Input:
+输入：
 
 ```json
 {
@@ -579,7 +579,7 @@ Input:
 }
 ```
 
-Output:
+输出：
 
 ```json
 {
@@ -591,24 +591,24 @@ Output:
       "message": "Token expiry check does not cover clock skew."
     }
   ],
-  "summary": "One medium issue found."
+  "summary": "发现一个中等问题。"
 }
 ```
 
 ---
 
-## 8. Implementation Tasks
+## 8. 实现任务
 
-### Task 1: Initialize TypeScript Project
+### 任务 1：初始化 TypeScript 项目
 
-**Files:**
+**涉及文件：**
 
-- Create: `package.json`
-- Create: `tsconfig.json`
-- Create: `vitest.config.ts`
-- Create: `.gitignore`
+- 创建：`package.json`
+- 创建：`tsconfig.json`
+- 创建：`vitest.config.ts`
+- 创建：`.gitignore`
 
-- [ ] **Step 1: Create `package.json`**
+- [ ] **步骤 1：创建 `package.json`**
 
 ```json
 {
@@ -638,7 +638,7 @@ Output:
 }
 ```
 
-- [ ] **Step 2: Create `tsconfig.json`**
+- [ ] **步骤 2：创建 `tsconfig.json`**
 
 ```json
 {
@@ -658,7 +658,7 @@ Output:
 }
 ```
 
-- [ ] **Step 3: Create `vitest.config.ts`**
+- [ ] **步骤 3：创建 `vitest.config.ts`**
 
 ```ts
 import { defineConfig } from "vitest/config";
@@ -671,7 +671,7 @@ export default defineConfig({
 });
 ```
 
-- [ ] **Step 4: Create `.gitignore`**
+- [ ] **步骤 4：创建 `.gitignore`**
 
 ```text
 node_modules/
@@ -680,30 +680,30 @@ dist/
 *.log
 ```
 
-- [ ] **Step 5: Verify project skeleton**
+- [ ] **步骤 5：验证项目骨架**
 
-Run:
+运行：
 
 ```bash
 npm install
 npm run build
 ```
 
-Expected:
+预期：
 
 ```text
-No TypeScript errors after source files are added in later tasks.
+后续任务添加源文件后无 TypeScript 错误。
 ```
 
-### Task 2: Implement Path Policy
+### 任务 2：实现路径策略
 
-**Files:**
+**涉及文件：**
 
-- Create: `src/core/paths.ts`
-- Create: `src/core/policy.ts`
-- Test: `test/unit/policy.test.ts`
+- 创建：`src/core/paths.ts`
+- 创建：`src/core/policy.ts`
+- 测试：`test/unit/policy.test.ts`
 
-- [ ] **Step 1: Create path helpers**
+- [ ] **步骤 1：创建路径辅助函数**
 
 ```ts
 // src/core/paths.ts
@@ -723,7 +723,7 @@ export function isPathInside(parent: string, child: string): boolean {
 }
 ```
 
-- [ ] **Step 2: Create policy evaluator**
+- [ ] **步骤 2：创建策略评估器**
 
 ```ts
 // src/core/policy.ts
@@ -799,7 +799,7 @@ export function decideCommand(policy: BridgePolicy, commandLine: string): Decisi
 }
 ```
 
-- [ ] **Step 3: Add policy tests**
+- [ ] **步骤 3：添加策略测试**
 
 ```ts
 // test/unit/policy.test.ts
@@ -814,54 +814,54 @@ import {
 describe("policy", () => {
   const policy = defaultPolicy("E:/project/app");
 
-  it("allows normal reads inside the workspace", () => {
+  it("允许工作区内的正常读取", () => {
     expect(decideFileRead(policy, "E:/project/app/src/index.ts")).toBe("allow");
   });
 
-  it("denies secret reads", () => {
+  it("拒绝读取密钥文件", () => {
     expect(decideFileRead(policy, "E:/project/app/.env")).toBe("deny");
   });
 
-  it("denies writes outside the workspace", () => {
+  it("拒绝工作区外的写入", () => {
     expect(decideFileWrite(policy, "E:/other/app/src/index.ts")).toBe("deny");
   });
 
-  it("asks before normal writes", () => {
+  it("正常写入前询问", () => {
     expect(decideFileWrite(policy, "E:/project/app/src/index.ts")).toBe("ask");
   });
 
-  it("allows safe verification commands", () => {
+  it("允许安全的验证命令", () => {
     expect(decideCommand(policy, "npm test -- session.test.ts")).toBe("allow");
   });
 
-  it("denies dangerous git commands", () => {
+  it("拒绝危险的 git 命令", () => {
     expect(decideCommand(policy, "git push origin main")).toBe("deny");
   });
 });
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **步骤 4：运行测试**
 
-Run:
+运行：
 
 ```bash
 npm test -- policy.test.ts
 ```
 
-Expected:
+预期：
 
 ```text
-6 tests pass.
+6 个测试通过。
 ```
 
-### Task 3: Implement `mimo run --format json` Wrapper
+### 任务 3：实现 `mimo run --format json` 封装
 
-**Files:**
+**涉及文件：**
 
-- Create: `src/mimo/run-json.ts`
-- Test: `test/unit/run-json.test.ts`
+- 创建：`src/mimo/run-json.ts`
+- 测试：`test/unit/run-json.test.ts`
 
-- [ ] **Step 1: Define wrapper types and command builder**
+- [ ] **步骤 1：定义封装类型和命令构建器**
 
 ```ts
 // src/mimo/run-json.ts
@@ -887,7 +887,7 @@ export function buildMimoRunArgs(options: MimoRunOptions): string[] {
 }
 ```
 
-- [ ] **Step 2: Add command builder test**
+- [ ] **步骤 2：添加命令构建器测试**
 
 ```ts
 // test/unit/run-json.test.ts
@@ -895,7 +895,7 @@ import { describe, expect, it } from "vitest";
 import { buildMimoRunArgs } from "../../src/mimo/run-json.js";
 
 describe("buildMimoRunArgs", () => {
-  it("builds a basic plan command", () => {
+  it("构建基本的 plan 命令", () => {
     expect(
       buildMimoRunArgs({
         cwd: "E:/project/app",
@@ -905,7 +905,7 @@ describe("buildMimoRunArgs", () => {
     ).toEqual(["run", "--format", "json", "--agent", "plan", "Plan the login change"]);
   });
 
-  it("includes session, fork, model, and files", () => {
+  it("包含 session、fork、model 和 files", () => {
     expect(
       buildMimoRunArgs({
         cwd: "E:/project/app",
@@ -935,29 +935,29 @@ describe("buildMimoRunArgs", () => {
 });
 ```
 
-- [ ] **Step 3: Run tests**
+- [ ] **步骤 3：运行测试**
 
-Run:
+运行：
 
 ```bash
 npm test -- run-json.test.ts
 ```
 
-Expected:
+预期：
 
 ```text
-2 tests pass.
+2 个测试通过。
 ```
 
-### Task 4: Implement CLI Commands
+### 任务 4：实现 CLI 命令
 
-**Files:**
+**涉及文件：**
 
-- Create: `src/cli/main.ts`
-- Create: `src/cli/commands.ts`
-- Create: `src/core/prompt.ts`
+- 创建：`src/cli/main.ts`
+- 创建：`src/cli/commands.ts`
+- 创建：`src/core/prompt.ts`
 
-- [ ] **Step 1: Create prompt builders**
+- [ ] **步骤 1：创建提示构建器**
 
 ```ts
 // src/core/prompt.ts
@@ -994,7 +994,7 @@ export function implementPrompt(task: string): string {
 }
 ```
 
-- [ ] **Step 2: Create command dispatcher**
+- [ ] **步骤 2：创建命令分发器**
 
 ```ts
 // src/cli/commands.ts
@@ -1023,7 +1023,7 @@ export async function runImplement(cwd: string, task: string): Promise<void> {
 }
 ```
 
-- [ ] **Step 3: Create CLI entrypoint**
+- [ ] **步骤 3：创建 CLI 入口**
 
 ```ts
 // src/cli/main.ts
@@ -1049,29 +1049,29 @@ if (command === "plan") {
 }
 ```
 
-- [ ] **Step 4: Build CLI**
+- [ ] **步骤 4：构建 CLI**
 
-Run:
+运行：
 
 ```bash
 npm run build
 ```
 
-Expected:
+预期：
 
 ```text
-dist/cli/main.js is generated.
+生成 dist/cli/main.js。
 ```
 
-### Task 5: Implement ACP Client Skeleton
+### 任务 5：实现 ACP 客户端骨架
 
-**Files:**
+**涉及文件：**
 
-- Create: `src/mimo/acp-types.ts`
-- Create: `src/mimo/acp-client.ts`
-- Test: `test/unit/acp-client.test.ts`
+- 创建：`src/mimo/acp-types.ts`
+- 创建：`src/mimo/acp-client.ts`
+- 测试：`test/unit/acp-client.test.ts`
 
-- [ ] **Step 1: Define minimal ACP types**
+- [ ] **步骤 1：定义最小 ACP 类型**
 
 ```ts
 // src/mimo/acp-types.ts
@@ -1102,7 +1102,7 @@ export interface JsonRpcNotification {
 export type JsonRpcMessage = JsonRpcRequest | JsonRpcResponse | JsonRpcNotification;
 ```
 
-- [ ] **Step 2: Implement line framing parser**
+- [ ] **步骤 2：实现行帧解析器**
 
 ```ts
 // src/mimo/acp-client.ts
@@ -1131,7 +1131,7 @@ export function encodeMessage(message: JsonRpcMessage): string {
 }
 ```
 
-- [ ] **Step 3: Test line parser**
+- [ ] **步骤 3：测试行解析器**
 
 ```ts
 // test/unit/acp-client.test.ts
@@ -1139,7 +1139,7 @@ import { describe, expect, it } from "vitest";
 import { encodeMessage, JsonRpcLineParser } from "../../src/mimo/acp-client.js";
 
 describe("JsonRpcLineParser", () => {
-  it("parses newline-delimited JSON-RPC messages", () => {
+  it("解析换行分隔的 JSON-RPC 消息", () => {
     const parser = new JsonRpcLineParser();
     const messages = parser.push(
       '{"jsonrpc":"2.0","id":1,"result":{}}\n{"jsonrpc":"2.0","method":"session/update","params":{}}\n'
@@ -1147,13 +1147,13 @@ describe("JsonRpcLineParser", () => {
     expect(messages).toHaveLength(2);
   });
 
-  it("buffers partial messages", () => {
+  it("缓冲部分消息", () => {
     const parser = new JsonRpcLineParser();
     expect(parser.push('{"jsonrpc":"2.0"')).toEqual([]);
     expect(parser.push(',"id":1,"result":{}}\n')).toHaveLength(1);
   });
 
-  it("encodes messages with newline delimiter", () => {
+  it("使用换行分隔符编码消息", () => {
     expect(encodeMessage({ jsonrpc: "2.0", id: 1, method: "initialize" })).toBe(
       '{"jsonrpc":"2.0","id":1,"method":"initialize"}\n'
     );
@@ -1161,27 +1161,27 @@ describe("JsonRpcLineParser", () => {
 });
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **步骤 4：运行测试**
 
-Run:
+运行：
 
 ```bash
 npm test -- acp-client.test.ts
 ```
 
-Expected:
+预期：
 
 ```text
-3 tests pass.
+3 个测试通过。
 ```
 
-### Task 6: Implement ACP Process Supervisor
+### 任务 6：实现 ACP 进程管理器
 
-**Files:**
+**涉及文件：**
 
-- Create: `src/mimo/acp-process.ts`
+- 创建：`src/mimo/acp-process.ts`
 
-- [ ] **Step 1: Create process launcher**
+- [ ] **步骤 1：创建进程启动器**
 
 ```ts
 // src/mimo/acp-process.ts
@@ -1213,29 +1213,29 @@ export function startMimoAcp(cwd: string): AcpProcess {
 }
 ```
 
-- [ ] **Step 2: Add manual smoke test command**
+- [ ] **步骤 2：添加手动冒烟测试命令**
 
-Run:
+运行：
 
 ```bash
 node -e "console.log('Use npm run build, then invoke startMimoAcp from a local script when mimo is installed')"
 ```
 
-Expected:
+预期：
 
 ```text
-The code compiles. Real ACP smoke test requires MiMoCode installed and authenticated.
+代码编译通过。真实 ACP 冒烟测试需要安装并认证 MiMoCode。
 ```
 
-### Task 7: Implement Codex MCP Tool Surface
+### 任务 7：实现 Codex MCP 工具接口
 
-**Files:**
+**涉及文件：**
 
-- Create: `src/codex/tool-schemas.ts`
-- Create: `src/codex/tools.ts`
-- Create: `src/codex/mcp-server.ts`
+- 创建：`src/codex/tool-schemas.ts`
+- 创建：`src/codex/tools.ts`
+- 创建：`src/codex/mcp-server.ts`
 
-- [ ] **Step 1: Define tool schemas**
+- [ ] **步骤 1：定义工具 schema**
 
 ```ts
 // src/codex/tool-schemas.ts
@@ -1256,7 +1256,7 @@ export const ImplementInput = z.object({
 });
 ```
 
-- [ ] **Step 2: Implement tool functions using MVP wrapper**
+- [ ] **步骤 2：使用 MVP 封装实现工具函数**
 
 ```ts
 // src/codex/tools.ts
@@ -1287,9 +1287,9 @@ export async function mimoImplement(input: unknown) {
 }
 ```
 
-- [ ] **Step 3: Implement MCP server after selecting the MCP SDK**
+- [ ] **步骤 3：选择 MCP SDK 后实现 MCP 服务器**
 
-Use the official MCP TypeScript SDK selected by the project. Register:
+使用项目选定的官方 MCP TypeScript SDK。注册：
 
 ```text
 mimo_healthcheck
@@ -1300,21 +1300,21 @@ mimo_fix_ci
 mimo_resume
 ```
 
-Expected behavior:
+预期行为：
 
 ```text
-Codex can discover the tools and call mimo_plan/mimo_implement from the plugin.
+Codex 可以发现工具并从插件中调用 mimo_plan/mimo_implement。
 ```
 
-### Task 8: Add MiMoCode Project Configuration Template
+### 任务 8：添加 MiMoCode 项目配置模板
 
-**Files:**
+**涉及文件：**
 
-- Create: `templates/mimocode.jsonc`
-- Create: `templates/agents/review.md`
-- Create: `templates/commands/codex-review.md`
+- 创建：`templates/mimocode.jsonc`
+- 创建：`templates/agents/review.md`
+- 创建：`templates/commands/codex-review.md`
 
-- [ ] **Step 1: Create `templates/mimocode.jsonc`**
+- [ ] **步骤 1：创建 `templates/mimocode.jsonc`**
 
 ```jsonc
 {
@@ -1367,7 +1367,7 @@ Codex can discover the tools and call mimo_plan/mimo_implement from the plugin.
 }
 ```
 
-- [ ] **Step 2: Create review agent template**
+- [ ] **步骤 2：创建审查代理模板**
 
 ```markdown
 ---
@@ -1396,7 +1396,7 @@ Focus on:
 Do not edit files. Report findings with file and line references when possible.
 ```
 
-- [ ] **Step 3: Create review command template**
+- [ ] **步骤 3：创建审查命令模板**
 
 ```markdown
 ---
@@ -1415,17 +1415,17 @@ Current diff:
 Return findings ordered by severity. Do not edit files.
 ```
 
-### Task 9: Verification And Release Checklist
+### 任务 9：验证与发布清单
 
-**Files:**
+**涉及文件：**
 
-- Modify: `README.md`
-- Create: `doc/policy-guide.md`
-- Create: `doc/acp-message-flow.md`
+- 修改：`README.md`
+- 创建：`doc/policy-guide.md`
+- 创建：`doc/acp-message-flow.md`
 
-- [ ] **Step 1: Document setup**
+- [ ] **步骤 1：文档设置**
 
-Add to `README.md`:
+添加到 `README.md`：
 
 ```markdown
 # Codex MiMoCode Bridge
@@ -1458,39 +1458,39 @@ The bridge denies writes outside the workspace and denies secret-like file reads
 ```
 ```
 
-- [ ] **Step 2: Run full verification**
+- [ ] **步骤 2：运行完整验证**
 
-Run:
+运行：
 
 ```bash
 npm run build
 npm test
 ```
 
-Expected:
+预期：
 
 ```text
-TypeScript build passes.
-All unit tests pass.
+TypeScript 构建通过。
+所有单元测试通过。
 ```
 
-- [ ] **Step 3: Manual MiMoCode smoke test**
+- [ ] **步骤 3：手动 MiMoCode 冒烟测试**
 
-Run inside a disposable test repo:
+在一次性测试仓库中运行：
 
 ```bash
 codex-mimo plan "Find the smallest useful test command for this project"
 ```
 
-Expected:
+预期：
 
 ```text
-MiMoCode returns a plan and does not modify files.
+MiMoCode 返回计划且不修改文件。
 ```
 
-- [ ] **Step 4: Manual implementation smoke test**
+- [ ] **步骤 4：手动实现冒烟测试**
 
-Run inside a disposable test repo:
+在一次性测试仓库中运行：
 
 ```bash
 git status --short
@@ -1498,135 +1498,134 @@ codex-mimo implement "Add a README sentence saying this is a smoke test project"
 git diff
 ```
 
-Expected:
+预期：
 
 ```text
-Only README.md changes.
-No commit is created.
-No files outside the repo are touched.
+仅 README.md 变更。
+未创建提交。
+未触及仓库外的文件。
 ```
 
 ---
 
-## 9. Rollout Plan
+## 9. 上线计划
 
-### Phase 0: Environment Confirmation
+### 阶段 0：环境确认
 
-- Confirm `mimo --version`.
-- Confirm `mimo auth list`.
-- Confirm `mimo run --format json "Say hello"` works.
-- Confirm `mimo acp --cwd <project>` starts without immediate failure.
+- 确认 `mimo --version`。
+- 确认 `mimo auth list`。
+- 确认 `mimo run --format json "Say hello"` 可用。
+- 确认 `mimo acp --cwd <project>` 启动后不会立即失败。
 
-Exit criteria:
+退出标准：
 
-- MiMoCode CLI is usable on target developer machines.
-- Authentication is configured.
-- One JSON-mode command succeeds.
+- MiMoCode CLI 在目标开发机器上可用。
+- 认证已配置。
+- 一条 JSON 模式命令执行成功。
 
-### Phase 1: Script MVP
+### 阶段 1：脚本 MVP
 
-- Implement `codex-mimo plan`.
-- Implement `codex-mimo implement`.
-- Implement `codex-mimo review`.
-- Capture stdout/stderr logs.
-- Capture git diff before and after execution.
+- 实现 `codex-mimo plan`。
+- 实现 `codex-mimo implement`。
+- 实现 `codex-mimo review`。
+- 捕获 stdout/stderr 日志。
+- 捕获执行前后的 git diff。
 
-Exit criteria:
+退出标准：
 
-- Codex can invoke the script manually.
-- Script can plan without file changes.
-- Script can implement a trivial change in a disposable repo.
-- Final diff is inspectable by Codex.
+- Codex 可手动调用脚本。
+- 脚本可在不修改文件的情况下进行规划。
+- 脚本可在一次性仓库中实现简单变更。
+- 最终 diff 可被 Codex 检查。
 
-### Phase 2: ACP Bridge
+### 阶段 2：ACP 桥接
 
-- Implement JSON-RPC line transport.
-- Implement initialize/session/prompt.
-- Implement session update streaming.
-- Implement file read/write handlers.
-- Implement terminal handlers.
-- Implement policy enforcement.
+- 实现 JSON-RPC 行传输。
+- 实现 initialize/session/prompt。
+- 实现会话更新流。
+- 实现文件读写处理器。
+- 实现终端处理器。
+- 实现策略执行。
 
-Exit criteria:
+退出标准：
 
-- Bridge can complete an ACP prompt turn.
-- File requests are constrained to workspace root.
-- Dangerous terminal commands are denied.
-- Usage and tool events are logged.
+- 桥接可完成一次 ACP 提示轮次。
+- 文件请求限制在工作区根目录内。
+- 危险终端命令被拒绝。
+- 使用量和工具事件被记录。
 
-### Phase 3: Codex Plugin
+### 阶段 3：Codex 插件
 
-- Package MCP server as a Codex plugin.
-- Expose `mimo_healthcheck`, `mimo_plan`, `mimo_implement`, `mimo_review`, `mimo_fix_ci`.
-- Add a Codex skill describing when and how to call MiMoCode.
-- Add plugin documentation.
+- 将 MCP 服务器打包为 Codex 插件。
+- 暴露 `mimo_healthcheck`、`mimo_plan`、`mimo_implement`、`mimo_review`、`mimo_fix_ci`。
+- 添加描述何时及如何调用 MiMoCode 的 Codex 技能。
+- 添加插件文档。
 
-Exit criteria:
+退出标准：
 
-- Codex discovers the plugin tools.
-- Codex can call `mimo_plan`.
-- Codex can call `mimo_implement` in a disposable repo.
-- Codex can review and verify MiMoCode's changes.
+- Codex 发现插件工具。
+- Codex 可调用 `mimo_plan`。
+- Codex 可在一次性仓库中调用 `mimo_implement`。
+- Codex 可审查和验证 MiMoCode 的变更。
 
-### Phase 4: Team Hardening
+### 阶段 4：团队加固
 
-- Add audit log retention.
-- Add configurable policy profiles.
-- Add CI-safe noninteractive mode.
-- Add session resume/list support.
-- Add enterprise MCP server allowlist.
+- 添加审计日志保留。
+- 添加可配置的策略配置文件。
+- 添加 CI 安全的非交互模式。
+- 添加会话恢复/列表支持。
+- 添加企业 MCP 服务器白名单。
 
-Exit criteria:
+退出标准：
 
-- Team can enable the bridge on selected repos.
-- Security review approves default policy.
-- Engineers have documented rollback and disable steps.
+- 团队可在选定仓库上启用桥接。
+- 安全审查批准默认策略。
+- 工程师有文档化的回滚和禁用步骤。
 
 ---
 
-## 10. Risk Register
+## 10. 风险登记
 
-| Risk | Impact | Mitigation |
+| 风险 | 影响 | 缓解措施 |
 | --- | --- | --- |
-| MiMoCode changes unrelated files | User loses trust, possible regressions | Capture before/after diff, enforce workspace path policy, require Codex review |
-| Dangerous shell command | Data loss or leakage | Deny destructive commands by default, ask for installs/builds, never auto-approve network |
-| ACP protocol drift | Bridge breaks after MiMoCode/ACP updates | Keep ACP types local and versioned, add protocol-version check |
-| JSON output changes in `mimo run` | MVP parser breaks | Treat `mimo run` as MVP only, keep raw logs, move production to ACP |
-| Duplicate agent context | Higher token cost | Use concise prompts, prefer `plan` before `implement`, resume sessions intentionally |
-| Hidden auth/config issue | Tool fails in the middle of work | Implement `mimo_healthcheck` and run it first |
-| Unclear ownership between Codex and MiMoCode | Confusing output and missed verification | Codex always owns final verification and user-facing summary |
+| MiMoCode 修改无关文件 | 用户失去信任，可能产生回归 | 捕获前后 diff，强制工作区路径策略，要求 Codex 审查 |
+| 危险 shell 命令 | 数据丢失或泄露 | 默认拒绝破坏性命令，安装/构建时询问，永不自动批准网络操作 |
+| ACP 协议变更 | MiMoCode/ACP 更新后桥接中断 | 保持 ACP 类型本地化和版本化，添加协议版本检查 |
+| `mimo run` JSON 输出变更 | MVP 解析器失效 | 仅将 `mimo run` 视为 MVP，保留原始日志，生产环境迁移至 ACP |
+| 重复代理上下文 | 更高的 token 成本 | 使用简洁提示，优先 `plan` 再 `implement`，有意地恢复会话 |
+| 隐藏的认证/配置问题 | 工具在工作中途失败 | 实现 `mimo_healthcheck` 并首先运行 |
+| Codex 和 MiMoCode 之间职责不清 | 输出混乱和遗漏验证 | Codex 始终拥有最终验证和面向用户的摘要 |
 
 ---
 
-## 11. Acceptance Criteria
+## 11. 验收标准
 
-The project is ready for practical use when all of these are true:
+当以下条件全部满足时，项目可投入使用：
 
-- `codex-mimo healthcheck` reports MiMoCode installation and auth state.
-- `codex-mimo plan` can run without modifying files.
-- `codex-mimo implement` can modify a disposable repo and leave a clear git diff.
-- Default policy denies writes outside the workspace.
-- Default policy denies secret-like file reads.
-- Default policy denies `git push`, `git reset`, and destructive delete commands.
-- ACP bridge can complete `initialize`, `session/new`, and `session/prompt`.
-- ACP bridge can process `session/update` message chunks and tool calls.
-- Codex plugin exposes at least `mimo_plan`, `mimo_implement`, and `mimo_review`.
-- Documentation explains installation, usage, safety model, troubleshooting, and rollback.
+- `codex-mimo healthcheck` 报告 MiMoCode 安装和认证状态。
+- `codex-mimo plan` 可在不修改文件的情况下运行。
+- `codex-mimo implement` 可修改一次性仓库并留下清晰的 git diff。
+- 默认策略拒绝工作区外的写入。
+- 默认策略拒绝类似密钥文件的读取。
+- 默认策略拒绝 `git push`、`git reset` 和破坏性删除命令。
+- ACP 桥接可完成 `initialize`、`session/new` 和 `session/prompt`。
+- ACP 桥接可处理 `session/update` 消息块和工具调用。
+- Codex 插件至少暴露 `mimo_plan`、`mimo_implement` 和 `mimo_review`。
+- 文档说明安装、使用、安全模型、故障排查和回滚。
 
 ---
 
-## 12. Recommended First Engineering Sprint
+## 12. 推荐首个工程冲刺
 
-For the first sprint, implement only:
+首个冲刺仅实现：
 
-1. TypeScript skeleton.
-2. Policy evaluator.
-3. `mimo run --format json` wrapper.
-4. `codex-mimo plan`.
-5. `codex-mimo implement`.
-6. README usage.
+1. TypeScript 骨架。
+2. 策略评估器。
+3. `mimo run --format json` 封装。
+4. `codex-mimo plan`。
+5. `codex-mimo implement`。
+6. README 使用说明。
 
-Do not implement the full ACP bridge in the first sprint. Build the ACP parser skeleton and keep it behind tests, but validate the product workflow first with `mimo run`.
+首个冲刺不实现完整的 ACP 桥接。构建 ACP 解析器骨架并保持测试覆盖，但首先通过 `mimo run` 验证产品工作流。
 
-This keeps the first release small enough to test in real development while preserving the correct long-term direction.
-
+这使首个版本足够小以在真实开发中测试，同时保留正确的长期方向。
