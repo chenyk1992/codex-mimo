@@ -1,0 +1,48 @@
+{
+  "$schema": "https://mimo.xiaomi.com//config.json",
+  "model": "mimo/mimo-v2.5-pro",
+  "small_model": "mimo/mimo-v2.5-pro",
+  "default_agent": "build",
+  "share": "manual",
+  "permission": {
+    "*": "ask",
+    "read": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.env.example": "allow"
+    },
+    "edit": "ask",
+    "bash": {
+      "*": "ask",
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "npm test*": "allow",
+      "npm run test*": "allow",
+      "npm run lint*": "allow",
+      "git push*": "deny",
+      "git reset*": "deny",
+      "rm *": "deny"
+    },
+    "external_directory": "deny"
+  },
+  "agent": {
+    "codex-reviewer": {
+      "description": "Reviews code for correctness, security, maintainability, and missing tests.",
+      "mode": "subagent",
+      "model": "mimo/mimo-v2.5-pro",
+      "tools": {
+        "write": false,
+        "edit": false
+      },
+      "permission": {
+        "bash": {
+          "*": "ask",
+          "git diff*": "allow",
+          "git status*": "allow"
+        }
+      }
+    }
+  }
+}

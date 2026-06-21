@@ -1,0 +1,66 @@
+import fs from "node:fs";
+import path from "node:path";
+import { type BridgePolicy, defaultPolicy } from "./policy.js";
+
+export interface ConfigFile {
+  workspaceRoot?: string;
+  fileAccess?: {
+    read?: string[];
+    write?: string[];
+    deny?: string[];
+  };
+  terminal?: {
+    allow?: string[];
+    ask?: string[];
+    deny?: string[];
+  };
+  ci?: {
+    enabled?: boolean;
+    denyAllAsks?: boolean;
+  };
+  audit?: {
+    maxFileSize?: number;
+    maxFiles?: number;
+  };
+  mcpServers?: {
+    allowlist?: string[];
+  };
+}
+
+export function loadConfig(cwd: string): ConfigFile {
+  const configPath = path.join(cwd, "codex-mimo.config.json");
+  try {
+    const raw = fs.readFileSync(configPath, "utf-8");
+    return JSON.parse(raw) as ConfigFile;
+  } catch {
+    return {};
+  }
+}
+
+export function configToPolicy(cwd: string, config: ConfigFile, ciMode?: boolean): BridgePolicy {
+  const base = defaultPolicy(config.workspaceRoot ?? cwd);
+
+  if (config.terminal) {
+    if (config.terminal.allow) base.allowedCommands = config.terminal.allow;
+    if (config.terminal.ask) base.askCommands = config.terminal.ask;
+    if (config.terminal.deny) base.deniedCommands = config.terminal.deny;
+  }
+
+  if (config.fileAccess?.deny) {
+    base.deniedFileGlobs = config.fileAccess.deny;
+  }
+
+  base.ciMode = ciMode ?? config.ci?.enabled ?? false;
+
+  return base;
+}
+
+export function loadPolicy(cwd: string, ciMode?: boolean): BridgePolicy {
+  const config = loadConfig(cwd);
+  return configToPolicy(cwd, config, ciMode);
+}
+
+export function isMcpServerAllowed(config: ConfigFile, serverName: string): boolean {
+  if (!config.mcpServers?.allowlist) return true;
+  return config.mcpServers.allowlist.includes(serverName);
+}
