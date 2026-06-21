@@ -35,7 +35,8 @@ export async function runAndCapture(options: MimoRunOptions): Promise<MimoRunRes
   return parsed;
 }
 
-function extractFilePath(obj: Record<string, unknown>): string | null {
+function extractFilePath(obj: Record<string, unknown> | undefined): string | null {
+  if (!obj) return null;
   // Check common path field names
   for (const key of ["filepath", "filePath", "path"]) {
     if (typeof obj[key] === "string") return obj[key];
@@ -43,7 +44,7 @@ function extractFilePath(obj: Record<string, unknown>): string | null {
   return null;
 }
 
-function parseMimoOutput(messages: unknown[]): MimoRunResult {
+export function parseMimoOutput(messages: unknown[]): MimoRunResult {
   let sessionId: string | null = null;
   const textParts: string[] = [];
   const changedFiles = new Set<string>();
@@ -73,20 +74,14 @@ function parseMimoOutput(messages: unknown[]): MimoRunResult {
       if (part) {
         const state = part.state as Record<string, unknown> | undefined;
         
-        // Capture changed files from write operations
-        if (part.tool === "write" && state) {
-          // Check metadata for filepath
-          const meta = state.metadata as Record<string, unknown> | undefined;
-          if (meta) {
-            const fp = extractFilePath(meta);
-            if (fp) changedFiles.add(fp);
-          }
-          // Check input for filepath
-          const input = state.input as Record<string, unknown> | undefined;
-          if (input) {
-            const fp = extractFilePath(input);
-            if (fp) changedFiles.add(fp);
-          }
+        // Capture changed files from mutating file operations.
+        if ((part.tool === "write" || part.tool === "edit") && state) {
+          const fp =
+            extractFilePath(part) ??
+            extractFilePath(state) ??
+            extractFilePath(state.metadata as Record<string, unknown> | undefined) ??
+            extractFilePath(state.input as Record<string, unknown> | undefined);
+          if (fp) changedFiles.add(fp);
         }
 
         // Capture bash commands

@@ -2,17 +2,17 @@ import { describe, expect, it } from "vitest";
 import { buildMimoRunArgs } from "../../src/mimo/run-json.js";
 
 describe("buildMimoRunArgs", () => {
-  it("builds a basic plan command with message before flags", () => {
+  it("builds a basic plan command with flags before a separated message", () => {
     expect(
       buildMimoRunArgs({
         cwd: "E:/project/app",
         message: "Plan the login change",
         agent: "plan"
       })
-    ).toEqual(["run", "--format", "json", "Plan the login change", "--agent", "plan"]);
+    ).toEqual(["run", "--format", "json", "--agent", "plan", "--", "Plan the login change"]);
   });
 
-  it("places message before --file to avoid file path interpretation", () => {
+  it("separates files from the message so --file cannot consume the prompt", () => {
     expect(
       buildMimoRunArgs({
         cwd: "E:/project/app",
@@ -27,7 +27,6 @@ describe("buildMimoRunArgs", () => {
       "run",
       "--format",
       "json",
-      "Fix CI",
       "--agent",
       "build",
       "--model",
@@ -36,11 +35,13 @@ describe("buildMimoRunArgs", () => {
       "sess_123",
       "--fork",
       "--file",
-      "ci.log"
+      "ci.log",
+      "--",
+      "Fix CI"
     ]);
   });
 
-  it("builds compose run args with message before all flags", () => {
+  it("builds compose run args with a separated message", () => {
     expect(
       buildMimoRunArgs({
         cwd: "E:/project/app",
@@ -56,7 +57,6 @@ describe("buildMimoRunArgs", () => {
       "run",
       "--format",
       "json",
-      "Use @compose",
       "--agent",
       "compose",
       "--session",
@@ -67,7 +67,9 @@ describe("buildMimoRunArgs", () => {
       "--attach",
       "http://localhost:4096",
       "--file",
-      "ci.log"
+      "ci.log",
+      "--",
+      "Use @compose"
     ]);
   });
 
@@ -83,10 +85,11 @@ describe("buildMimoRunArgs", () => {
       "run",
       "--format",
       "json",
-      "Continue task",
       "--agent",
       "compose",
-      "--continue"
+      "--continue",
+      "--",
+      "Continue task"
     ]);
   });
 });

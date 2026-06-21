@@ -1,12 +1,18 @@
 {
   "name": "codex-mimocode",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260621162928",
   "description": "Bridge that lets Codex invoke MiMoCode as a specialist coding agent for planning, implementation, and review",
   "author": {
     "name": "Xiaomi MiMo Team"
   },
   "license": "MIT",
-  "keywords": ["mimo", "coding-agent", "acp", "code-review", "implementation"],
+  "keywords": [
+    "mimo",
+    "coding-agent",
+    "acp",
+    "code-review",
+    "implementation"
+  ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
@@ -15,7 +21,10 @@
     "longDescription": "This plugin exposes MiMoCode as a set of Codex tools: mimo_plan, mimo_implement, mimo_review, mimo_fix_ci, and mimo_resume. Codex can delegate specialized coding tasks to MiMoCode and verify the results.",
     "developerName": "Xiaomi MiMo Team",
     "category": "Developer Tools",
-    "capabilities": ["Write", "Execute"],
+    "capabilities": [
+      "Write",
+      "Execute"
+    ],
     "defaultPrompt": [
       "Plan the implementation of this feature",
       "Review the current diff for issues",

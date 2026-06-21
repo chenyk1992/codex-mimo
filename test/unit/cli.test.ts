@@ -61,6 +61,11 @@ describe("prompt templates", () => {
     expect(prompt).toContain("planning agent");
   });
 
+  it("puts the user task before agent boilerplate", () => {
+    expect(planPrompt("Test task").startsWith("Task:\nTest task")).toBe(true);
+    expect(implementPrompt("Test task").startsWith("Task:\nTest task")).toBe(true);
+  });
+
   it("implement prompt includes rules", () => {
     const prompt = implementPrompt("Test task");
     expect(prompt).toContain("Test task");

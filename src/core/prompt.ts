@@ -1,8 +1,11 @@
 export function planPrompt(task: string): string {
   return [
+    "Task:",
+    task,
+    "",
     "You are being invoked by Codex as a specialist MiMoCode planning agent.",
     "",
-    "Task:",
+    "Planning target:",
     task,
     "",
     "Rules:",
@@ -16,9 +19,12 @@ export function planPrompt(task: string): string {
 
 export function implementPrompt(task: string): string {
   return [
+    "Task:",
+    task,
+    "",
     "You are being invoked by Codex as a specialist MiMoCode implementation agent.",
     "",
-    "Task:",
+    "Implementation target:",
     task,
     "",
     "Rules:",
