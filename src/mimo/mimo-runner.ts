@@ -15,7 +15,8 @@ export async function runAndCapture(options: MimoRunOptions): Promise<MimoRunRes
   const result = await execa("mimo", args, {
     cwd: options.cwd,
     stdin: "ignore",
-    stderr: "pipe"
+    stderr: "pipe",
+    reject: false
   });
 
   const lines = result.stdout.split("\n").filter((l) => l.trim());
@@ -24,7 +25,22 @@ export async function runAndCapture(options: MimoRunOptions): Promise<MimoRunRes
     try { messages.push(JSON.parse(line)); } catch { /* skip non-JSON */ }
   }
 
-  return parseMimoOutput(messages);
+  const parsed = parseMimoOutput(messages);
+  
+  // Include stderr in errors if command failed
+  if (result.exitCode !== 0 && result.stderr) {
+    parsed.errors.push(result.stderr);
+  }
+
+  return parsed;
+}
+
+function extractFilePath(obj: Record<string, unknown>): string | null {
+  // Check common path field names
+  for (const key of ["filepath", "filePath", "path"]) {
+    if (typeof obj[key] === "string") return obj[key];
+  }
+  return null;
 }
 
 function parseMimoOutput(messages: unknown[]): MimoRunResult {
@@ -37,23 +53,43 @@ function parseMimoOutput(messages: unknown[]): MimoRunResult {
   for (const msg of messages) {
     const m = msg as Record<string, unknown>;
 
+    // Support both sessionID and sessionId
     if (typeof m.sessionID === "string") sessionId = m.sessionID;
+    if (typeof m.sessionId === "string") sessionId = m.sessionId;
 
     if (m.type === "text") {
       const part = m.part as Record<string, unknown> | undefined;
       if (part && typeof part.text === "string") textParts.push(part.text);
     }
 
+    if (m.type === "error") {
+      const part = m.part as Record<string, unknown> | undefined;
+      const msg = (part?.message as string) ?? (part?.text as string) ?? (m.message as string);
+      if (msg) errors.push(msg);
+    }
+
     if (m.type === "tool_use") {
       const part = m.part as Record<string, unknown> | undefined;
       if (part) {
         const state = part.state as Record<string, unknown> | undefined;
+        
+        // Capture changed files from write operations
         if (part.tool === "write" && state) {
+          // Check metadata for filepath
           const meta = state.metadata as Record<string, unknown> | undefined;
-          if (meta && typeof meta.filepath === "string") {
-            changedFiles.add(meta.filepath);
+          if (meta) {
+            const fp = extractFilePath(meta);
+            if (fp) changedFiles.add(fp);
+          }
+          // Check input for filepath
+          const input = state.input as Record<string, unknown> | undefined;
+          if (input) {
+            const fp = extractFilePath(input);
+            if (fp) changedFiles.add(fp);
           }
         }
+
+        // Capture bash commands
         if (part.tool === "bash" && state) {
           const input = state.input as Record<string, unknown> | undefined;
           const cmd = (input?.command as string) ?? "";

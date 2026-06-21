@@ -1,4 +1,5 @@
 import path from "node:path";
+import fs from "node:fs";
 import { execa } from "execa";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
 import { captureGitDiff, type GitDiffSnapshot } from "../git/diff.js";
@@ -267,7 +268,6 @@ function buildReport(input: {
   const diffPath = input.diff.diff ? path.join(input.diffsDir, `${input.id}.diff`) : undefined;
 
   if (diffPath && input.diff.diff) {
-    const fs = require("node:fs");
     fs.mkdirSync(input.diffsDir, { recursive: true });
     fs.writeFileSync(diffPath, input.diff.diff, "utf-8");
   }

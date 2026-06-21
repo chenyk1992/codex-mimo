@@ -31,7 +31,8 @@ export async function mimoPlan(input: unknown) {
   const parsed = PlanInput.parse(input);
   const result = await runAndCapture({
     cwd: parsed.cwd,
-    agent: "plan",
+    agent: parsed.agent,
+    model: parsed.model,
     message: planPrompt(parsed.task)
   });
   return {
@@ -69,10 +70,16 @@ export async function mimoReview(input: unknown) {
     agent: "plan",
     message: reviewPrompt(diffResult.stdout || "No changes found.")
   });
+  
+  // Return findings based on review content
+  const findings = result.summary && result.summary !== "Completed."
+    ? [{ severity: "info", title: "Review Summary", body: result.summary }]
+    : [];
+
   return {
     summary: result.summary,
     sessionId: result.sessionId,
-    findings: []
+    findings
   };
 }
 

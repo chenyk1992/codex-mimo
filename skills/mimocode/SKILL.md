@@ -1,3 +1,8 @@
+---
+name: mimocode
+description: Use MiMoCode as a specialist coding agent for planning, implementation, review, CI repair, session resume, and Compose workflows.
+---
+
 # MiMoCode Integration Skill
 
 Use MiMoCode as a specialist coding agent when tasks benefit from deep codebase exploration, focused implementation, or independent review.
@@ -77,6 +82,33 @@ Resume a previous MiMoCode session to continue work.
 Input: { "cwd": "<project-root>", "session": "<session-id>", "task": "continue the task" }
 Output: { "summary": "...", "changedFiles": [...], "verification": [] }
 ```
+
+### `mimo_compose`
+
+Run a Compose workflow for structured development tasks. Best for multi-step workflows that benefit from skill chaining.
+
+```
+Input: { 
+  "cwd": "<project-root>",
+  "workflow": "dev|fix|fix-ci|plan|execute-plan|review|parallel",
+  "task": "<task description>",
+  "file": "<optional attached file>",
+  "verification": ["<optional verification commands>"],
+  "dryRun": false
+}
+Output: { "status": "passed|failed|needs_review", "changedFiles": [...], "reportPaths": {...} }
+```
+
+**Supported workflows:**
+- `dev` - Feature development (brainstorm → plan → tdd → verify → review)
+- `fix` - Bug fixing (debug → tdd → verify → feedback)
+- `fix-ci` - CI failure repair (debug → tdd → verify → review)
+- `plan` - Planning only (brainstorm → plan)
+- `execute-plan` - Execute an existing plan
+- `review` - Review current diff
+- `parallel` - Parallel exploration
+
+**Note:** Reports are written to `.codex-mimo/reports/` and `.codex-mimo/events/`.
 
 ## Recommended Workflow
 

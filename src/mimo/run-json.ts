@@ -13,6 +13,8 @@ export interface MimoRunOptions {
 
 export function buildMimoRunArgs(options: MimoRunOptions): string[] {
   const args = ["run", "--format", "json"];
+  // Message must come before flags to avoid being interpreted as file path
+  args.push(options.message);
   if (options.agent) args.push("--agent", options.agent);
   if (options.model) args.push("--model", options.model);
   if (options.session) args.push("--session", options.session);
@@ -21,6 +23,5 @@ export function buildMimoRunArgs(options: MimoRunOptions): string[] {
   if (options.attach) args.push("--attach", options.attach);
   if (options.continue) args.push("--continue");
   for (const file of options.files ?? []) args.push("--file", file);
-  args.push(options.message);
   return args;
 }
