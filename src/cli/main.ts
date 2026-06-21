@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { runImplement, runPlan, runReview } from "./commands.js";
+import { runFixCi, runImplement, runPlan, runReview } from "./commands.js";
 import { execa } from "execa";
 import { SessionStore } from "../core/sessions.js";
 
@@ -23,6 +23,7 @@ function hasFlag(flag: string): boolean {
 
 const sessionFlag = extractFlag("--session");
 const fileFlag = extractFlag("--file");
+const baseFlag = extractFlag("--since");
 const dryRun = hasFlag("--dry-run");
 const jsonOutput = hasFlag("--json");
 const ciMode = hasFlag("--ci");
@@ -30,7 +31,7 @@ const ciMode = hasFlag("--ci");
 const task = rest.join(" ").trim();
 
 if (!command) {
-  console.error("Usage: codex-mimo <plan|implement|review|healthcheck|sessions|resume> [task]");
+  console.error("Usage: codex-mimo <plan|implement|review|fix-ci|healthcheck|sessions|resume> [task]");
   process.exit(2);
 }
 
@@ -64,8 +65,14 @@ if (command === "healthcheck") {
     console.log("[dry-run] codex-mimo review");
     process.exit(0);
   }
-  const diffResult = await execa("git", ["diff", "HEAD"], { cwd });
-  await runReview(cwd, diffResult.stdout || "No changes found.", extraFiles);
+  await runReview(cwd, baseFlag ?? "HEAD", extraFiles);
+} else if (command === "fix-ci") {
+  if (!fileFlag) { console.error("Usage: codex-mimo fix-ci --file <ci.log> [task]"); process.exit(2); }
+  if (dryRun) {
+    console.log(`[dry-run] codex-mimo fix-ci --file ${fileFlag} "${task}"`);
+    process.exit(0);
+  }
+  await runFixCi(cwd, fileFlag, task || undefined, extraFiles);
 } else if (command === "sessions") {
   const store = new SessionStore(cwd);
   const sessions = store.list();
