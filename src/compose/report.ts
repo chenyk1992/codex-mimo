@@ -3,11 +3,7 @@ import path from "node:path";
 import type { NormalizedMimoEvent } from "./events.js";
 import type { ComposeWorkflowName } from "./workflow.js";
 import type { VerificationResult } from "./verify.js";
-
-export interface GitStatusSnapshot {
-  short: string;
-  dirty: boolean;
-}
+import type { GitStatusSnapshot } from "../git/status.js";
 
 export interface ComposeReport {
   id: string;

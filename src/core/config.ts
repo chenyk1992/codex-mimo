@@ -56,13 +56,3 @@ export function configToPolicy(cwd: string, config: ConfigFile, ciMode?: boolean
 
   return base;
 }
-
-export function loadPolicy(cwd: string, ciMode?: boolean): BridgePolicy {
-  const config = loadConfig(cwd);
-  return configToPolicy(cwd, config, ciMode);
-}
-
-export function isMcpServerAllowed(config: ConfigFile, serverName: string): boolean {
-  if (!config.mcpServers?.allowlist) return true;
-  return config.mcpServers.allowlist.includes(serverName);
-}

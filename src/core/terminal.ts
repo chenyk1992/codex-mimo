@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 
-export interface ManagedTerminal {
+interface ManagedTerminal {
   id: string;
   process: ChildProcess;
   stdout: string;

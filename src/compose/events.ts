@@ -12,7 +12,7 @@ export interface NormalizedMimoEvent {
   raw: unknown;
 }
 
-export interface EventSummary {
+interface EventSummary {
   messages: number;
   tools: number;
   diffs: number;
@@ -33,7 +33,7 @@ export function parseMimoJsonLines(stdout: string): NormalizedMimoEvent[] {
   return events;
 }
 
-export function normalizeMimoEvent(raw: unknown): NormalizedMimoEvent {
+function normalizeMimoEvent(raw: unknown): NormalizedMimoEvent {
   if (!isRecord(raw)) return { type: "raw", raw };
 
   const type = String(raw.type ?? raw.event ?? "");

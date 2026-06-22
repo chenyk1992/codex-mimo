@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export interface SessionEntry {
+interface SessionEntry {
   sessionId: string;
   workflow: string;
   task: string;

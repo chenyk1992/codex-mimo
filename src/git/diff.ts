@@ -51,7 +51,4 @@ export async function captureGitDiff(cwd: string, base = "HEAD"): Promise<GitDif
   };
 }
 
-export async function captureStatus(cwd: string): Promise<string> {
-  const result = await execa("git", ["status", "--short"], { cwd, reject: false });
-  return result.stdout ?? "";
-}
+

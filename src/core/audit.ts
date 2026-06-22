@@ -1,12 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export interface AuditEvent {
+interface AuditEvent {
   type: string;
   [key: string]: unknown;
 }
 
-export interface AuditLoggerOptions {
+interface AuditLoggerOptions {
   logDir: string;
   maxFileSize?: number;
   maxFiles?: number;
