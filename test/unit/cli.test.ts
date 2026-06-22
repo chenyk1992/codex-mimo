@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildMimoRunArgs } from "../../src/mimo/run-json.js";
 import { planPrompt, implementPrompt, reviewPrompt } from "../../src/core/prompt.js";
-import { decideCommand, decideFileRead, decideFileWrite, defaultPolicy } from "../../src/core/policy.js";
-import { loadConfig, configToPolicy } from "../../src/core/config.js";
 
 describe("CLI command building", () => {
   it("builds plan command with agent and message", () => {

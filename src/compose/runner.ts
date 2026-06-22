@@ -9,7 +9,7 @@ import { writeComposeReport, type ComposeReport } from "./report.js";
 import { normalizeVerificationCommands, runVerificationCommands, type VerificationResult } from "./verify.js";
 import { buildComposePrompt, getComposeWorkflow, type ComposeWorkflowName } from "./workflow.js";
 
-export interface ComposeRunInput {
+interface ComposeRunInput {
   cwd: string;
   workflow: ComposeWorkflowName;
   task?: string;
@@ -31,7 +31,7 @@ export interface MimoRunResult {
   exitCode: number;
 }
 
-export interface ComposeRunnerDeps {
+interface ComposeRunnerDeps {
   runMimo?: (cwd: string, args: string[]) => Promise<MimoRunResult>;
   captureDiff?: (cwd: string, base?: string) => Promise<GitDiffSnapshot>;
   captureStatus?: (cwd: string) => Promise<GitStatusSnapshot>;

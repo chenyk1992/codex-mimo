@@ -139,8 +139,4 @@ export class AcpClient {
   async sessionPrompt(params: SessionPromptParams): Promise<SessionPromptResult> {
     return (await this.request("session/prompt", params)) as SessionPromptResult;
   }
-
-  get pendingCount(): number {
-    return this.pending.size;
-  }
 }
