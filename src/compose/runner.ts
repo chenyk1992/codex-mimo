@@ -23,16 +23,17 @@ interface ComposeRunInput {
   verification?: string[];
   dryRun?: boolean;
   reportDir?: string;
+  timeoutMs?: number;
 }
 
-export interface MimoRunResult {
+interface MimoRunResult {
   stdout: string;
   stderr: string;
   exitCode: number;
 }
 
 interface ComposeRunnerDeps {
-  runMimo?: (cwd: string, args: string[]) => Promise<MimoRunResult>;
+  runMimo?: (cwd: string, args: string[], options?: { timeoutMs?: number }) => Promise<MimoRunResult>;
   captureDiff?: (cwd: string, base?: string) => Promise<GitDiffSnapshot>;
   captureStatus?: (cwd: string) => Promise<GitStatusSnapshot>;
   runVerification?: (cwd: string, commands: string[]) => Promise<VerificationResult[]>;
@@ -109,7 +110,7 @@ export async function runComposeWorkflow(
 
   let mimoResult: MimoRunResult;
   try {
-    mimoResult = await runMimo(input.cwd, mimoArgs);
+    mimoResult = await runMimo(input.cwd, mimoArgs, { timeoutMs: input.timeoutMs });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const report = buildReport({
@@ -126,7 +127,7 @@ export async function runComposeWorkflow(
       diffsDir,
       status: "failed",
       gitStatusBefore,
-      error: `MiMoCode startup failed: ${errorMessage}`
+      error: `MiMoCode execution failed: ${errorMessage}`
     });
     writeReport(report);
     return report;
@@ -269,11 +270,17 @@ export async function runComposeWorkflow(
   return report;
 }
 
-async function defaultRunMimo(cwd: string, args: string[]): Promise<MimoRunResult> {
+async function defaultRunMimo(
+  cwd: string,
+  args: string[],
+  options: { timeoutMs?: number } = {}
+): Promise<MimoRunResult> {
   const result = await execa("mimo", args, {
     cwd,
     reject: false,
-    stdin: "ignore"
+    stdin: "ignore",
+    timeout: options.timeoutMs,
+    forceKillAfterDelay: options.timeoutMs ? 5000 : false
   });
   return {
     stdout: result.stdout,

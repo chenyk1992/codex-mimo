@@ -1,6 +1,6 @@
-import type { ComposeWorkflowName } from "./workflow-names.js";
+import { COMPOSE_WORKFLOW_NAMES } from "./workflow-names.js";
 
-export type { ComposeWorkflowName } from "./workflow-names.js";
+export type ComposeWorkflowName = typeof COMPOSE_WORKFLOW_NAMES[number];
 
 export interface ComposeWorkflow {
   name: ComposeWorkflowName;
@@ -12,7 +12,7 @@ export interface ComposeWorkflow {
   requiresFile: boolean;
 }
 
-export interface BuildComposePromptInput {
+interface BuildComposePromptInput {
   workflow: ComposeWorkflow;
   task?: string;
   file?: string;

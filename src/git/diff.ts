@@ -1,6 +1,6 @@
 import { execa } from "execa";
 
-export interface DiffResult {
+interface DiffResult {
   stat: string;
   diff: string;
   changedFiles: string[];
