@@ -165,6 +165,34 @@ export async function runComposeWorkflow(
     // Git status capture is best-effort
   }
 
+  const readOnlyViolationFiles = detectReadOnlyViolationFiles(
+    workflow.writesAllowed,
+    diff.changedFiles,
+    gitStatusBefore,
+    gitStatusAfter
+  );
+  if (readOnlyViolationFiles.length > 0) {
+    const report = buildReport({
+      id,
+      createdAt,
+      input,
+      mimoArgs,
+      requestedSkills: workflow.skillChain,
+      eventsStdout: mimoResult.stdout,
+      diff,
+      verification: [],
+      reportDir,
+      eventsDir,
+      diffsDir,
+      status: "failed",
+      gitStatusBefore,
+      gitStatusAfter,
+      error: `Read-only workflow ${workflow.name} modified files: ${readOnlyViolationFiles.join(", ")}`
+    });
+    writeReport(report);
+    return report;
+  }
+
   const verificationCommands = normalizeVerificationCommands(input.verification, workflow.defaultVerification);
   let verification: VerificationResult[] = [];
   try {
@@ -187,6 +215,29 @@ export async function runComposeWorkflow(
       gitStatusBefore,
       gitStatusAfter,
       error: `Verification execution failed: ${errorMessage}`
+    });
+    writeReport(report);
+    return report;
+  }
+
+  const semanticFailure = detectSemanticFailure(mimoResult.stdout);
+  if (semanticFailure) {
+    const report = buildReport({
+      id,
+      createdAt,
+      input,
+      mimoArgs,
+      requestedSkills: workflow.skillChain,
+      eventsStdout: mimoResult.stdout,
+      diff,
+      verification,
+      reportDir,
+      eventsDir,
+      diffsDir,
+      status: "failed",
+      gitStatusBefore,
+      gitStatusAfter,
+      error: semanticFailure
     });
     writeReport(report);
     return report;
@@ -245,6 +296,63 @@ function determineStatus(
   if (verification.some((result) => !result.passed)) return "failed";
   if (verification.length === 0 && changedFiles.length > 0) return "needs_review";
   return "passed";
+}
+
+function detectSemanticFailure(eventsStdout: string): string | undefined {
+  const events = parseMimoJsonLines(eventsStdout);
+  const text = events
+    .filter((event) => event.type === "message" && event.text)
+    .map((event) => event.text)
+    .join("\n")
+    .toLowerCase();
+
+  const emptyObjectivePatterns = [
+    "objective is empty",
+    "what would you like me to help with",
+    "task is empty",
+    "no objective provided",
+    "no task provided",
+    "message got cut off",
+    "what's the objective",
+    "what is the objective",
+    "haven't provided a task",
+    "haven't provided an actual task or objective",
+    "please share your task",
+    "what would you like to work on",
+    "what would you like to accomplish"
+  ];
+
+  if (emptyObjectivePatterns.some((pattern) => text.includes(pattern))) {
+    return "MiMoCode did not receive or accept the task objective.";
+  }
+
+  return undefined;
+}
+
+function detectReadOnlyViolationFiles(
+  writesAllowed: boolean,
+  changedFiles: string[],
+  gitStatusBefore?: GitStatusSnapshot,
+  gitStatusAfter?: GitStatusSnapshot
+): string[] {
+  if (writesAllowed || changedFiles.length === 0) return [];
+  if (!gitStatusBefore || !gitStatusAfter) return changedFiles;
+  if (!gitStatusBefore.dirty && gitStatusAfter.dirty) return changedFiles;
+
+  const beforeFiles = parseGitStatusFiles(gitStatusBefore.short);
+  const afterFiles = parseGitStatusFiles(gitStatusAfter.short);
+  return [...afterFiles].filter((file) => !beforeFiles.has(file));
+}
+
+function parseGitStatusFiles(status: string): Set<string> {
+  return new Set(
+    status
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => line.slice(3).trim())
+      .filter(Boolean)
+  );
 }
 
 function buildReport(input: {

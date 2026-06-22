@@ -1,11 +1,6 @@
-export type ComposeWorkflowName =
-  | "dev"
-  | "fix"
-  | "fix-ci"
-  | "plan"
-  | "execute-plan"
-  | "review"
-  | "parallel";
+import type { ComposeWorkflowName } from "./workflow-names.js";
+
+export type { ComposeWorkflowName } from "./workflow-names.js";
 
 export interface ComposeWorkflow {
   name: ComposeWorkflowName;
@@ -25,6 +20,15 @@ export interface BuildComposePromptInput {
 }
 
 const workflows: Record<ComposeWorkflowName, ComposeWorkflow> = {
+  brainstorm: {
+    name: "brainstorm",
+    description: "Clarify fuzzy requirements",
+    skillChain: ["compose:brainstorm"],
+    defaultVerification: [],
+    writesAllowed: false,
+    requiresTask: true,
+    requiresFile: false
+  },
   dev: {
     name: "dev",
     description: "Feature development loop",
@@ -54,8 +58,8 @@ const workflows: Record<ComposeWorkflowName, ComposeWorkflow> = {
   },
   plan: {
     name: "plan",
-    description: "Planning-only loop",
-    skillChain: ["compose:brainstorm", "compose:plan"],
+    description: "Write implementation plan from an already clear requirement",
+    skillChain: ["compose:plan"],
     defaultVerification: [],
     writesAllowed: false,
     requiresTask: true,
@@ -87,6 +91,33 @@ const workflows: Record<ComposeWorkflowName, ComposeWorkflow> = {
     writesAllowed: true,
     requiresTask: true,
     requiresFile: false
+  },
+  worktree: {
+    name: "worktree",
+    description: "Isolate work in a git worktree",
+    skillChain: ["compose:worktree"],
+    defaultVerification: [],
+    writesAllowed: true,
+    requiresTask: true,
+    requiresFile: false
+  },
+  merge: {
+    name: "merge",
+    description: "Finish or merge a development branch",
+    skillChain: ["compose:merge"],
+    defaultVerification: [],
+    writesAllowed: true,
+    requiresTask: true,
+    requiresFile: false
+  },
+  "new-skill": {
+    name: "new-skill",
+    description: "Create or update a Compose skill",
+    skillChain: ["compose:new-skill"],
+    defaultVerification: [],
+    writesAllowed: true,
+    requiresTask: true,
+    requiresFile: false
   }
 };
 
@@ -103,32 +134,47 @@ export function listComposeWorkflows(): ComposeWorkflow[] {
 
 export function buildComposePrompt(input: BuildComposePromptInput): string {
   const { workflow, task, file, since } = input;
-  const lines = [
-    `Please use @compose to run the ${workflow.name} workflow.`,
-    "",
-    `Required Compose skills: ${workflow.skillChain.join(" -> ")}`,
-    "",
-    "Task:",
-    task?.trim() || defaultTaskForWorkflow(workflow.name),
-    "",
-    "Rules:",
-    "- Keep changes minimal and focused.",
-    "- Do not commit, push, reset, or delete files.",
-    "- Record the plan, actions taken, verification evidence, and remaining risks.",
-    "- Prefer named reusable skills over ad-hoc steps.",
-    "- Stop and report clearly if the task is blocked."
-  ];
+  const lines: string[] = [];
+
+  lines.push("Objective:");
+  lines.push(task?.trim() || defaultTaskForWorkflow(workflow.name));
+  lines.push("");
+  lines.push(`Workflow: ${workflow.name} - ${workflow.description}`);
+  lines.push("");
+  lines.push(`Use these Compose skills in order: ${workflow.skillChain.join(" -> ")}`);
+  lines.push("");
+  lines.push("Instructions:");
+  lines.push("- Treat the Objective above as the task input for this workflow.");
+  lines.push("- Do not ask what to plan or implement unless the Objective is genuinely ambiguous.");
+  lines.push("- Keep changes minimal and focused.");
+  lines.push("- Do not commit, push, reset, or delete files.");
+  lines.push("- Record actions taken, verification evidence, and remaining risks.");
+
+  if (workflow.name === "plan") {
+    lines.push("");
+    lines.push(
+      "The Objective above is the requirement/spec for compose:plan. Produce a plan from it; do not ask for a separate spec unless it is genuinely missing critical information."
+    );
+  }
+
+  if (workflow.name === "brainstorm") {
+    lines.push("");
+    lines.push("Use compose:brainstorm to clarify the Objective. Ask concise questions only when needed.");
+  }
 
   if (file) {
-    lines.push("", `Attached/reference file: @${file}`);
+    lines.push("");
+    lines.push(`Attached/reference file: @${file}`);
   }
 
   if (since) {
-    lines.push("", `Review or compare changes since: ${since}`);
+    lines.push("");
+    lines.push(`Review or compare changes since: ${since}`);
   }
 
   if (!workflow.writesAllowed) {
-    lines.push("", "This workflow is read-only. Do not modify files.");
+    lines.push("");
+    lines.push("This workflow is read-only. Do not modify files.");
   }
 
   return lines.join("\n");

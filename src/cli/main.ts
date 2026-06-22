@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { runFixCi, runImplement, runPlan, runReview } from "./commands.js";
 import { runComposeWorkflow } from "../compose/runner.js";
+import { composeWorkflowUsage } from "../compose/workflow-names.js";
 import { execa } from "execa";
 import { SessionStore } from "../core/sessions.js";
 
@@ -96,7 +97,7 @@ if (command === "healthcheck") {
   await runFixCi(cwd, fileFlag, task || undefined, extraFiles);
 } else if (command === "compose") {
   if (!workflowFlag) {
-    console.error("Usage: codex-mimo compose --workflow <dev|fix|fix-ci|plan|execute-plan|review|parallel> [task]");
+    console.error(`Usage: codex-mimo compose --workflow <${composeWorkflowUsage()}> [task]`);
     process.exit(2);
   }
 

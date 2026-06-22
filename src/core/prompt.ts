@@ -1,12 +1,11 @@
 export function planPrompt(task: string): string {
   return [
-    "Task:",
+    "Objective:",
     task,
+    "",
+    "Execute this objective now. Do not ask what the task is; the Objective above is the task.",
     "",
     "You are being invoked by Codex as a specialist MiMoCode planning agent.",
-    "",
-    "Planning target:",
-    task,
     "",
     "Rules:",
     "- Do not edit files.",
@@ -19,13 +18,12 @@ export function planPrompt(task: string): string {
 
 export function implementPrompt(task: string): string {
   return [
-    "Task:",
+    "Objective:",
     task,
+    "",
+    "Execute this objective now. Do not ask what the task is; the Objective above is the task.",
     "",
     "You are being invoked by Codex as a specialist MiMoCode implementation agent.",
-    "",
-    "Implementation target:",
-    task,
     "",
     "Rules:",
     "- Keep changes surgical.",

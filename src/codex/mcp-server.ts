@@ -10,6 +10,7 @@ import {
   mimoResume,
   mimoReview
 } from "./tools.js";
+import { ComposeWorkflowSchema } from "./tool-schemas.js";
 
 export function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -105,7 +106,7 @@ export function createMcpServer(): McpServer {
     "Run a MiMoCode Compose workflow and return a structured report",
     {
       cwd: z.string().describe("Project root directory"),
-      workflow: z.enum(["dev", "fix", "fix-ci", "plan", "execute-plan", "review", "parallel"]),
+      workflow: ComposeWorkflowSchema,
       task: z.string().optional().describe("Task description"),
       file: z.string().optional().describe("Attached file such as CI log or plan document"),
       since: z.string().optional().describe("Git ref for diff comparison"),

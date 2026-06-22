@@ -23,4 +23,15 @@ describe("compose event parsing", () => {
       errors: 0
     });
   });
+
+  it("extracts text from MiMo raw message parts", () => {
+    const events = parseMimoJsonLines(
+      '{"type":"message","raw":{"type":"text","part":{"type":"text","text":"What would you like to accomplish?"}}}\n'
+    );
+
+    expect(events[0]).toMatchObject({
+      type: "message",
+      text: "What would you like to accomplish?"
+    });
+  });
 });

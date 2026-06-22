@@ -38,7 +38,11 @@ export function normalizeMimoEvent(raw: unknown): NormalizedMimoEvent {
 
   const type = String(raw.type ?? raw.event ?? "");
   if (type === "message" || type === "assistant" || type === "text") {
-    return { type: "message", text: stringValue(raw.text ?? raw.content ?? raw.message), raw };
+    return {
+      type: "message",
+      text: stringValue(raw.text ?? raw.content ?? raw.message) ?? nestedRawMessageText(raw),
+      raw
+    };
   }
 
   if (type === "tool" || type === "tool_call") {
@@ -88,6 +92,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function nestedRawMessageText(raw: Record<string, unknown>): string | undefined {
+  const rawPayload = raw.raw;
+  if (!isRecord(rawPayload)) return undefined;
+
+  const part = rawPayload.part;
+  if (isRecord(part)) {
+    return stringValue(part.text ?? part.content ?? part.message);
+  }
+
+  return stringValue(rawPayload.text ?? rawPayload.content ?? rawPayload.message);
 }
 
 function numberValue(value: unknown): number | undefined {

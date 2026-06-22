@@ -62,8 +62,22 @@ describe("prompt templates", () => {
   });
 
   it("puts the user task before agent boilerplate", () => {
-    expect(planPrompt("Test task").startsWith("Task:\nTest task")).toBe(true);
-    expect(implementPrompt("Test task").startsWith("Task:\nTest task")).toBe(true);
+    expect(planPrompt("Test task").startsWith("Objective:\nTest task")).toBe(true);
+    expect(implementPrompt("Test task").startsWith("Objective:\nTest task")).toBe(true);
+  });
+
+  it("plan prompt starts with an explicit objective", () => {
+    const prompt = planPrompt("Fix sum.ts");
+
+    expect(prompt.startsWith("Objective:\nFix sum.ts")).toBe(true);
+    expect(prompt).toContain("Do not ask what the task is");
+  });
+
+  it("implement prompt starts with an explicit objective", () => {
+    const prompt = implementPrompt("Update README");
+
+    expect(prompt.startsWith("Objective:\nUpdate README")).toBe(true);
+    expect(prompt).toContain("Do not ask what the task is");
   });
 
   it("implement prompt includes rules", () => {

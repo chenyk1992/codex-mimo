@@ -99,7 +99,7 @@ Run a Compose workflow for structured development tasks. Best for multi-step wor
 ```
 Input: { 
   "cwd": "<project-root>",
-  "workflow": "dev|fix|fix-ci|plan|execute-plan|review|parallel",
+  "workflow": "brainstorm|dev|fix|fix-ci|plan|execute-plan|review|parallel|worktree|merge|new-skill",
   "task": "<task description>",
   "file": "<optional attached file>",
   "verification": ["<optional verification commands>"],
@@ -111,13 +111,30 @@ Output: { "status": "passed|failed|needs_review", "changedFiles": [...], "report
 The MCP response is intentionally compact. Full JSON events, Markdown report, and event logs are persisted under `.codex-mimo/` and linked from `reportPaths`.
 
 **Supported workflows:**
+- `brainstorm` - Clarify fuzzy requirements (compose:brainstorm)
 - `dev` - Feature development (brainstorm → plan → tdd → verify → review)
 - `fix` - Bug fixing (debug → tdd → verify → feedback)
 - `fix-ci` - CI failure repair (debug → tdd → verify → review)
-- `plan` - Planning only (brainstorm → plan)
-- `execute-plan` - Execute an existing plan
-- `review` - Review current diff
-- `parallel` - Parallel exploration
+- `plan` - Write implementation plan from an already clear requirement (compose:plan only)
+- `execute-plan` - Execute an existing plan (execute → tdd → verify → review)
+- `review` - Review current diff (review → feedback)
+- `parallel` - Parallel exploration (parallel → subagent → verify)
+- `worktree` - Isolate work in a git worktree (compose:worktree)
+- `merge` - Finish or merge a development branch (compose:merge)
+- `new-skill` - Create or update a Compose skill (compose:new-skill)
+
+**Compose Skill Library (13 official skills):**
+- Testing: `compose:tdd`
+- Debugging: `compose:debug`, `compose:verify`
+- Collaboration: `compose:brainstorm`, `compose:plan`, `compose:execute`, `compose:parallel`, `compose:review`, `compose:feedback`, `compose:worktree`, `compose:merge`, `compose:subagent`
+- Meta-development: `compose:new-skill`
+
+**When to use which workflow:**
+- Use `brainstorm` when requirements are still unclear and need clarification.
+- Use `plan` only when the task/requirement is already clear and you need an implementation plan.
+- Use `execute-plan` when an approved plan file exists.
+- Use `new-skill` only for Compose skill authoring.
+- Use `worktree` and `merge` only for explicit git workflow tasks.
 
 **Note:** Reports are written to `.codex-mimo/reports/` and `.codex-mimo/events/`.
 
