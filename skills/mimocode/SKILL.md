@@ -103,7 +103,8 @@ Input: {
   "task": "<task description>",
   "file": "<optional attached file>",
   "verification": ["<optional verification commands>"],
-  "dryRun": false
+  "dryRun": false,
+  "timeoutMs": 110000
 }
 Output: { "status": "passed|failed|needs_review", "changedFiles": [...], "reportPaths": {...} }
 ```
@@ -112,13 +113,13 @@ The MCP response is intentionally compact. Full JSON events, Markdown report, an
 
 **Supported workflows:**
 - `brainstorm` - Clarify fuzzy requirements (compose:brainstorm)
-- `dev` - Feature development (brainstorm → plan → tdd → verify → review)
-- `fix` - Bug fixing (debug → tdd → verify → feedback)
-- `fix-ci` - CI failure repair (debug → tdd → verify → review)
+- `dev` - Feature development (brainstorm -> plan -> tdd -> verify -> review)
+- `fix` - Bug fixing (debug -> tdd -> verify -> feedback)
+- `fix-ci` - CI failure repair (debug -> tdd -> verify -> review)
 - `plan` - Write implementation plan from an already clear requirement (compose:plan only)
-- `execute-plan` - Execute an existing plan (execute → tdd → verify → review)
-- `review` - Review current diff (review → feedback)
-- `parallel` - Parallel exploration (parallel → subagent → verify)
+- `execute-plan` - Execute an existing plan (execute -> tdd -> verify -> review)
+- `review` - Review current diff (review -> feedback)
+- `parallel` - Parallel exploration (parallel -> subagent -> verify)
 - `worktree` - Isolate work in a git worktree (compose:worktree)
 - `merge` - Finish or merge a development branch (compose:merge)
 - `new-skill` - Create or update a Compose skill (compose:new-skill)
@@ -168,6 +169,7 @@ Use this loop for software projects where Codex owns the overall plan and MiMoCo
 - Do not ask MiMoCode to return full diffs in chat; use `diffPath` and Markdown report files.
 - Keep each delegated task small enough that the compact result is actionable without reading the full event log.
 - Prefer explicit verification commands in `mimo_compose.verification` so the returned evidence is short and decisive.
+- For long or tool-time-limited runs, set `mimo_compose.timeoutMs` lower than the caller timeout so `codex-mimo` can stop MiMoCode and write a failure report instead of leaving a stray child process.
 - If `status` is `needs_review`, Codex must inspect the report and relevant diff before accepting the work.
 
 ## Recommended Workflow

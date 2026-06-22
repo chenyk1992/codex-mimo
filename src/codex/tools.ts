@@ -14,6 +14,7 @@ import { implementPrompt, planPrompt, reviewPrompt } from "../core/prompt.js";
 import { runAndCapture } from "../mimo/mimo-runner.js";
 import { runComposeWorkflow } from "../compose/runner.js";
 import { compactComposeReportForCodex } from "./compact.js";
+import type { CompactComposeReport } from "./compact.js";
 
 export async function mimoHealthcheck(input: unknown) {
   const parsed = HealthcheckInput.parse(input);
@@ -157,7 +158,7 @@ export async function mimoResume(input: unknown) {
   };
 }
 
-export async function mimoCompose(input: unknown) {
+export async function mimoCompose(input: unknown): Promise<CompactComposeReport> {
   const parsed = ComposeInput.parse(input);
   const report = await runComposeWorkflow(parsed);
   return compactComposeReportForCodex(report);

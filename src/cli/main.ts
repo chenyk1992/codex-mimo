@@ -46,11 +46,18 @@ const workflowFlag = command === "compose" ? extractFlag("--workflow") : undefin
 const modelFlag = command === "compose" ? extractFlag("--model") : undefined;
 const attachFlag = command === "compose" ? extractFlag("--attach") : undefined;
 const reportDirFlag = command === "compose" ? extractFlag("--report-dir") : undefined;
+const timeoutMsFlag = command === "compose" ? extractFlag("--timeout-ms") : undefined;
 const verifyCommands = command === "compose" ? extractRepeatedFlag("--verify") : [];
 const forkFlag = command === "compose" ? hasFlag("--fork") : false;
 const continueFlag = command === "compose" ? hasFlag("--continue") : false;
 
 const task = rest.join(" ").trim();
+const timeoutMs = timeoutMsFlag ? Number(timeoutMsFlag) : undefined;
+
+if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) {
+  console.error("--timeout-ms must be a positive integer.");
+  process.exit(2);
+}
 
 if (!command) {
   console.error("Usage: codex-mimo <plan|implement|review|fix-ci|compose|healthcheck|sessions|resume> [task]");
@@ -114,7 +121,8 @@ if (command === "healthcheck") {
     continue: continueFlag,
     verification: verifyCommands.length > 0 ? verifyCommands : undefined,
     dryRun,
-    reportDir: reportDirFlag
+    reportDir: reportDirFlag,
+    timeoutMs
   });
 
   if (jsonOutput) {

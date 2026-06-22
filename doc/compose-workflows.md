@@ -51,6 +51,14 @@ The `plan` workflow intentionally uses only `compose:plan`. Use `brainstorm` bef
 
 Every run writes a Markdown report, JSON report, and JSONL event log.
 
+## Timeouts
+
+Use CLI `--timeout-ms` or MCP `timeoutMs` when the caller has its own timeout. Set the bridge timeout lower than the outer timeout so `codex-mimo` can stop MiMoCode and still write a report.
+
+```bash
+codex-mimo compose --workflow plan --timeout-ms 110000 "Create a validation plan"
+```
+
 ## Safety
 
 The launcher never passes `--dangerously-skip-permissions`. It does not commit, push, reset, or delete files.

@@ -1,95 +1,85 @@
-# Codex MiMoCode 插件测试用例
+﻿# Codex MiMoCode Plugin Test Cases
 
-## 测试方式
-在 Codex App 中直接输入以下自然语言指令，观察 Codex 是否正确调用 MiMoCode 工具并返回结果。
+Use these cases inside Codex after installing the plugin. The expected behavior is that Codex calls the MCP tools when they are available, and falls back to the local CLI only when the MCP server is unavailable.
 
----
+## Test 1: Healthcheck
 
-## 测试 1: 基础健康检查
+Input:
 
-**输入：**
-```
-帮我检查一下 MiMoCode 是否可用
+```text
+Check whether MiMoCode is available in this project.
 ```
 
-**预期行为：** Codex 调用 mimo_healthcheck，返回版本号和状态
+Expected behavior: Codex calls `mimo_healthcheck` and returns the version or a clear setup error.
 
----
+## Test 2: Plan
 
-## 测试 2: 简单计划任务
+Input:
 
-**输入：**
-```
-帮我规划一下如何给这个项目添加一个 .gitignore 文件
-```
-
-**预期行为：** Codex 调用 mimo_plan，返回实现计划
-
----
-
-## 测试 3: 代码审查
-
-**输入：**
-```
-帮我看看当前有哪些代码改动，有没有问题
+```text
+Use MiMoCode to plan how to add unit tests to this project.
 ```
 
-**预期行为：** Codex 调用 mimo_review，返回审查结果
+Expected behavior: Codex calls `mimo_plan` or `mimo_compose` with `workflow: "plan"` and reports that no implementation changes were accepted without review.
 
----
+## Test 3: Review
 
-## 测试 4: Compose 开发工作流
+Input:
 
-**输入：**
-```
-用 compose dev 工作流帮我创建一个简单的 CHANGELOG.md 文件
-```
-
-**预期行为：** Codex 调用 mimo_compose，执行完整开发流程并生成报告
-
----
-
-## 测试 5: Compose 计划工作流
-
-**输入：**
-```
-用 compose plan 工作流分析一下这个项目应该怎么添加单元测试
+```text
+Review the current diff for bugs and regressions.
 ```
 
-**预期行为：** Codex 调用 mimo_compose，只读分析不修改文件
+Expected behavior: Codex calls `mimo_review` or `mimo_compose` with `workflow: "review"` and returns findings first.
 
----
+## Test 4: Compose Dev
 
-## 测试 6: 实际实现任务
+Input:
 
-**输入：**
-```
-帮我在这个项目里创建一个 src/utils/helpers.ts 文件，导出一个 add 函数
-```
-
-**预期行为：** Codex 调用 mimo_implement，实际创建文件
-
----
-
-## 测试 7: 查看报告
-
-**输入：**
-```
-帮我看看 .codex-mimo/reports 目录下有什么报告文件
+```text
+Use compose dev to create a minimal CHANGELOG.md update.
 ```
 
-**预期行为：** Codex 列出生成的报告文件
+Expected behavior: Codex calls `mimo_compose` with `workflow: "dev"`, then independently inspects the diff and runs focused verification.
 
----
+## Test 5: Compose Plan With Timeout
 
-## 测试记录
+Input:
 
-| 测试 | 输入摘要 | 结果 | 备注 |
-|------|----------|------|------|
-| 1 | 检查 MiMoCode | ⬜ | |
-| 2 | 规划 .gitignore | ⬜ | |
-| 3 | 审查代码改动 | ⬜ | |
-| 4 | compose dev | ⬜ | |
-| 5 | compose plan | ⬜ | |
-| 6 | 创建 helpers.ts | ⬜ | |
-| 7 | 查看报告 | ⬜ | |
+```text
+Use compose plan with a 110000 ms timeout to analyze how to add integration tests.
+```
+
+Expected behavior: Codex calls `mimo_compose` with `workflow: "plan"` and `timeoutMs: 110000` so the bridge can stop MiMoCode before an outer tool timeout.
+
+## Test 6: Attached File Argument Order
+
+Input:
+
+```text
+Use compose execute-plan with docs/example-plan.md as the attached file.
+```
+
+Expected behavior: The generated MiMoCode argv places the prompt before `--file docs/example-plan.md`, preventing the `--file` array parser from treating `Objective:` as a path.
+
+## Test 7: Dependency Failure
+
+Input:
+
+```text
+Run codex-mimo healthcheck from the installed plugin cache.
+```
+
+Expected behavior: If runtime dependencies are missing, the error clearly points to installing dependencies or using a bundled plugin build. `ERR_MODULE_NOT_FOUND` should not be treated as a MiMoCode auth failure.
+
+## Test Record
+
+| Test | Input summary | Result | Notes |
+| --- | --- | --- | --- |
+| 1 | Healthcheck | TODO | |
+| 2 | Plan | TODO | |
+| 3 | Review | TODO | |
+| 4 | Compose dev | TODO | |
+| 5 | Compose plan timeout | TODO | |
+| 6 | Attached file order | TODO | |
+| 7 | Dependency failure | TODO | |

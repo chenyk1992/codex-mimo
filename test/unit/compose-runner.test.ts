@@ -69,7 +69,7 @@ describe("compose runner", () => {
     expect(reportWritten).toBe(true);
   });
 
-  it("writes report when MiMoCode startup fails", async () => {
+  it("writes report when MiMoCode execution fails", async () => {
     let reportWritten = false;
     const result = await runComposeWorkflow(
       {
@@ -86,8 +86,46 @@ describe("compose runner", () => {
     );
 
     expect(result.status).toBe("failed");
-    expect(result.error).toContain("MiMoCode startup failed");
+    expect(result.error).toContain("MiMoCode execution failed");
     expect(reportWritten).toBe(true);
+  });
+
+  it("passes timeout to MiMoCode runner", async () => {
+    let capturedTimeout: number | undefined;
+    const result = await runComposeWorkflow(
+      {
+        cwd: "E:/project/app",
+        workflow: "plan",
+        task: "Create a concise validation plan.",
+        timeoutMs: 110000,
+        reportDir: "E:/project/app/.codex-mimo/reports"
+      },
+      {
+        runMimo: async (_cwd, _args, options) => {
+          capturedTimeout = options?.timeoutMs;
+          return {
+            stdout: '{"type":"message","text":"done"}\n',
+            stderr: "",
+            exitCode: 0
+          };
+        },
+        captureDiff: async () => ({
+          changedFiles: [],
+          diffStat: "",
+          diff: ""
+        }),
+        captureStatus: async () => ({
+          short: "",
+          dirty: false
+        }),
+        runVerification: async () => [],
+        writeReport: () => undefined,
+        now: () => new Date("2026-06-22T13:00:00.000Z")
+      }
+    );
+
+    expect(capturedTimeout).toBe(110000);
+    expect(result.status).toBe("passed");
   });
 
   it("writes report when git diff capture fails", async () => {

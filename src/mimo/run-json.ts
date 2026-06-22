@@ -20,7 +20,7 @@ export function buildMimoRunArgs(options: MimoRunOptions): string[] {
   if (options.title) args.push("--title", options.title);
   if (options.attach) args.push("--attach", options.attach);
   if (options.continue) args.push("--continue");
+  args.push(options.message);
   for (const file of options.files ?? []) args.push("--file", file);
-  args.push("--", options.message);
   return args;
 }

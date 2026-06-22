@@ -2,17 +2,17 @@ import { describe, expect, it } from "vitest";
 import { buildMimoRunArgs } from "../../src/mimo/run-json.js";
 
 describe("buildMimoRunArgs", () => {
-  it("builds a basic plan command with flags before a separated message", () => {
+  it("builds a basic plan command with the message as a positional argument", () => {
     expect(
       buildMimoRunArgs({
         cwd: "E:/project/app",
         message: "Plan the login change",
         agent: "plan"
       })
-    ).toEqual(["run", "--format", "json", "--agent", "plan", "--", "Plan the login change"]);
+    ).toEqual(["run", "--format", "json", "--agent", "plan", "Plan the login change"]);
   });
 
-  it("separates files from the message so --file cannot consume the prompt", () => {
+  it("puts files after the message so --file cannot consume the prompt", () => {
     expect(
       buildMimoRunArgs({
         cwd: "E:/project/app",
@@ -34,14 +34,13 @@ describe("buildMimoRunArgs", () => {
       "--session",
       "sess_123",
       "--fork",
+      "Fix CI",
       "--file",
-      "ci.log",
-      "--",
-      "Fix CI"
+      "ci.log"
     ]);
   });
 
-  it("builds compose run args with a separated message", () => {
+  it("builds compose run args with files after the message", () => {
     expect(
       buildMimoRunArgs({
         cwd: "E:/project/app",
@@ -66,10 +65,9 @@ describe("buildMimoRunArgs", () => {
       "codex-mimo compose dev",
       "--attach",
       "http://localhost:4096",
+      "Use @compose",
       "--file",
-      "ci.log",
-      "--",
-      "Use @compose"
+      "ci.log"
     ]);
   });
 
@@ -88,7 +86,6 @@ describe("buildMimoRunArgs", () => {
       "--agent",
       "compose",
       "--continue",
-      "--",
       "Continue task"
     ]);
   });

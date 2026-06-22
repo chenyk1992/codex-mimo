@@ -28,4 +28,10 @@ describe("tool schemas", () => {
       ComposeInput.parse({ cwd: "E:/project/app", workflow: "unknown", task: "Test task" })
     ).toThrow();
   });
+
+  it("accepts a positive compose timeout", () => {
+    expect(
+      ComposeInput.parse({ cwd: "E:/project/app", workflow: "dev", task: "Test task", timeoutMs: 110000 }).timeoutMs
+    ).toBe(110000);
+  });
 });

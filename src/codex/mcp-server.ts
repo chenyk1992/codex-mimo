@@ -117,7 +117,8 @@ export function createMcpServer(): McpServer {
       continue: z.boolean().default(false).describe("Continue previous session"),
       verification: z.array(z.string()).optional().describe("Verification commands"),
       dryRun: z.boolean().default(false),
-      reportDir: z.string().optional().describe("Report directory")
+      reportDir: z.string().optional().describe("Report directory"),
+      timeoutMs: z.number().int().positive().optional().describe("MiMoCode process timeout in milliseconds")
     },
     async (args) => {
       const result = await mimoCompose(args);

@@ -24,7 +24,10 @@ describe("CLI command building", () => {
       files: ["ci.log", "error.log"]
     });
     const fileIndices = args.reduce((acc, v, i) => v === "--file" ? [...acc, i] : acc, [] as number[]);
+    const messageIndex = args.indexOf(implementPrompt("Fix CI"));
     expect(fileIndices).toHaveLength(2);
+    expect(messageIndex).toBeGreaterThan(-1);
+    expect(fileIndices[0]).toBeGreaterThan(messageIndex);
     expect(args[fileIndices[0] + 1]).toBe("ci.log");
     expect(args[fileIndices[1] + 1]).toBe("error.log");
   });
