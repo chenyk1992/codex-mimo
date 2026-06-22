@@ -7,6 +7,7 @@ export interface MimoRunResult {
   changedFiles: string[];
   commands: Array<{ command: string; exitCode: number | null }>;
   errors: string[];
+  exitCode: number;
   raw: unknown[];
 }
 
@@ -32,7 +33,10 @@ export async function runAndCapture(options: MimoRunOptions): Promise<MimoRunRes
     parsed.errors.push(result.stderr);
   }
 
-  return parsed;
+  return {
+    ...parsed,
+    exitCode: result.exitCode ?? 1
+  };
 }
 
 function extractFilePath(obj: Record<string, unknown> | undefined): string | null {
@@ -101,6 +105,7 @@ export function parseMimoOutput(messages: unknown[]): MimoRunResult {
     changedFiles: [...changedFiles],
     commands,
     errors,
+    exitCode: 0,
     raw: messages
   };
 }

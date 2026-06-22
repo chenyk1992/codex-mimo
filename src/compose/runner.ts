@@ -172,6 +172,10 @@ export async function runComposeWorkflow(
     gitStatusAfter
   );
   if (readOnlyViolationFiles.length > 0) {
+    const violationDiff = {
+      ...diff,
+      changedFiles: readOnlyViolationFiles
+    };
     const report = buildReport({
       id,
       createdAt,
@@ -179,7 +183,7 @@ export async function runComposeWorkflow(
       mimoArgs,
       requestedSkills: workflow.skillChain,
       eventsStdout: mimoResult.stdout,
-      diff,
+      diff: violationDiff,
       verification: [],
       reportDir,
       eventsDir,
@@ -319,7 +323,12 @@ function detectSemanticFailure(eventsStdout: string): string | undefined {
     "haven't provided an actual task or objective",
     "please share your task",
     "what would you like to work on",
-    "what would you like to accomplish"
+    "what would you like to accomplish",
+    "what task or problem would you like to work on",
+    "what do you need",
+    "how can i help?",
+    "how can i help you",
+    "what are you trying to accomplish"
   ];
 
   if (emptyObjectivePatterns.some((pattern) => text.includes(pattern))) {
@@ -335,9 +344,8 @@ function detectReadOnlyViolationFiles(
   gitStatusBefore?: GitStatusSnapshot,
   gitStatusAfter?: GitStatusSnapshot
 ): string[] {
-  if (writesAllowed || changedFiles.length === 0) return [];
+  if (writesAllowed) return [];
   if (!gitStatusBefore || !gitStatusAfter) return changedFiles;
-  if (!gitStatusBefore.dirty && gitStatusAfter.dirty) return changedFiles;
 
   const beforeFiles = parseGitStatusFiles(gitStatusBefore.short);
   const afterFiles = parseGitStatusFiles(gitStatusAfter.short);
@@ -348,9 +356,8 @@ function parseGitStatusFiles(status: string): Set<string> {
   return new Set(
     status
       .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => line.slice(3).trim())
+      .filter((line) => line.trim())
+      .map((line) => (line.length > 3 ? line.slice(3).trim() : line.trim()))
       .filter(Boolean)
   );
 }

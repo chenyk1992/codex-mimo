@@ -95,12 +95,18 @@ function stringValue(value: unknown): string | undefined {
 }
 
 function nestedRawMessageText(raw: Record<string, unknown>): string | undefined {
+  const part = raw.part;
+  if (isRecord(part)) {
+    const text = stringValue(part.text ?? part.content ?? part.message);
+    if (text) return text;
+  }
+
   const rawPayload = raw.raw;
   if (!isRecord(rawPayload)) return undefined;
 
-  const part = rawPayload.part;
-  if (isRecord(part)) {
-    return stringValue(part.text ?? part.content ?? part.message);
+  const nestedPart = rawPayload.part;
+  if (isRecord(nestedPart)) {
+    return stringValue(nestedPart.text ?? nestedPart.content ?? nestedPart.message);
   }
 
   return stringValue(rawPayload.text ?? rawPayload.content ?? rawPayload.message);

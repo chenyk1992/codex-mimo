@@ -253,6 +253,43 @@ describe("compose runner", () => {
     expect(result.diffPath).toBeDefined();
   });
 
+  it("marks read-only workflows as failed when MiMoCode creates untracked files", async () => {
+    let statusCalls = 0;
+    const result = await runComposeWorkflow(
+      {
+        cwd: "E:/project/app",
+        workflow: "plan",
+        task: "Write a plan without editing files",
+        reportDir: "E:/project/app/.codex-mimo/reports"
+      },
+      {
+        runMimo: async () => ({
+          stdout: '{"type":"message","text":"Created package.json"}\n',
+          stderr: "",
+          exitCode: 0
+        }),
+        captureDiff: async () => ({
+          changedFiles: [],
+          diffStat: "",
+          diff: ""
+        }),
+        captureStatus: async () => {
+          statusCalls += 1;
+          return statusCalls === 1
+            ? { short: "", dirty: false }
+            : { short: "?? package.json\n?? smoke.test.js", dirty: true };
+        },
+        runVerification: async () => [],
+        writeReport: () => undefined,
+        now: () => new Date("2026-06-22T10:00:00.000Z")
+      }
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.changedFiles).toEqual(["package.json", "smoke.test.js"]);
+    expect(result.error).toContain("Read-only workflow plan modified files: package.json, smoke.test.js");
+  });
+
   it("does not fail read-only workflows for pre-existing dirty files", async () => {
     const result = await runComposeWorkflow(
       {
@@ -468,6 +505,179 @@ describe("compose runner", () => {
     expect(result.status).toBe("failed");
     expect(result.error).toContain("MiMoCode did not receive or accept the task objective");
     expect(result.reviewText).toContain("What would you like to accomplish?");
+  });
+
+  it("marks MiMoCode top-level text-part clarification as failed", async () => {
+    const result = await runComposeWorkflow(
+      {
+        cwd: "E:/project/app",
+        workflow: "plan",
+        task: "Create a concise read-only validation plan.",
+        reportDir: "E:/project/app/.codex-mimo/reports"
+      },
+      {
+        runMimo: async () => ({
+          stdout:
+            '{"type":"text","part":{"type":"text","text":"What would you like me to help with?"}}\n',
+          stderr: "",
+          exitCode: 0
+        }),
+        captureDiff: async () => ({
+          changedFiles: [],
+          diffStat: "",
+          diff: ""
+        }),
+        captureStatus: async () => ({
+          short: "",
+          dirty: false
+        }),
+        runVerification: async () => [],
+        writeReport: () => undefined,
+        now: () => new Date("2026-06-22T08:36:00.000Z")
+      }
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("MiMoCode did not receive or accept the task objective");
+    expect(result.reviewText).toContain("What would you like me to help with?");
+  });
+
+  it("marks terse MiMoCode readiness prompt as failed", async () => {
+    const result = await runComposeWorkflow(
+      {
+        cwd: "E:/project/app",
+        workflow: "plan",
+        task: "Create a concise read-only validation plan.",
+        reportDir: "E:/project/app/.codex-mimo/reports"
+      },
+      {
+        runMimo: async () => ({
+          stdout: '{"type":"text","part":{"type":"text","text":"Ready. What do you need?"}}\n',
+          stderr: "",
+          exitCode: 0
+        }),
+        captureDiff: async () => ({
+          changedFiles: [],
+          diffStat: "",
+          diff: ""
+        }),
+        captureStatus: async () => ({
+          short: "",
+          dirty: false
+        }),
+        runVerification: async () => [],
+        writeReport: () => undefined,
+        now: () => new Date("2026-06-22T08:40:00.000Z")
+      }
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("MiMoCode did not receive or accept the task objective");
+    expect(result.reviewText).toContain("Ready. What do you need?");
+  });
+
+  it("marks generic MiMoCode help prompt as failed", async () => {
+    const result = await runComposeWorkflow(
+      {
+        cwd: "E:/project/app",
+        workflow: "plan",
+        task: "Create a concise read-only validation plan.",
+        reportDir: "E:/project/app/.codex-mimo/reports"
+      },
+      {
+        runMimo: async () => ({
+          stdout: '{"type":"text","part":{"type":"text","text":"How can I help you?"}}\n',
+          stderr: "",
+          exitCode: 0
+        }),
+        captureDiff: async () => ({
+          changedFiles: [],
+          diffStat: "",
+          diff: ""
+        }),
+        captureStatus: async () => ({
+          short: "",
+          dirty: false
+        }),
+        runVerification: async () => [],
+        writeReport: () => undefined,
+        now: () => new Date("2026-06-22T10:05:00.000Z")
+      }
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("MiMoCode did not receive or accept the task objective");
+    expect(result.reviewText).toContain("How can I help you?");
+  });
+
+  it("marks generic MiMoCode task prompt as failed", async () => {
+    const result = await runComposeWorkflow(
+      {
+        cwd: "E:/project/app",
+        workflow: "review",
+        task: "Review the current diff.",
+        reportDir: "E:/project/app/.codex-mimo/reports"
+      },
+      {
+        runMimo: async () => ({
+          stdout:
+            '{"type":"text","part":{"type":"text","text":"How can I help? What task or problem would you like to work on?"}}\n',
+          stderr: "",
+          exitCode: 0
+        }),
+        captureDiff: async () => ({
+          changedFiles: [],
+          diffStat: "",
+          diff: ""
+        }),
+        captureStatus: async () => ({
+          short: "",
+          dirty: false
+        }),
+        runVerification: async () => [],
+        writeReport: () => undefined,
+        now: () => new Date("2026-06-22T11:06:30.000Z")
+      }
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("MiMoCode did not receive or accept the task objective");
+    expect(result.reviewText).toContain("What task or problem would you like to work on?");
+  });
+
+  it("marks unavailable-skill clarification prompts as failed", async () => {
+    const result = await runComposeWorkflow(
+      {
+        cwd: "E:/project/app",
+        workflow: "plan",
+        task: "Read the README and write a concise validation plan.",
+        reportDir: "E:/project/app/.codex-mimo/reports"
+      },
+      {
+        runMimo: async () => ({
+          stdout:
+            '{"type":"text","part":{"type":"text","text":"The skill \\"arch:android-misconfig\\" is not available.\\n\\nWhat are you trying to accomplish?"}}\n',
+          stderr: "",
+          exitCode: 0
+        }),
+        captureDiff: async () => ({
+          changedFiles: [],
+          diffStat: "",
+          diff: ""
+        }),
+        captureStatus: async () => ({
+          short: "",
+          dirty: false
+        }),
+        runVerification: async () => [],
+        writeReport: () => undefined,
+        now: () => new Date("2026-06-22T10:16:00.000Z")
+      }
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("MiMoCode did not receive or accept the task objective");
+    expect(result.reviewText).toContain("What are you trying to accomplish?");
   });
 
   it("supports --continue flag", async () => {
