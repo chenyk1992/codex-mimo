@@ -16,7 +16,7 @@ vi.mock("../../src/mimo/mimo-runner.js", () => ({
   runAndCapture: mocks.runAndCapture
 }));
 
-import { mimoReview } from "../../src/codex/tools.js";
+import { mimoCompose, mimoReview } from "../../src/codex/tools.js";
 
 describe("codex tool handlers", () => {
   beforeEach(() => {
@@ -75,5 +75,31 @@ describe("codex tool handlers", () => {
 
     await expect(mimoReview({ cwd, base: "missing" })).rejects.toThrow("Git diff capture failed");
     expect(mocks.runAndCapture).not.toHaveBeenCalled();
+  });
+
+  it("starts compose in background and returns a job launch response", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-bg-"));
+    const result = await mimoCompose(
+      {
+        cwd,
+        workflow: "dev",
+        task: "Implement login throttling",
+        background: true
+      },
+      {
+        spawnJobWorker: () => 999
+      }
+    );
+
+    expect(result).toMatchObject({
+      status: "queued",
+      phase: "queued",
+      actions: {
+        status: "mimo_status",
+        result: "mimo_result",
+        cancel: "mimo_cancel"
+      }
+    });
+    expect(result.jobId).toMatch(/^compose-/);
   });
 });

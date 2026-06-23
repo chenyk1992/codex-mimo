@@ -15,6 +15,9 @@ import { runAndCapture } from "../mimo/mimo-runner.js";
 import { runComposeWorkflow } from "../compose/runner.js";
 import { compactComposeReportForCodex } from "./compact.js";
 import type { CompactComposeReport } from "./compact.js";
+import { createJobStore, updateJob } from "../core/job-store.js";
+import { spawnJobWorker } from "../core/job-process.js";
+import { renderJobLaunch } from "../core/job-render.js";
 
 export async function mimoHealthcheck(input: unknown) {
   const parsed = HealthcheckInput.parse(input);
@@ -158,8 +161,24 @@ export async function mimoResume(input: unknown) {
   };
 }
 
-export async function mimoCompose(input: unknown): Promise<CompactComposeReport> {
+export async function mimoCompose(
+  input: unknown,
+  deps: { spawnJobWorker?: typeof spawnJobWorker } = {}
+): Promise<CompactComposeReport | ReturnType<typeof renderJobLaunch>> {
   const parsed = ComposeInput.parse(input);
+  if (parsed.background) {
+    const store = createJobStore(parsed.cwd);
+    const job = store.create({
+      kind: "compose",
+      workflow: parsed.workflow,
+      task: parsed.task ?? `Run ${parsed.workflow} workflow.`,
+      request: parsed
+    });
+    const pid = (deps.spawnJobWorker ?? spawnJobWorker)(parsed.cwd, "compose", job.id);
+    const queued = updateJob(parsed.cwd, job.id, { pid });
+    return renderJobLaunch(queued);
+  }
+
   const report = await runComposeWorkflow(parsed);
   return compactComposeReportForCodex(report);
 }
