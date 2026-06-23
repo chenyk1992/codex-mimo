@@ -8,9 +8,29 @@ import {
   mimoImplement,
   mimoPlan,
   mimoResume,
-  mimoReview
+  mimoReview,
+  mimoStatus,
+  mimoResult,
+  mimoCancel,
+  mimoJobs,
+  mimoResumeJob
 } from "./tools.js";
 import { ComposeWorkflowSchema } from "./tool-schemas.js";
+
+export const MIMO_TOOL_NAMES = [
+  "mimo_healthcheck",
+  "mimo_plan",
+  "mimo_implement",
+  "mimo_review",
+  "mimo_fix_ci",
+  "mimo_resume",
+  "mimo_compose",
+  "mimo_status",
+  "mimo_result",
+  "mimo_cancel",
+  "mimo_jobs",
+  "mimo_resume_job"
+] as const;
 
 export function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -118,10 +138,79 @@ export function createMcpServer(): McpServer {
       verification: z.array(z.string()).optional().describe("Verification commands"),
       dryRun: z.boolean().default(false),
       reportDir: z.string().optional().describe("Report directory"),
-      timeoutMs: z.number().int().positive().optional().describe("MiMoCode process timeout in milliseconds")
+      timeoutMs: z.number().int().positive().optional().describe("MiMoCode process timeout in milliseconds"),
+      background: z.boolean().default(false).describe("Run as background job"),
+      wait: z.boolean().default(false).describe("Wait for background job to complete")
     },
     async (args) => {
       const result = await mimoCompose(args);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    }
+  );
+
+  server.tool(
+    "mimo_status",
+    "Show active or recent MiMoCode job status.",
+    {
+      cwd: z.string().describe("Project root directory"),
+      jobId: z.string().optional().describe("Job ID (defaults to most recent)")
+    },
+    async (args) => {
+      const result = await mimoStatus(args);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    }
+  );
+
+  server.tool(
+    "mimo_result",
+    "Return the compact final result for a finished MiMoCode job.",
+    {
+      cwd: z.string().describe("Project root directory"),
+      jobId: z.string().optional().describe("Job ID (defaults to most recent finished)")
+    },
+    async (args) => {
+      const result = await mimoResult(args);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    }
+  );
+
+  server.tool(
+    "mimo_cancel",
+    "Cancel an active MiMoCode background job.",
+    {
+      cwd: z.string().describe("Project root directory"),
+      jobId: z.string().describe("Job ID to cancel")
+    },
+    async (args) => {
+      const result = await mimoCancel(args);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    }
+  );
+
+  server.tool(
+    "mimo_jobs",
+    "List recent MiMoCode jobs for a workspace.",
+    {
+      cwd: z.string().describe("Project root directory"),
+      all: z.boolean().default(false).describe("List all jobs instead of recent")
+    },
+    async (args) => {
+      const result = await mimoJobs(args);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    }
+  );
+
+  server.tool(
+    "mimo_resume_job",
+    "Create a follow-up job from a previous job's MiMoCode session.",
+    {
+      cwd: z.string().describe("Project root directory"),
+      jobId: z.string().describe("Parent job ID to resume from"),
+      task: z.string().describe("Task for the resumed job"),
+      background: z.boolean().default(false).describe("Run as background job")
+    },
+    async (args) => {
+      const result = await mimoResumeJob(args);
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
     }
   );

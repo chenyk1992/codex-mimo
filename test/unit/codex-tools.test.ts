@@ -17,6 +17,7 @@ vi.mock("../../src/mimo/mimo-runner.js", () => ({
 }));
 
 import { mimoCompose, mimoReview } from "../../src/codex/tools.js";
+import { MIMO_TOOL_NAMES } from "../../src/codex/mcp-server.js";
 
 describe("codex tool handlers", () => {
   beforeEach(() => {
@@ -101,5 +102,14 @@ describe("codex tool handlers", () => {
       }
     });
     expect(result.jobId).toMatch(/^compose-/);
+  });
+
+  it("registers all job runtime MCP tools", () => {
+    const toolNames = [...MIMO_TOOL_NAMES];
+    expect(toolNames).toContain("mimo_status");
+    expect(toolNames).toContain("mimo_result");
+    expect(toolNames).toContain("mimo_cancel");
+    expect(toolNames).toContain("mimo_jobs");
+    expect(toolNames).toContain("mimo_resume_job");
   });
 });
