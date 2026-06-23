@@ -115,7 +115,7 @@ export class AcpBridge {
         stopReason: promptResult.stopReason
       };
     } finally {
-      this.cleanup();
+      await this.cleanup();
     }
   }
 
@@ -299,8 +299,8 @@ export class AcpBridge {
     return [...files];
   }
 
-  private cleanup(): void {
-    this.audit.close();
+  private async cleanup(): Promise<void> {
+    await this.audit.close();
     this.acp?.stop();
   }
 }

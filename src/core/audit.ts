@@ -43,8 +43,10 @@ export class AuditLogger {
     this.stream.write(line);
   }
 
-  close(): void {
-    this.stream.end();
+  close(): Promise<void> {
+    return new Promise((resolve) => {
+      this.stream.end(() => resolve());
+    });
   }
 
   cleanup(): void {

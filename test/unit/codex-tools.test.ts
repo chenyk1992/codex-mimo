@@ -5,7 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   execa: vi.fn(),
-  runAndCapture: vi.fn()
+  runAndCapture: vi.fn(),
+  runComposeWorkflow: vi.fn()
 }));
 
 vi.mock("execa", () => ({
@@ -16,9 +17,36 @@ vi.mock("../../src/mimo/mimo-runner.js", () => ({
   runAndCapture: mocks.runAndCapture
 }));
 
+vi.mock("../../src/compose/runner.js", () => ({
+  runComposeWorkflow: mocks.runComposeWorkflow
+}));
+
 import { mimoCompose, mimoReview } from "../../src/codex/tools.js";
 import { MIMO_TOOL_NAMES } from "../../src/codex/mcp-server.js";
 import { readJob } from "../../src/core/job-store.js";
+
+function buildComposeReport(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "2026-01-01T00-00-00-000Z-compose-dev",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    workflow: "dev",
+    cwd: "/tmp/proj",
+    task: "Test task",
+    mimoArgs: [],
+    requestedSkills: ["implement"],
+    status: "passed",
+    events: [],
+    changedFiles: ["src/a.ts"],
+    diffStat: "1 file changed",
+    verification: [{ command: "npm test", exitCode: 0, passed: true, durationMs: 100 }],
+    reportPaths: {
+      json: "/tmp/proj/.codex-mimo/reports/report.json",
+      markdown: "/tmp/proj/.codex-mimo/reports/report.md",
+      eventsJsonl: "/tmp/proj/.codex-mimo/events/report.jsonl"
+    },
+    ...overrides
+  };
+}
 
 describe("codex tool handlers", () => {
   beforeEach(() => {
@@ -142,5 +170,64 @@ describe("codex tool handlers", () => {
     expect(toolNames).toContain("mimo_cancel");
     expect(toolNames).toContain("mimo_jobs");
     expect(toolNames).toContain("mimo_resume_job");
+  });
+
+  it("forwards AbortSignal to compose runner", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-signal-"));
+    const controller = new AbortController();
+    mocks.runComposeWorkflow.mockResolvedValue(buildComposeReport());
+    await mimoCompose({ cwd, workflow: "dev", task: "Test" }, {}, { signal: controller.signal });
+    expect(mocks.runComposeWorkflow).toHaveBeenCalledWith(
+      expect.objectContaining({ signal: controller.signal })
+    );
+  });
+
+  it("passes dryRun to compose runner", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-dry-"));
+    mocks.runComposeWorkflow.mockResolvedValue(buildComposeReport({ status: "needs_review" }));
+    const result = await mimoCompose({ cwd, workflow: "plan", task: "Plan only", dryRun: true });
+    expect(mocks.runComposeWorkflow).toHaveBeenCalledWith(
+      expect.objectContaining({ dryRun: true })
+    );
+    expect(result.status).toBe("needs_review");
+  });
+
+  it("includes planText in compact report when present", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-plan-"));
+    mocks.runComposeWorkflow.mockResolvedValue(buildComposeReport({
+      planText: "## Implementation Plan\n1. Add auth\n2. Add tests"
+    }));
+    const result = await mimoCompose({ cwd, workflow: "plan", task: "Plan auth" });
+    expect(result.planText).toContain("Implementation Plan");
+  });
+
+  it("handles already-aborted signal gracefully", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-aborted-"));
+    const controller = new AbortController();
+    controller.abort();
+    mocks.runComposeWorkflow.mockResolvedValue(buildComposeReport({ status: "failed", error: "Aborted" }));
+    const result = await mimoCompose({ cwd, workflow: "dev", task: "Test" }, {}, { signal: controller.signal });
+    expect(result.status).toBe("failed");
+  });
+
+  it("surfaces timeout status in compact report", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-timeout-"));
+    mocks.runComposeWorkflow.mockResolvedValue(buildComposeReport({
+      status: "timeout",
+      error: "MiMoCode process timed out after 1800000ms"
+    }));
+    const result = await mimoCompose({ cwd, workflow: "dev", task: "Long task" });
+    expect(result.status).toBe("timeout");
+    expect(result.error).toContain("timed out");
+  });
+
+  it("passes custom reportDir to compose runner", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-reportdir-"));
+    const customDir = path.join(cwd, "custom-reports");
+    mocks.runComposeWorkflow.mockResolvedValue(buildComposeReport());
+    await mimoCompose({ cwd, workflow: "dev", task: "Test", reportDir: customDir });
+    expect(mocks.runComposeWorkflow).toHaveBeenCalledWith(
+      expect.objectContaining({ reportDir: customDir })
+    );
   });
 });
