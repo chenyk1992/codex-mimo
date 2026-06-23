@@ -20,6 +20,7 @@ interface StreamingChildProcess extends EventEmitter {
 interface StreamingRunOptions {
   onStart?: (pid: number | null) => void;
   timeoutMs?: number;
+  signal?: AbortSignal;
   onLine?: (line: string) => void;
   onStderr?: (chunk: string) => void;
   spawnProcess?: (cwd: string, args: string[]) => StreamingChildProcess;
@@ -36,10 +37,33 @@ function defaultSpawn(cwd: string, args: string[]): StreamingChildProcess {
   });
 }
 
-export function terminateProcessTree(pid: number | null, child: StreamingChildProcess): void {
+export interface TerminateOptions {
+  platform?: NodeJS.Platform;
+  killProcess?: (pid: number, signal?: string) => void;
+  spawnSync?: typeof spawnSync;
+  isProcessAlive?: (pid: number) => boolean;
+}
+
+export function terminateProcessTree(
+  pid: number | null,
+  child: StreamingChildProcess,
+  options: TerminateOptions = {}
+): void {
+  const platform = options.platform ?? process.platform;
+  const killProcess = options.killProcess ?? ((targetPid: number, signal?: string) => process.kill(targetPid, signal));
+  const spawnSyncFn = options.spawnSync ?? spawnSync;
+  const isProcessAlive = options.isProcessAlive ?? ((targetPid: number) => {
+    try {
+      process.kill(targetPid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
   if (Number.isFinite(pid)) {
-    if (process.platform === "win32") {
-      spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+    if (platform === "win32") {
+      spawnSyncFn("taskkill", ["/PID", String(pid), "/T", "/F"], {
         stdio: "ignore",
         windowsHide: true
       });
@@ -47,11 +71,28 @@ export function terminateProcessTree(pid: number | null, child: StreamingChildPr
     }
 
     try {
-      process.kill(-(pid as number), "SIGTERM");
-      return;
+      killProcess(-(pid as number), "SIGTERM");
     } catch {
-      // Fall back to the direct child below.
+      // Process group kill failed, fall through to direct kill.
     }
+
+    if (!isProcessAlive(pid as number)) return;
+
+    try {
+      killProcess(pid as number, "SIGTERM");
+    } catch {
+      // Best-effort.
+    }
+
+    if (!isProcessAlive(pid as number)) return;
+
+    try {
+      killProcess(pid as number, "SIGKILL");
+    } catch {
+      // Best-effort.
+    }
+
+    return;
   }
 
   child.kill();
@@ -69,12 +110,29 @@ export async function runMimoCliStreaming(
 
   options.onStart?.(child.pid ?? null);
 
+  const terminateTree = (options.terminateProcessTree ?? terminateProcessTree).bind(null);
+
   const timeout = options.timeoutMs
     ? setTimeout(() => {
         timedOut = true;
-        (options.terminateProcessTree ?? terminateProcessTree)(child.pid ?? null, child);
+        terminateTree(child.pid ?? null, child);
       }, options.timeoutMs)
     : null;
+
+  let abortCleanup: (() => void) | undefined;
+  if (options.signal) {
+    if (options.signal.aborted) {
+      timedOut = true;
+      terminateTree(child.pid ?? null, child);
+    } else {
+      const onAbort = () => {
+        timedOut = true;
+        terminateTree(child.pid ?? null, child);
+      };
+      options.signal.addEventListener("abort", onAbort, { once: true });
+      abortCleanup = () => options.signal!.removeEventListener("abort", onAbort);
+    }
+  }
 
   const stdoutDone = new Promise<void>((resolve) => {
     if (!child.stdout) {
@@ -110,6 +168,7 @@ export async function runMimoCliStreaming(
   });
 
   if (timeout) clearTimeout(timeout);
+  abortCleanup?.();
   await Promise.all([stdoutDone, stderrDone]);
 
   return {

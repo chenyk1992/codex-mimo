@@ -18,6 +18,7 @@ vi.mock("../../src/mimo/mimo-runner.js", () => ({
 
 import { mimoCompose, mimoReview } from "../../src/codex/tools.js";
 import { MIMO_TOOL_NAMES } from "../../src/codex/mcp-server.js";
+import { readJob } from "../../src/core/job-store.js";
 
 describe("codex tool handlers", () => {
   beforeEach(() => {
@@ -102,6 +103,36 @@ describe("codex tool handlers", () => {
       }
     });
     expect(result.jobId).toMatch(/^compose-/);
+  });
+
+  it("marks job as failed when background worker exits prematurely", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-exit-"));
+    let capturedOnExit: ((code: number | null, signal: string | null) => void) | undefined;
+
+    await mimoCompose(
+      {
+        cwd,
+        workflow: "dev",
+        task: "Some task",
+        background: true
+      },
+      {
+        spawnJobWorker: (_cwd, _kind, _jobId, options) => {
+          capturedOnExit = options?.onExit;
+          return 999;
+        }
+      }
+    );
+
+    expect(capturedOnExit).toBeDefined();
+    capturedOnExit!(1, null);
+
+    const jobs = fs.readdirSync(path.join(cwd, ".codex-mimo", "jobs"))
+      .filter((f) => f.endsWith(".json") && f !== "state.json");
+    expect(jobs).toHaveLength(1);
+    const job = JSON.parse(fs.readFileSync(path.join(cwd, ".codex-mimo", "jobs", jobs[0]), "utf-8"));
+    expect(job.status).toBe("failed");
+    expect(job.errorCode).toBe("worker_exit");
   });
 
   it("registers all job runtime MCP tools", () => {

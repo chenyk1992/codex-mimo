@@ -142,8 +142,8 @@ export function createMcpServer(): McpServer {
       background: z.boolean().default(false).describe("Run as background job"),
       wait: z.boolean().default(false).describe("Wait for background job to complete")
     },
-    async (args) => {
-      const result = await mimoCompose(args);
+    async (args, extra) => {
+      const result = await mimoCompose(args, {}, { signal: extra.signal });
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
     }
   );

@@ -33,9 +33,21 @@ export function buildWorkerProcessLaunch(
   };
 }
 
-export function spawnJobWorker(cwd: string, kind: WorkerKind, jobId: string): number | null {
+export interface SpawnWorkerOptions {
+  spawnProcess?: (...args: unknown[]) => { pid?: number; unref: () => void; on: (event: string, listener: (...args: unknown[]) => void) => void };
+  onError?: (error: Error) => void;
+  onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
+}
+
+export function spawnJobWorker(
+  cwd: string,
+  kind: WorkerKind,
+  jobId: string,
+  options: SpawnWorkerOptions = {}
+): number | null {
   const launch = buildWorkerProcessLaunch(cwd, kind, jobId);
-  const child = spawn(process.execPath, launch.args, {
+  const spawnFn = options.spawnProcess ?? spawn;
+  const child = spawnFn(process.execPath, launch.args, {
     cwd: launch.cwd,
     detached: process.platform !== "win32",
     stdio: "ignore",
@@ -43,6 +55,12 @@ export function spawnJobWorker(cwd: string, kind: WorkerKind, jobId: string): nu
     shell: process.platform === "win32"
   });
   child.unref();
+  if (options.onError) {
+    child.on("error", options.onError);
+  }
+  if (options.onExit) {
+    child.on("exit", options.onExit);
+  }
   return child.pid ?? null;
 }
 

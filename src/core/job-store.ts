@@ -99,6 +99,7 @@ export function createJobStore(cwd: string, options: JobStoreOptions = {}): {
 }
 
 export function listJobs(cwd: string): JobRecord[] {
+  failStaleJobs(cwd);
   return readState(cwd)
     .jobs.map((jobId) => readJobFile(cwd, jobId, { skipMalformed: true }))
     .filter((job): job is JobRecord => job !== undefined);
@@ -275,4 +276,36 @@ function rebuildState(cwd: string): JobState {
 
 function isMissingFileError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+const DEFAULT_STALE_THRESHOLD_MS = 300_000;
+
+export function failStaleJobs(
+  cwd: string,
+  options: { staleThresholdMs?: number } = {}
+): JobRecord[] {
+  const threshold = options.staleThresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
+  const cutoff = Date.now() - threshold;
+  const jobs = readState(cwd)
+    .jobs.map((jobId) => readJobFile(cwd, jobId, { skipMalformed: true }))
+    .filter((job): job is JobRecord => job !== undefined);
+  const failed: JobRecord[] = [];
+
+  for (const job of jobs) {
+    if (job.status !== "queued") continue;
+    const createdAt = new Date(job.createdAt).getTime();
+    if (createdAt >= cutoff) continue;
+
+    const updated = updateJob(cwd, job.id, {
+      status: "failed",
+      phase: "failed",
+      pid: null,
+      completedAt: nowIso(),
+      errorCode: "stale_queued",
+      error: `Job stuck in queued state for longer than ${Math.round(threshold / 1000)}s. Worker process may have failed to start.`
+    });
+    failed.push(updated);
+  }
+
+  return failed;
 }

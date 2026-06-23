@@ -22,6 +22,7 @@ import { compactComposeReportForCodex } from "./compact.js";
 import type { CompactComposeReport } from "./compact.js";
 import { createJobStore, listJobs, readJob, updateJob } from "../core/job-store.js";
 import { spawnJobWorker, terminateJobProcess } from "../core/job-process.js";
+import { isActiveJobStatus } from "../core/jobs.js";
 import { renderJobLaunch, renderJobResult, renderJobStatus } from "../core/job-render.js";
 import { readRecentJobLogLines } from "../core/job-log.js";
 import { SessionStore } from "../core/sessions.js";
@@ -170,7 +171,8 @@ export async function mimoResume(input: unknown) {
 
 export async function mimoCompose(
   input: unknown,
-  deps: { spawnJobWorker?: typeof spawnJobWorker } = {}
+  deps: { spawnJobWorker?: typeof spawnJobWorker } = {},
+  options: { signal?: AbortSignal } = {}
 ): Promise<CompactComposeReport | ReturnType<typeof renderJobLaunch>> {
   const parsed = ComposeInput.parse(input);
   if (parsed.background) {
@@ -181,12 +183,27 @@ export async function mimoCompose(
       task: parsed.task ?? `Run ${parsed.workflow} workflow.`,
       request: parsed
     });
-    const pid = (deps.spawnJobWorker ?? spawnJobWorker)(parsed.cwd, "compose", job.id);
+    const spawnFn = deps.spawnJobWorker ?? spawnJobWorker;
+    const pid = spawnFn(parsed.cwd, "compose", job.id, {
+      onExit: (code, signal) => {
+        const current = readJob(parsed.cwd, job.id);
+        if (current && isActiveJobStatus(current.status)) {
+          updateJob(parsed.cwd, job.id, {
+            status: "failed",
+            phase: "failed",
+            pid: null,
+            completedAt: new Date().toISOString(),
+            errorCode: "worker_exit",
+            error: `Worker process exited unexpectedly (code=${code}, signal=${signal}).`
+          });
+        }
+      }
+    });
     const queued = updateJob(parsed.cwd, job.id, { pid });
     return renderJobLaunch(queued);
   }
 
-  const report = await runComposeWorkflow(parsed);
+  const report = await runComposeWorkflow({ ...parsed, signal: options.signal });
   return compactComposeReportForCodex(report);
 }
 
@@ -275,7 +292,22 @@ export async function mimoResumeJob(
     parentJobId: parent.id
   });
   if (parsed.background) {
-    const pid = (deps.spawnJobWorker ?? spawnJobWorker)(parsed.cwd, "compose", child.id);
+    const spawnFn = deps.spawnJobWorker ?? spawnJobWorker;
+    const pid = spawnFn(parsed.cwd, "compose", child.id, {
+      onExit: (code, signal) => {
+        const current = readJob(parsed.cwd, child.id);
+        if (current && isActiveJobStatus(current.status)) {
+          updateJob(parsed.cwd, child.id, {
+            status: "failed",
+            phase: "failed",
+            pid: null,
+            completedAt: new Date().toISOString(),
+            errorCode: "worker_exit",
+            error: `Worker process exited unexpectedly (code=${code}, signal=${signal}).`
+          });
+        }
+      }
+    });
     return renderJobLaunch(updateJob(parsed.cwd, child.id, { pid }));
   }
   return {

@@ -24,6 +24,7 @@ export interface ComposeRunInput {
   dryRun?: boolean;
   reportDir?: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 interface MimoRunResult {
@@ -33,7 +34,7 @@ interface MimoRunResult {
 }
 
 interface ComposeRunnerDeps {
-  runMimo?: (cwd: string, args: string[], options?: { timeoutMs?: number }) => Promise<MimoRunResult>;
+  runMimo?: (cwd: string, args: string[], options?: { timeoutMs?: number; signal?: AbortSignal }) => Promise<MimoRunResult>;
   captureDiff?: (cwd: string, base?: string) => Promise<GitDiffSnapshot>;
   captureStatus?: (cwd: string) => Promise<GitStatusSnapshot>;
   runVerification?: (cwd: string, commands: string[]) => Promise<VerificationResult[]>;
@@ -111,7 +112,7 @@ export async function runComposeWorkflow(
 
   let mimoResult: MimoRunResult;
   try {
-    mimoResult = await runMimo(input.cwd, mimoArgs, { timeoutMs });
+    mimoResult = await runMimo(input.cwd, mimoArgs, { timeoutMs, signal: input.signal });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const report = buildComposeReportFromRun({
@@ -272,9 +273,9 @@ export async function runComposeWorkflow(
 async function defaultRunMimo(
   cwd: string,
   args: string[],
-  options: { timeoutMs?: number } = {}
+  options: { timeoutMs?: number; signal?: AbortSignal } = {}
 ): Promise<MimoRunResult> {
-  return runMimoCliStreaming(cwd, args, { timeoutMs: options.timeoutMs });
+  return runMimoCliStreaming(cwd, args, { timeoutMs: options.timeoutMs, signal: options.signal });
 }
 
 function validateComposeInput(input: ComposeRunInput, requiresTask: boolean, requiresFile: boolean): void {

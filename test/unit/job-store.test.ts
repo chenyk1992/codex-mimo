@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createJobStore,
+  failStaleJobs,
   listJobs,
   readJob,
   resolveJobPaths,
@@ -169,5 +170,42 @@ describe("job store", () => {
     expect(fs.existsSync(firstPaths.jobFile)).toBe(false);
     expect(fs.existsSync(firstPaths.logFile)).toBe(false);
     expect(fs.existsSync(firstPaths.eventsFile)).toBe(false);
+  });
+});
+
+describe("failStaleJobs", () => {
+  it("marks queued jobs older than threshold as failed", () => {
+    const cwd = tempWorkspace();
+    const store = createJobStore(cwd);
+    const job = store.create({ kind: "compose", workflow: "dev", task: "Stuck task", request: {} });
+
+    const failed = failStaleJobs(cwd, { staleThresholdMs: 0 });
+    expect(failed).toHaveLength(1);
+    expect(failed[0].id).toBe(job.id);
+
+    const updated = readJob(cwd, job.id);
+    expect(updated?.status).toBe("failed");
+    expect(updated?.errorCode).toBe("stale_queued");
+  });
+
+  it("does not affect running or completed jobs", () => {
+    const cwd = tempWorkspace();
+    const store = createJobStore(cwd);
+    const running = store.create({ kind: "compose", workflow: "dev", task: "Running", request: {} });
+    updateJob(cwd, running.id, { status: "running", phase: "starting" });
+    const completed = store.create({ kind: "compose", workflow: "dev", task: "Done", request: {} });
+    updateJob(cwd, completed.id, { status: "completed", phase: "done" });
+
+    const failed = failStaleJobs(cwd, { staleThresholdMs: 0 });
+    expect(failed).toHaveLength(0);
+  });
+
+  it("does not affect recent queued jobs", () => {
+    const cwd = tempWorkspace();
+    const store = createJobStore(cwd);
+    store.create({ kind: "compose", workflow: "dev", task: "Fresh", request: {} });
+
+    const failed = failStaleJobs(cwd, { staleThresholdMs: 300_000 });
+    expect(failed).toHaveLength(0);
   });
 });

@@ -1,6 +1,14 @@
+import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import path from "node:path";
-import { buildWorkerArgs, buildWorkerProcessLaunch, terminateJobProcess } from "../../src/core/job-process.js";
+import { buildWorkerArgs, buildWorkerProcessLaunch, spawnJobWorker, terminateJobProcess } from "../../src/core/job-process.js";
+
+function fakeChild(pid: number) {
+  const child = new EventEmitter() as EventEmitter & { pid: number; unref: () => void };
+  child.pid = pid;
+  child.unref = vi.fn();
+  return child;
+}
 
 describe("job process", () => {
   it("builds compose worker args", () => {
@@ -57,5 +65,47 @@ describe("job process", () => {
     const kill = vi.fn();
     terminateJobProcess(null, { killProcess: kill });
     expect(kill).not.toHaveBeenCalled();
+  });
+});
+
+describe("spawnJobWorker", () => {
+  it("returns the child pid when spawn succeeds", () => {
+    const child = fakeChild(42);
+    const pid = spawnJobWorker("E:/project", "compose", "job-1", {
+      spawnProcess: () => child
+    });
+    expect(pid).toBe(42);
+  });
+
+  it("forwards child error events to onError callback", () => {
+    const child = fakeChild(50);
+    const onError = vi.fn();
+    spawnJobWorker("E:/project", "compose", "job-1", {
+      spawnProcess: () => child,
+      onError
+    });
+    const error = new Error("spawn failed");
+    child.emit("error", error);
+    expect(onError).toHaveBeenCalledWith(error);
+  });
+
+  it("forwards child exit events to onExit callback", () => {
+    const child = fakeChild(60);
+    const onExit = vi.fn();
+    spawnJobWorker("E:/project", "compose", "job-1", {
+      spawnProcess: () => child,
+      onExit
+    });
+    child.emit("exit", 1, null);
+    expect(onExit).toHaveBeenCalledWith(1, null);
+  });
+
+  it("works without callbacks (backward compatible)", () => {
+    const child = fakeChild(70);
+    const pid = spawnJobWorker("E:/project", "compose", "job-1", {
+      spawnProcess: () => child
+    });
+    expect(pid).toBe(70);
+    child.emit("exit", 1, null);
   });
 });
