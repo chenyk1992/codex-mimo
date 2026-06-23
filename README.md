@@ -74,6 +74,10 @@ The MCP server exposes these tools to Codex:
 
 If the installed plugin cache fails with `ERR_MODULE_NOT_FOUND`, the cache is missing runtime dependencies. Reinstall dependencies in the plugin root or use a bundled plugin build; `dist/` alone is not enough for the current NodeNext build.
 
+### Long-Running Jobs
+
+For long Compose workflows, pass `background: true` to receive a `jobId` immediately. Use `mimo_status` for progress, `mimo_result` for final output, and `mimo_cancel` to stop active work. Full artifacts are persisted under `.codex-mimo/`.
+
 ## Safety Model
 
 - Writes outside workspace: **denied**

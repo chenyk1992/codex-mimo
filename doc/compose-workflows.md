@@ -59,6 +59,19 @@ Use CLI `--timeout-ms` or MCP `timeoutMs` when the caller has its own timeout. S
 codex-mimo compose --workflow plan --timeout-ms 110000 "Create a validation plan"
 ```
 
+## Background Execution
+
+Use `background: true` for long workflows such as `dev`, `fix`, `fix-ci`, `execute-plan`, and `parallel`.
+
+The launch response includes a `jobId`. Use job tools to check progress, retrieve results, or cancel:
+
+- `mimo_status`
+- `mimo_result`
+- `mimo_cancel`
+- `mimo_jobs`
+
+Reports remain the full artifact of record. Job responses stay compact so they are safe to return to Codex.
+
 ## Safety
 
 The launcher never passes `--dangerously-skip-permissions`. It does not commit, push, reset, or delete files.

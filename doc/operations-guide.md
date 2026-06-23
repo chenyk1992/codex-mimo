@@ -1,4 +1,4 @@
-﻿# Operations Guide
+# Operations Guide
 
 ## Enable The Bridge
 
@@ -48,6 +48,28 @@ codex-mimo compose --workflow plan --timeout-ms 110000 "Create a validation plan
 ```
 
 For long `dev` runs, redirect output to files or use the MCP tool so the report paths remain available even when the run needs review.
+
+## Background Jobs
+
+Long Compose workflows can run as persisted jobs.
+
+Start a background job through MCP:
+
+```json
+{
+  "tool": "mimo_compose",
+  "arguments": {
+    "cwd": "/path/to/repo",
+    "workflow": "dev",
+    "task": "Implement login throttling",
+    "background": true
+  }
+}
+```
+
+Inspect it with `mimo_status`, retrieve final output with `mimo_result`, and cancel active work with `mimo_cancel`.
+
+Job artifacts are stored under `.codex-mimo/jobs`. Compose reports continue to be written under `.codex-mimo/reports`, `.codex-mimo/events`, and `.codex-mimo/diffs`.
 
 ## Disable The Bridge
 
