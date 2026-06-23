@@ -130,7 +130,9 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
     return;
   }
 
-  const status = runResult.exitCode === 0 && verification.every((item) => item.passed)
+  const status = runResult.exitCode === 124
+    ? "timeout"
+    : runResult.exitCode === 0 && verification.every((item) => item.passed)
     ? (verification.length === 0 && diff.changedFiles.length > 0 ? "needs_review" : "passed")
     : "failed";
   const report = buildComposeReportFromRun({

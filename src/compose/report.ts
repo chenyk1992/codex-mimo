@@ -13,7 +13,7 @@ export interface ComposeReport {
   task: string;
   mimoArgs: string[];
   requestedSkills: string[];
-  status: "passed" | "failed" | "needs_review";
+  status: "passed" | "failed" | "needs_review" | "timeout";
   events: NormalizedMimoEvent[];
   changedFiles: string[];
   diffStat: string;

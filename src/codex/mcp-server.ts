@@ -138,7 +138,7 @@ export function createMcpServer(): McpServer {
       verification: z.array(z.string()).optional().describe("Verification commands"),
       dryRun: z.boolean().default(false),
       reportDir: z.string().optional().describe("Report directory"),
-      timeoutMs: z.number().int().positive().optional().describe("MiMoCode process timeout in milliseconds"),
+      timeoutMs: z.number().int().positive().default(1_800_000).describe("MiMoCode process timeout in milliseconds (default: 30 minutes)"),
       background: z.boolean().default(false).describe("Run as background job"),
       wait: z.boolean().default(false).describe("Wait for background job to complete")
     },

@@ -55,7 +55,7 @@ const forkFlag = command === "compose" ? hasFlag("--fork") : false;
 const continueFlag = command === "compose" ? hasFlag("--continue") : false;
 
 const task = rest.join(" ").trim();
-const timeoutMs = timeoutMsFlag ? Number(timeoutMsFlag) : undefined;
+const timeoutMs = timeoutMsFlag ? Number(timeoutMsFlag) : 1_800_000;
 
 if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) {
   console.error("--timeout-ms must be a positive integer.");

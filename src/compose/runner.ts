@@ -45,6 +45,7 @@ export async function runComposeWorkflow(
   input: ComposeRunInput,
   deps: ComposeRunnerDeps = {}
 ): Promise<ComposeReport> {
+  const timeoutMs = input.timeoutMs ?? 1_800_000;
   const workflow = getComposeWorkflow(input.workflow);
   validateComposeInput(input, workflow.requiresTask, workflow.requiresFile);
 
@@ -110,7 +111,7 @@ export async function runComposeWorkflow(
 
   let mimoResult: MimoRunResult;
   try {
-    mimoResult = await runMimo(input.cwd, mimoArgs, { timeoutMs: input.timeoutMs });
+    mimoResult = await runMimo(input.cwd, mimoArgs, { timeoutMs });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const report = buildComposeReportFromRun({
@@ -289,7 +290,8 @@ function determineStatus(
   mimoExitCode: number,
   changedFiles: string[],
   verification: VerificationResult[]
-): "passed" | "failed" | "needs_review" {
+): "passed" | "failed" | "needs_review" | "timeout" {
+  if (mimoExitCode === 124) return "timeout";
   if (mimoExitCode !== 0) return "failed";
   if (verification.some((result) => !result.passed)) return "failed";
   if (verification.length === 0 && changedFiles.length > 0) return "needs_review";
@@ -298,35 +300,53 @@ function determineStatus(
 
 function detectSemanticFailure(eventsStdout: string): string | undefined {
   const events = parseMimoJsonLines(eventsStdout);
-  const text = events
-    .filter((event) => event.type === "message" && event.text)
-    .map((event) => event.text)
-    .join("\n")
-    .toLowerCase();
+  const messages = events.filter((event) => event.type === "message" && event.text);
 
-  const emptyObjectivePatterns = [
-    "objective is empty",
-    "what would you like me to help with",
-    "task is empty",
-    "no objective provided",
-    "no task provided",
-    "message got cut off",
-    "what's the objective",
-    "what is the objective",
-    "haven't provided a task",
-    "haven't provided an actual task or objective",
-    "please share your task",
-    "what would you like to work on",
-    "what would you like to accomplish",
-    "what task or problem would you like to work on",
-    "what do you need",
-    "how can i help?",
-    "how can i help you",
-    "what are you trying to accomplish"
-  ];
+  // Only check first 3 messages - real failures appear early
+  const earlyMessages = messages.slice(0, 3);
 
-  if (emptyObjectivePatterns.some((pattern) => text.includes(pattern))) {
-    return "MiMoCode did not receive or accept the task objective.";
+  for (const event of earlyMessages) {
+    const text = (event.text ?? "").toLowerCase().trim();
+
+    // Skip long messages (likely code analysis, not actual failure)
+    if (text.length > 500) continue;
+
+    // Skip messages containing code blocks (source code references)
+    if (text.includes("```")) continue;
+
+    // Skip messages that look like they're explaining code (contain function signatures)
+    if (/\bfunction\s+\w+\s*\(/.test(text) || /\bconst\s+\w+\s*=/.test(text)) continue;
+
+    // Match patterns - allow at start of sentence or after common delimiters
+    const failurePatterns = [
+      /what would you like me to help/i,
+      /what would you like to work on/i,
+      /what would you like to accomplish/i,
+      /what task or problem/i,
+      /what do you need/i,
+      /how can i help/i,
+      /what are you trying to accomplish/i,
+      /please share your task/i,
+      /objective is empty/i,
+      /task is empty/i,
+      /no objective provided/i,
+      /no task provided/i,
+      /haven't provided a task/i,
+      /haven't provided an actual task/i,
+      /message got cut off/i,
+      /what's the objective/i,
+      /what is the objective/i,
+    ];
+
+    const matchesFailure = failurePatterns.some((pattern) => pattern.test(text));
+
+    // Also check for standalone questions (short message ending with ?)
+    const isStandaloneQuestion = text.length < 150 && text.endsWith("?") &&
+      /^(what|how|please)\s/i.test(text);
+
+    if (matchesFailure || isStandaloneQuestion) {
+      return "MiMoCode did not receive or accept the task objective.";
+    }
   }
 
   return undefined;
@@ -379,7 +399,7 @@ export function buildComposeReportFromRun(input: {
   reportDir: string;
   eventsDir: string;
   diffsDir: string;
-  status: "passed" | "failed" | "needs_review";
+  status: "passed" | "failed" | "needs_review" | "timeout";
   gitStatusBefore?: GitStatusSnapshot;
   gitStatusAfter?: GitStatusSnapshot;
   error?: string;

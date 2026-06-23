@@ -37,9 +37,10 @@ export function spawnJobWorker(cwd: string, kind: WorkerKind, jobId: string): nu
   const launch = buildWorkerProcessLaunch(cwd, kind, jobId);
   const child = spawn(process.execPath, launch.args, {
     cwd: launch.cwd,
-    detached: true,
+    detached: process.platform !== "win32",
     stdio: "ignore",
-    windowsHide: true
+    windowsHide: true,
+    shell: process.platform === "win32"
   });
   child.unref();
   return child.pid ?? null;

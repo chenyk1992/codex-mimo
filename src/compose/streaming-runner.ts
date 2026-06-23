@@ -31,7 +31,8 @@ function defaultSpawn(cwd: string, args: string[]): StreamingChildProcess {
     cwd,
     detached: process.platform !== "win32",
     stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true
+    windowsHide: true,
+    shell: process.platform === "win32"
   });
 }
 

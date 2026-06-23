@@ -52,7 +52,7 @@ export const ComposeInput = z.object({
   verification: z.array(z.string()).optional(),
   dryRun: z.boolean().default(false),
   reportDir: z.string().optional(),
-  timeoutMs: z.number().int().positive().optional(),
+  timeoutMs: z.number().int().positive().default(1_800_000),
   background: z.boolean().default(false),
   wait: z.boolean().default(false)
 });
