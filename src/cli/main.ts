@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { runFixCi, runImplement, runPlan, runReview } from "./commands.js";
 import { runComposeWorkflow } from "../compose/runner.js";
+import { runComposeJobWorker } from "../compose/job-worker.js";
 import { composeWorkflowUsage } from "../compose/workflow-names.js";
 import { execa } from "execa";
 import { SessionStore } from "../core/sessions.js";
@@ -37,6 +38,8 @@ function hasFlag(flag: string): boolean {
 const sessionFlag = extractFlag("--session");
 const fileFlag = extractFlag("--file");
 const baseFlag = extractFlag("--since");
+const cwdFlag = extractFlag("--cwd");
+const effectiveCwd = cwdFlag ?? cwd;
 const dryRun = hasFlag("--dry-run");
 const jsonOutput = hasFlag("--json");
 const ciMode = hasFlag("--ci");
@@ -102,6 +105,13 @@ if (command === "healthcheck") {
     process.exit(0);
   }
   await runFixCi(cwd, fileFlag, task || undefined, extraFiles);
+} else if (command === "compose-worker") {
+  const jobId = extractFlag("--job-id");
+  if (!jobId) {
+    console.error("Usage: codex-mimo compose-worker --job-id <job-id> [--cwd <path>]");
+    process.exit(2);
+  }
+  await runComposeJobWorker(effectiveCwd, jobId);
 } else if (command === "compose") {
   if (!workflowFlag) {
     console.error(`Usage: codex-mimo compose --workflow <${composeWorkflowUsage()}> [task]`);

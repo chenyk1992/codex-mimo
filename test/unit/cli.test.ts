@@ -118,3 +118,18 @@ describe("CLI flag effects", () => {
     expect(args).toContain("ci.log");
   });
 });
+
+describe("compose-worker command", () => {
+  it("requires --job-id flag", () => {
+    const args = ["compose-worker"];
+    expect(args).toContain("compose-worker");
+    expect(args).not.toContain("--job-id");
+  });
+
+  it("accepts --job-id flag", () => {
+    const args = ["compose-worker", "--job-id", "job-1"];
+    const jobIdIndex = args.indexOf("--job-id");
+    expect(jobIdIndex).toBeGreaterThan(-1);
+    expect(args[jobIdIndex + 1]).toBe("job-1");
+  });
+});
