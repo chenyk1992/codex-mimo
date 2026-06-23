@@ -67,7 +67,8 @@ describe("compose prompt semantics", () => {
       task: "Fix .codex-mimo/plugin-smoke/sum.ts so it returns a + b."
     });
 
-    expect(prompt.startsWith("Objective:\nFix .codex-mimo/plugin-smoke/sum.ts")).toBe(true);
+    expect(prompt.startsWith("Objective: Fix .codex-mimo/plugin-smoke/sum.ts")).toBe(true);
+    expect(prompt).not.toContain("Objective:\n");
   });
 
   it("tells compose:plan to treat the objective as the requirement", () => {

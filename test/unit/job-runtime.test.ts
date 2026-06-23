@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { appendRuntimeEvent, completeRuntimeJob, failRuntimeJob, startRuntimeJob } from "../../src/core/job-runtime.js";
-import { createJobStore, readJob } from "../../src/core/job-store.js";
+import { createJobStore, readJob, updateJob } from "../../src/core/job-store.js";
 
 function tempWorkspace(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-job-runtime-"));
@@ -58,5 +58,49 @@ describe("job runtime lifecycle", () => {
       phase: "failed",
       errorCode: "nonzero_exit"
     });
+  });
+
+  it("does not overwrite a job that was cancelled while the worker was still exiting", () => {
+    const cwd = tempWorkspace();
+    const store = createJobStore(cwd);
+    const completedLate = store.create({ kind: "compose", task: "complete late", request: {} });
+    updateJob(cwd, completedLate.id, {
+      status: "cancelled",
+      phase: "cancelled",
+      summary: "Cancelled by user."
+    });
+
+    completeRuntimeJob(cwd, completedLate.id, {
+      summary: "done",
+      changedFiles: ["src/a.ts"],
+      verification: []
+    });
+
+    expect(readJob(cwd, completedLate.id)).toMatchObject({
+      status: "cancelled",
+      phase: "cancelled",
+      summary: "Cancelled by user.",
+      changedFiles: []
+    });
+
+    const failedLate = store.create({ kind: "compose", task: "fail late", request: {} });
+    updateJob(cwd, failedLate.id, {
+      status: "cancelled",
+      phase: "cancelled",
+      summary: "Cancelled by user."
+    });
+
+    failRuntimeJob(cwd, failedLate.id, {
+      errorCode: "nonzero_exit",
+      error: "MiMo failed after cancellation."
+    });
+
+    const failedLateRecord = readJob(cwd, failedLate.id);
+    expect(failedLateRecord).toMatchObject({
+      status: "cancelled",
+      phase: "cancelled",
+      summary: "Cancelled by user."
+    });
+    expect(failedLateRecord).not.toHaveProperty("errorCode");
   });
 });

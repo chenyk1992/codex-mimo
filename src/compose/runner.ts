@@ -1,11 +1,11 @@
 import path from "node:path";
 import fs from "node:fs";
-import { execa } from "execa";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
 import { captureGitDiff, type GitDiffSnapshot } from "../git/diff.js";
 import { captureGitStatus, type GitStatusSnapshot } from "../git/status.js";
 import { parseMimoJsonLines } from "./events.js";
 import { writeComposeReport, type ComposeReport } from "./report.js";
+import { runMimoCliStreaming } from "./streaming-runner.js";
 import { normalizeVerificationCommands, runVerificationCommands, type VerificationResult } from "./verify.js";
 import { buildComposePrompt, getComposeWorkflow, type ComposeWorkflowName } from "./workflow.js";
 
@@ -173,10 +173,7 @@ export async function runComposeWorkflow(
     gitStatusAfter
   );
   if (readOnlyViolationFiles.length > 0) {
-    const violationDiff = {
-      ...diff,
-      changedFiles: readOnlyViolationFiles
-    };
+    const violationDiff = buildReadOnlyReportDiff(diff, readOnlyViolationFiles);
     const report = buildComposeReportFromRun({
       id,
       createdAt,
@@ -198,6 +195,7 @@ export async function runComposeWorkflow(
     return report;
   }
 
+  const reportDiff = workflow.writesAllowed ? diff : buildReadOnlyReportDiff(diff, readOnlyViolationFiles);
   const verificationCommands = normalizeVerificationCommands(input.verification, workflow.defaultVerification);
   let verification: VerificationResult[] = [];
   try {
@@ -211,7 +209,7 @@ export async function runComposeWorkflow(
       mimoArgs,
       requestedSkills: workflow.skillChain,
       eventsStdout: mimoResult.stdout,
-      diff,
+      diff: reportDiff,
       verification: [],
       reportDir,
       eventsDir,
@@ -234,7 +232,7 @@ export async function runComposeWorkflow(
       mimoArgs,
       requestedSkills: workflow.skillChain,
       eventsStdout: mimoResult.stdout,
-      diff,
+      diff: reportDiff,
       verification,
       reportDir,
       eventsDir,
@@ -248,7 +246,7 @@ export async function runComposeWorkflow(
     return report;
   }
 
-  const status = determineStatus(mimoResult.exitCode, diff.changedFiles, verification);
+  const status = determineStatus(mimoResult.exitCode, reportDiff.changedFiles, verification);
   const report = buildComposeReportFromRun({
     id,
     createdAt,
@@ -256,7 +254,7 @@ export async function runComposeWorkflow(
     mimoArgs,
     requestedSkills: workflow.skillChain,
     eventsStdout: mimoResult.stdout,
-    diff,
+    diff: reportDiff,
     verification,
     reportDir,
     eventsDir,
@@ -275,18 +273,7 @@ async function defaultRunMimo(
   args: string[],
   options: { timeoutMs?: number } = {}
 ): Promise<MimoRunResult> {
-  const result = await execa("mimo", args, {
-    cwd,
-    reject: false,
-    stdin: "ignore",
-    timeout: options.timeoutMs,
-    forceKillAfterDelay: options.timeoutMs ? 5000 : false
-  });
-  return {
-    stdout: result.stdout,
-    stderr: result.stderr,
-    exitCode: result.exitCode ?? 1
-  };
+  return runMimoCliStreaming(cwd, args, { timeoutMs: options.timeoutMs });
 }
 
 function validateComposeInput(input: ComposeRunInput, requiresTask: boolean, requiresFile: boolean): void {
@@ -357,6 +344,17 @@ function detectReadOnlyViolationFiles(
   const beforeFiles = parseGitStatusFiles(gitStatusBefore.short);
   const afterFiles = parseGitStatusFiles(gitStatusAfter.short);
   return [...afterFiles].filter((file) => !beforeFiles.has(file));
+}
+
+function buildReadOnlyReportDiff(diff: GitDiffSnapshot, readOnlyViolationFiles: string[]): GitDiffSnapshot {
+  if (readOnlyViolationFiles.length === 0) {
+    return { changedFiles: [], diffStat: "", diff: "" };
+  }
+
+  return {
+    ...diff,
+    changedFiles: readOnlyViolationFiles
+  };
 }
 
 function parseGitStatusFiles(status: string): Set<string> {

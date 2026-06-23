@@ -1,10 +1,9 @@
 {
-  "mcpServers": {
-    "codex-mimocode": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["dist/codex/mcp-server.js"],
-      "env": {}
-    }
+  "codex-mimocode": {
+    "type": "stdio",
+    "command": "node",
+    "args": ["dist/codex/mcp-server.js"],
+    "cwd": ".",
+    "env": {}
   }
 }

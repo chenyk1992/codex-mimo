@@ -57,4 +57,31 @@ describe("streaming MiMo CLI runner", () => {
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toBe("failed\n");
   });
+
+  it("terminates the process tree on timeout", async () => {
+    let killedPid: number | null | undefined;
+    const result = await runMimoCliStreaming("E:/project/app", ["run"], {
+      timeoutMs: 1,
+      spawnProcess: () => {
+        const child = new EventEmitter() as EventEmitter & {
+          stdout: Readable;
+          stderr: Readable;
+          pid: number;
+          kill: () => boolean;
+        };
+        child.pid = 789;
+        child.stdout = Readable.from([""]);
+        child.stderr = Readable.from([""]);
+        child.kill = () => true;
+        return child;
+      },
+      terminateProcessTree: (pid, child) => {
+        killedPid = pid;
+        queueMicrotask(() => child.emit("close", null));
+      }
+    });
+
+    expect(killedPid).toBe(789);
+    expect(result.exitCode).toBe(124);
+  });
 });

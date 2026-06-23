@@ -8,6 +8,7 @@ import { writeComposeReport } from "./report.js";
 import { runMimoCliStreaming, type StreamingRunResult } from "./streaming-runner.js";
 import { appendRuntimeEvent, completeRuntimeJob, failRuntimeJob, startRuntimeJob } from "../core/job-runtime.js";
 import { readJob, updateJob } from "../core/job-store.js";
+import { isActiveJobStatus } from "../core/jobs.js";
 
 interface ComposeWorkerRequest {
   cwd: string;
@@ -79,9 +80,9 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
   try {
     runResult = await (deps.runMimoStreaming ?? runMimoCliStreaming)(input.cwd, mimoArgs, {
       timeoutMs: input.timeoutMs,
+      onStart: (pid) => recordActiveJobPid(cwd, jobId, pid),
       onLine: (line) => appendRuntimeEvent(cwd, jobId, line)
     });
-    updateJob(cwd, jobId, { pid: runResult.pid });
   } catch (error) {
     failRuntimeJob(cwd, jobId, {
       errorCode: "startup_failed",
@@ -167,4 +168,10 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
     verification: report.verification,
     reportPaths: jobReportPaths(report)
   });
+}
+
+function recordActiveJobPid(cwd: string, jobId: string, pid: number | null): void {
+  const job = readJob(cwd, jobId);
+  if (!job || !isActiveJobStatus(job.status)) return;
+  updateJob(cwd, jobId, { pid });
 }

@@ -2,6 +2,7 @@ import { normalizeMimoEvent } from "../compose/events.js";
 import { appendJobEventLine, appendJobLogLine } from "./job-log.js";
 import { inferPhaseFromEvent, summarizeEventForLog } from "./job-phase.js";
 import { readJob, updateJob } from "./job-store.js";
+import { isActiveJobStatus } from "./jobs.js";
 import type { JobRecord, JobReportPaths, JobVerification } from "./jobs.js";
 
 export function startRuntimeJob(cwd: string, jobId: string, patch: { pid?: number | null } = {}): JobRecord {
@@ -16,6 +17,7 @@ export function startRuntimeJob(cwd: string, jobId: string, patch: { pid?: numbe
 
 export function appendRuntimeEvent(cwd: string, jobId: string, line: string): JobRecord {
   const job = mustReadJob(cwd, jobId);
+  if (!isActiveJobStatus(job.status)) return job;
   appendJobEventLine(job.eventsFile, line);
 
   let raw: unknown = line;
@@ -48,6 +50,7 @@ export function completeRuntimeJob(
   }
 ): JobRecord {
   const job = mustReadJob(cwd, jobId);
+  if (!isActiveJobStatus(job.status)) return job;
   appendJobLogLine(job.logFile, result.summary);
   return updateJob(cwd, jobId, {
     status: "completed",
@@ -72,6 +75,7 @@ export function failRuntimeJob(
   }
 ): JobRecord {
   const job = mustReadJob(cwd, jobId);
+  if (!isActiveJobStatus(job.status)) return job;
   appendJobLogLine(job.logFile, failure.error);
   return updateJob(cwd, jobId, {
     status: "failed",

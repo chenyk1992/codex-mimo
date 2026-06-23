@@ -10,6 +10,39 @@ function tempWorkspace(): string {
 }
 
 describe("compose job worker", () => {
+  it("records the active MiMo pid as soon as the child process starts", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "compose",
+      workflow: "dev",
+      task: "Long task",
+      request: { cwd, workflow: "dev", task: "Long task" }
+    });
+
+    let finishRun!: () => void;
+    const worker = runComposeJobWorker(cwd, job.id, {
+      runMimoStreaming: async (_cwd, _args, options) => {
+        options.onStart?.(999);
+        await new Promise<void>((resolve) => {
+          finishRun = resolve;
+        });
+        return { stdout: "", stderr: "", exitCode: 0, pid: 999 };
+      },
+      captureDiff: async () => ({ changedFiles: [], diffStat: "", diff: "" }),
+      captureStatus: async () => ({ short: "", dirty: false }),
+      runVerification: async () => []
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "running",
+      pid: 999
+    });
+
+    finishRun();
+    await worker;
+  });
+
   it("runs a stored compose request and completes the job", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({

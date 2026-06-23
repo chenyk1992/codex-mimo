@@ -356,7 +356,7 @@ describe("compose runner", () => {
     expect(result.error).toContain("Read-only workflow plan modified files: package.json, smoke.test.js");
   });
 
-  it("does not fail read-only workflows for pre-existing dirty files", async () => {
+  it("does not report pre-existing dirty files as read-only workflow changes", async () => {
     const result = await runComposeWorkflow(
       {
         cwd: "E:/project/app",
@@ -385,9 +385,11 @@ describe("compose runner", () => {
       }
     );
 
-    expect(result.status).toBe("needs_review");
+    expect(result.status).toBe("passed");
     expect(result.error).toBeUndefined();
-    expect(result.changedFiles).toEqual(["src/existing.ts"]);
+    expect(result.changedFiles).toEqual([]);
+    expect(result.diffStat).toBe("");
+    expect(result.diffPath).toBeUndefined();
   });
 
   it("marks MiMoCode empty-objective clarification as failed", async () => {

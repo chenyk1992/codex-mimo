@@ -135,9 +135,9 @@ export function listComposeWorkflows(): ComposeWorkflow[] {
 export function buildComposePrompt(input: BuildComposePromptInput): string {
   const { workflow, task, file, since } = input;
   const lines: string[] = [];
+  const objective = task?.trim() || defaultTaskForWorkflow(workflow.name);
 
-  lines.push("Objective:");
-  lines.push(task?.trim() || defaultTaskForWorkflow(workflow.name));
+  lines.push(`Objective: ${objective}`);
   lines.push("");
   lines.push(`Workflow: ${workflow.name} - ${workflow.description}`);
   lines.push("");

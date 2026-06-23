@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import readline from "node:readline";
 import type { Readable } from "node:stream";
@@ -18,18 +18,42 @@ interface StreamingChildProcess extends EventEmitter {
 }
 
 interface StreamingRunOptions {
+  onStart?: (pid: number | null) => void;
   timeoutMs?: number;
   onLine?: (line: string) => void;
   onStderr?: (chunk: string) => void;
   spawnProcess?: (cwd: string, args: string[]) => StreamingChildProcess;
+  terminateProcessTree?: (pid: number | null, child: StreamingChildProcess) => void;
 }
 
 function defaultSpawn(cwd: string, args: string[]): StreamingChildProcess {
   return spawn("mimo", args, {
     cwd,
+    detached: process.platform !== "win32",
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
   });
+}
+
+export function terminateProcessTree(pid: number | null, child: StreamingChildProcess): void {
+  if (Number.isFinite(pid)) {
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true
+      });
+      return;
+    }
+
+    try {
+      process.kill(-(pid as number), "SIGTERM");
+      return;
+    } catch {
+      // Fall back to the direct child below.
+    }
+  }
+
+  child.kill();
 }
 
 export async function runMimoCliStreaming(
@@ -42,10 +66,12 @@ export async function runMimoCliStreaming(
   const stderrParts: string[] = [];
   let timedOut = false;
 
+  options.onStart?.(child.pid ?? null);
+
   const timeout = options.timeoutMs
     ? setTimeout(() => {
         timedOut = true;
-        child.kill();
+        (options.terminateProcessTree ?? terminateProcessTree)(child.pid ?? null, child);
       }, options.timeoutMs)
     : null;
 
