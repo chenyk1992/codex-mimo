@@ -10,11 +10,11 @@ export function appendJobLogLine(logFile: string, message: string): void {
 }
 
 export function appendJobEventLine(eventsFile: string, line: string): void {
-  const trimmed = line.trimEnd();
-  if (!trimmed) return;
+  const withoutNewline = line.replace(/\r?\n$/, "");
+  if (!withoutNewline.trim()) return;
 
   ensureParentDir(eventsFile);
-  fs.appendFileSync(eventsFile, `${trimmed}\n`, "utf8");
+  fs.appendFileSync(eventsFile, `${withoutNewline}\n`, "utf8");
 }
 
 export function readRecentJobLogLines(logFile: string, count = 5): string[] {

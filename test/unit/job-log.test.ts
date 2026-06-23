@@ -38,9 +38,18 @@ describe("job log", () => {
     const eventsFile = path.join(tempWorkspace(), "events", "job.jsonl");
 
     appendJobEventLine(eventsFile, '{"type":"message","text":"hello"}\n');
+    appendJobEventLine(eventsFile, '{"type":"message","text":"space"}   \n');
     appendJobEventLine(eventsFile, "not json");
     appendJobEventLine(eventsFile, "   \n");
 
-    expect(fs.readFileSync(eventsFile, "utf8")).toBe('{"type":"message","text":"hello"}\nnot json\n');
+    expect(fs.readFileSync(eventsFile, "utf8")).toBe(
+      '{"type":"message","text":"hello"}\n{"type":"message","text":"space"}   \nnot json\n'
+    );
+  });
+
+  it("returns no recent lines when the log file does not exist", () => {
+    const logFile = path.join(tempWorkspace(), "missing", "job.log");
+
+    expect(readRecentJobLogLines(logFile)).toEqual([]);
   });
 });
