@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { parseMimoJsonLines, summarizeEvents } from "../../src/compose/events.js";
+import { normalizeMimoEvent, parseMimoJsonLines, summarizeEvents } from "../../src/compose/events.js";
 
 describe("compose event parsing", () => {
+  it("normalizes public message events", () => {
+    expect(normalizeMimoEvent({ type: "message", text: "hello" })).toMatchObject({
+      type: "message",
+      text: "hello"
+    });
+  });
+
   it("parses newline-delimited JSON events", () => {
     const events = parseMimoJsonLines('{"type":"message","text":"hello"}\n{"type":"tool","tool":"bash","status":"completed"}\n');
     expect(events).toHaveLength(2);

@@ -33,7 +33,7 @@ export function parseMimoJsonLines(stdout: string): NormalizedMimoEvent[] {
   return events;
 }
 
-function normalizeMimoEvent(raw: unknown): NormalizedMimoEvent {
+export function normalizeMimoEvent(raw: unknown): NormalizedMimoEvent {
   if (!isRecord(raw)) return { type: "raw", raw };
 
   const type = String(raw.type ?? raw.event ?? "");
