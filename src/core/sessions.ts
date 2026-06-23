@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { JobReportPaths, JobStatus } from "./jobs.js";
 
 interface SessionEntry {
   sessionId: string;
@@ -8,6 +9,11 @@ interface SessionEntry {
   cwd: string;
   createdAt: string;
   lastUsedAt: string;
+  jobId?: string;
+  parentJobId?: string | null;
+  status?: JobStatus;
+  reportPaths?: JobReportPaths;
+  summary?: string;
 }
 
 export class SessionStore {
@@ -25,8 +31,7 @@ export class SessionStore {
     const now = new Date().toISOString();
     const existing = this.sessions.find((s) => s.sessionId === entry.sessionId);
     if (existing) {
-      existing.lastUsedAt = now;
-      existing.task = entry.task;
+      Object.assign(existing, entry, { lastUsedAt: now });
     } else {
       this.sessions.push({ ...entry, createdAt: now, lastUsedAt: now });
     }
