@@ -1,6 +1,6 @@
 {
   "name": "codex-mimocode",
-  "version": "0.1.0+codex.20260623002000",
+  "version": "0.1.0+codex.20260622161948",
   "description": "Bridge that lets Codex invoke MiMoCode as a specialist coding agent for planning, implementation, and review",
   "author": {
     "name": "Xiaomi MiMo Team"
