@@ -1,7 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { runComposeWorkflow } from "../../src/compose/runner.js";
+import { buildComposeReportFromRun, runComposeWorkflow } from "../../src/compose/runner.js";
 
 describe("compose runner", () => {
+  it("builds a compose report from captured streaming stdout", () => {
+    const report = buildComposeReportFromRun({
+      id: "run-1",
+      createdAt: "2026-06-23T00:00:00.000Z",
+      input: {
+        cwd: "E:/project/app",
+        workflow: "dev",
+        task: "Implement login throttling"
+      },
+      mimoArgs: ["run", "--format", "json"],
+      requestedSkills: ["compose:brainstorm"],
+      eventsStdout: "{\"type\":\"message\",\"text\":\"done\"}\n",
+      diff: {
+        changedFiles: ["src/login.ts"],
+        diffStat: "src/login.ts | 1 +",
+        diff: ""
+      },
+      verification: [],
+      reportDir: "E:/project/app/.codex-mimo/reports",
+      eventsDir: "E:/project/app/.codex-mimo/events",
+      diffsDir: "E:/project/app/.codex-mimo/diffs",
+      status: "needs_review"
+    });
+
+    expect(report.reviewText).toBe("done");
+    expect(report.reportPaths.json).toContain("run-1.json");
+  });
+
   it("runs MiMoCode, captures events, diff, verification, and report", async () => {
     const result = await runComposeWorkflow(
       {

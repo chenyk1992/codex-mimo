@@ -9,7 +9,7 @@ import { writeComposeReport, type ComposeReport } from "./report.js";
 import { normalizeVerificationCommands, runVerificationCommands, type VerificationResult } from "./verify.js";
 import { buildComposePrompt, getComposeWorkflow, type ComposeWorkflowName } from "./workflow.js";
 
-interface ComposeRunInput {
+export interface ComposeRunInput {
   cwd: string;
   workflow: ComposeWorkflowName;
   task?: string;
@@ -85,7 +85,7 @@ export async function runComposeWorkflow(
   }
 
   if (input.dryRun) {
-    const report = buildReport({
+    const report = buildComposeReportFromRun({
       id,
       createdAt,
       input,
@@ -113,7 +113,7 @@ export async function runComposeWorkflow(
     mimoResult = await runMimo(input.cwd, mimoArgs, { timeoutMs: input.timeoutMs });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const report = buildReport({
+    const report = buildComposeReportFromRun({
       id,
       createdAt,
       input,
@@ -139,7 +139,7 @@ export async function runComposeWorkflow(
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     diff = { changedFiles: [], diffStat: "", diff: "" };
-    const report = buildReport({
+    const report = buildComposeReportFromRun({
       id,
       createdAt,
       input,
@@ -177,7 +177,7 @@ export async function runComposeWorkflow(
       ...diff,
       changedFiles: readOnlyViolationFiles
     };
-    const report = buildReport({
+    const report = buildComposeReportFromRun({
       id,
       createdAt,
       input,
@@ -204,7 +204,7 @@ export async function runComposeWorkflow(
     verification = await runVerification(input.cwd, verificationCommands);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const report = buildReport({
+    const report = buildComposeReportFromRun({
       id,
       createdAt,
       input,
@@ -227,7 +227,7 @@ export async function runComposeWorkflow(
 
   const semanticFailure = detectSemanticFailure(mimoResult.stdout);
   if (semanticFailure) {
-    const report = buildReport({
+    const report = buildComposeReportFromRun({
       id,
       createdAt,
       input,
@@ -249,7 +249,7 @@ export async function runComposeWorkflow(
   }
 
   const status = determineStatus(mimoResult.exitCode, diff.changedFiles, verification);
-  const report = buildReport({
+  const report = buildComposeReportFromRun({
     id,
     createdAt,
     input,
@@ -369,7 +369,7 @@ function parseGitStatusFiles(status: string): Set<string> {
   );
 }
 
-function buildReport(input: {
+export function buildComposeReportFromRun(input: {
   id: string;
   createdAt: string;
   input: ComposeRunInput;
