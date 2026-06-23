@@ -57,4 +57,29 @@ describe("Codex compact compose report", () => {
     expect(result).not.toHaveProperty("events");
     expect(result).not.toHaveProperty("mimoArgs");
   });
+
+  it("can include job-linked report paths without embedding events", () => {
+    const result = compactComposeReportForCodex({
+      id: "compose-1",
+      createdAt: "2026-06-23T00:00:00.000Z",
+      workflow: "dev",
+      cwd: "E:/project/app",
+      task: "Implement login throttling",
+      mimoArgs: ["run"],
+      requestedSkills: ["compose:brainstorm"],
+      status: "passed",
+      events: [{ type: "message", text: "done", raw: { type: "message", text: "done" } }],
+      changedFiles: [],
+      diffStat: "",
+      verification: [],
+      reportPaths: {
+        json: "report.json",
+        markdown: "report.md",
+        eventsJsonl: "events.jsonl"
+      }
+    });
+
+    expect(result.reportPaths.json).toBe("report.json");
+    expect(result).not.toHaveProperty("events");
+  });
 });
