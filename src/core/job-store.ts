@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   buildJobId,
+  isActiveJobStatus,
   nowIso,
   type JobKind,
   type JobRecord
@@ -11,6 +12,10 @@ const DEFAULT_MAX_JOBS = 100;
 
 interface JobState {
   jobs: string[];
+}
+
+interface ReadJobOptions {
+  skipMalformed?: boolean;
 }
 
 export interface JobPaths {
@@ -42,6 +47,7 @@ export function resolveJobStateFile(cwd: string): string {
 }
 
 export function resolveJobPaths(cwd: string, jobId: string): JobPaths {
+  assertValidJobId(jobId);
   const jobDir = resolveJobDir(cwd);
   return {
     jobFile: path.join(jobDir, `${jobId}.json`),
@@ -94,20 +100,46 @@ export function createJobStore(cwd: string, options: JobStoreOptions = {}): {
 
 export function listJobs(cwd: string): JobRecord[] {
   return readState(cwd)
-    .jobs.map((jobId) => readJob(cwd, jobId))
+    .jobs.map((jobId) => readJobFile(cwd, jobId, { skipMalformed: true }))
     .filter((job): job is JobRecord => job !== undefined);
 }
 
 export function readJob(cwd: string, jobId: string): JobRecord | undefined {
-  try {
-    const raw = fs.readFileSync(resolveJobPaths(cwd, jobId).jobFile, "utf-8");
-    return JSON.parse(raw) as JobRecord;
-  } catch {
-    return undefined;
-  }
+  return readJobFile(cwd, jobId);
 }
 
-export function updateJob(cwd: string, jobId: string, patch: JobUpdatePatch): JobRecord {
+function readJobFile(cwd: string, jobId: string, options: ReadJobOptions = {}): JobRecord | undefined {
+  const paths = resolveJobPaths(cwd, jobId);
+  let parsed: unknown;
+  try {
+    const raw = fs.readFileSync(paths.jobFile, "utf-8");
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return undefined;
+    }
+    if (options.skipMalformed) {
+      return undefined;
+    }
+    throw new Error(`Malformed job file for job id: ${jobId}`, {
+      cause: error
+    });
+  }
+  if (!isJobRecord(parsed, jobId)) {
+    if (options.skipMalformed) {
+      return undefined;
+    }
+    throw new Error(`Malformed job file for job id: ${jobId}`);
+  }
+  return parsed;
+}
+
+export function updateJob(
+  cwd: string,
+  jobId: string,
+  patch: JobUpdatePatch,
+  options: JobStoreOptions = {}
+): JobRecord {
   const existing = readJob(cwd, jobId);
   if (!existing) {
     throw new Error(`Job not found: ${jobId}`);
@@ -126,9 +158,46 @@ export function updateJob(cwd: string, jobId: string, patch: JobUpdatePatch): Jo
   writeJobRecord(cwd, updated);
   const state = readState(cwd);
   state.jobs = [jobId, ...state.jobs.filter((id) => id !== jobId)];
-  writeState(cwd, pruneState(cwd, state, DEFAULT_MAX_JOBS));
+  writeState(cwd, pruneState(cwd, state, options.maxJobs ?? DEFAULT_MAX_JOBS));
 
   return updated;
+}
+
+function assertValidJobId(jobId: string): void {
+  if (!isValidJobId(jobId)) {
+    throw new Error(`Invalid job id: ${jobId}`);
+  }
+}
+
+function isValidJobId(jobId: string): boolean {
+  return jobId !== "state" && /^[a-zA-Z0-9_-]+$/.test(jobId);
+}
+
+function isJobRecord(value: unknown, expectedJobId: string): value is JobRecord {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.id === "string" &&
+    value.id === expectedJobId &&
+    isValidJobId(value.id) &&
+    typeof value.kind === "string" &&
+    typeof value.cwd === "string" &&
+    typeof value.task === "string" &&
+    typeof value.status === "string" &&
+    typeof value.phase === "string" &&
+    typeof value.createdAt === "string" &&
+    typeof value.updatedAt === "string" &&
+    Array.isArray(value.changedFiles) &&
+    Array.isArray(value.verification) &&
+    typeof value.logFile === "string" &&
+    typeof value.eventsFile === "string"
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function ensureJobDir(cwd: string): void {
@@ -138,9 +207,16 @@ function ensureJobDir(cwd: string): void {
 function readState(cwd: string): JobState {
   try {
     const raw = fs.readFileSync(resolveJobStateFile(cwd), "utf-8");
-    return JSON.parse(raw) as JobState;
+    const state = JSON.parse(raw) as JobState;
+    if (
+      !Array.isArray(state.jobs) ||
+      !state.jobs.every((jobId) => typeof jobId === "string" && isValidJobId(jobId))
+    ) {
+      return rebuildState(cwd);
+    }
+    return state;
   } catch {
-    return { jobs: [] };
+    return rebuildState(cwd);
   }
 }
 
@@ -155,12 +231,48 @@ function writeJobRecord(cwd: string, record: JobRecord): void {
 }
 
 function pruneState(cwd: string, state: JobState, maxJobs: number): JobState {
-  const kept = state.jobs.slice(0, maxJobs);
-  for (const jobId of state.jobs.slice(maxJobs)) {
-    const paths = resolveJobPaths(cwd, jobId);
+  const records = state.jobs
+    .map((jobId) => readJobFile(cwd, jobId, { skipMalformed: true }))
+    .filter((job): job is JobRecord => job !== undefined);
+  const terminal = records.filter((job) => !isActiveJobStatus(job.status));
+  const activeCount = records.length - terminal.length;
+  const terminalSlots = Math.max(0, maxJobs - activeCount);
+  const terminalIds = new Set(terminal.slice(0, terminalSlots).map((job) => job.id));
+  const kept = records.filter((job) => isActiveJobStatus(job.status) || terminalIds.has(job.id));
+
+  for (const job of terminal.slice(terminalSlots)) {
+    const paths = resolveJobPaths(cwd, job.id);
     fs.rmSync(paths.jobFile, { force: true });
     fs.rmSync(paths.logFile, { force: true });
     fs.rmSync(paths.eventsFile, { force: true });
   }
-  return { jobs: kept };
+  return { jobs: kept.map((job) => job.id) };
+}
+
+function rebuildState(cwd: string): JobState {
+  const jobDir = resolveJobDir(cwd);
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(jobDir);
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return { jobs: [] };
+    }
+    throw error;
+  }
+
+  const jobs = entries
+    .filter((entry) => entry.endsWith(".json") && entry !== "state.json")
+    .map((entry) => entry.slice(0, -".json".length))
+    .filter((jobId) => isValidJobId(jobId))
+    .map((jobId) => readJobFile(cwd, jobId, { skipMalformed: true }))
+    .filter((job): job is JobRecord => job !== undefined)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .map((job) => job.id);
+
+  return { jobs };
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
