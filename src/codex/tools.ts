@@ -6,18 +6,24 @@ import {
   FixCiInput,
   HealthcheckInput,
   ImplementInput,
+  JobCancelInput,
+  JobListInput,
+  JobResultInput,
+  JobStatusInput,
   PlanInput,
-  ReviewInput,
-  ResumeInput
+  ResumeInput,
+  ResumeJobInput,
+  ReviewInput
 } from "./tool-schemas.js";
 import { implementPrompt, planPrompt, reviewPrompt } from "../core/prompt.js";
 import { runAndCapture } from "../mimo/mimo-runner.js";
 import { runComposeWorkflow } from "../compose/runner.js";
 import { compactComposeReportForCodex } from "./compact.js";
 import type { CompactComposeReport } from "./compact.js";
-import { createJobStore, updateJob } from "../core/job-store.js";
-import { spawnJobWorker } from "../core/job-process.js";
-import { renderJobLaunch } from "../core/job-render.js";
+import { createJobStore, listJobs, readJob, updateJob } from "../core/job-store.js";
+import { spawnJobWorker, terminateJobProcess } from "../core/job-process.js";
+import { renderJobLaunch, renderJobResult, renderJobStatus } from "../core/job-render.js";
+import { readRecentJobLogLines } from "../core/job-log.js";
 
 export async function mimoHealthcheck(input: unknown) {
   const parsed = HealthcheckInput.parse(input);
@@ -181,6 +187,90 @@ export async function mimoCompose(
 
   const report = await runComposeWorkflow(parsed);
   return compactComposeReportForCodex(report);
+}
+
+export async function mimoStatus(input: unknown) {
+  const parsed = JobStatusInput.parse(input);
+  const jobs = listJobs(parsed.cwd);
+  const job = parsed.jobId ? readJob(parsed.cwd, parsed.jobId) : jobs[0];
+  if (!job) throw new Error("No jobs recorded for this workspace.");
+  return renderJobStatus(job, {
+    progress: readRecentJobLogLines(job.logFile, 5)
+  });
+}
+
+export async function mimoResult(input: unknown) {
+  const parsed = JobResultInput.parse(input);
+  const jobs = listJobs(parsed.cwd).filter((job) => job.status !== "queued" && job.status !== "running");
+  const job = parsed.jobId ? readJob(parsed.cwd, parsed.jobId) : jobs[0];
+  if (!job) throw new Error("No finished jobs recorded for this workspace.");
+  return renderJobResult(job);
+}
+
+export async function mimoJobs(input: unknown) {
+  const parsed = JobListInput.parse(input);
+  const jobs = listJobs(parsed.cwd);
+  return (parsed.all ? jobs : jobs.slice(0, 8)).map((job) => renderJobStatus(job, {
+    progress: readRecentJobLogLines(job.logFile, 3)
+  }));
+}
+
+export async function mimoCancel(
+  input: unknown,
+  deps: { killProcess?: (pid: number) => void } = {}
+) {
+  const parsed = JobCancelInput.parse(input);
+  const job = readJob(parsed.cwd, parsed.jobId);
+  if (!job) throw new Error(`No job found for ${parsed.jobId}.`);
+  terminateJobProcess(job.pid, { killProcess: deps.killProcess });
+  const cancelled = updateJob(parsed.cwd, job.id, {
+    status: "cancelled",
+    phase: "cancelled",
+    pid: null,
+    completedAt: new Date().toISOString(),
+    summary: `Cancelled ${job.id}.`,
+    errorCode: "cancelled",
+    error: "Cancelled by user."
+  });
+  return renderJobResult(cancelled);
+}
+
+export async function mimoResumeJob(
+  input: unknown,
+  deps: { spawnJobWorker?: typeof spawnJobWorker } = {}
+) {
+  const parsed = ResumeJobInput.parse(input);
+  const parent = readJob(parsed.cwd, parsed.jobId);
+  if (!parent) throw new Error(`No job found for ${parsed.jobId}.`);
+  if (!parent.sessionId) {
+    throw new Error(`Job ${parent.id} does not have a sessionId and cannot be resumed.`);
+  }
+  const store = createJobStore(parsed.cwd);
+  const child = store.create({
+    kind: "resume",
+    workflow: parent.workflow,
+    task: parsed.task,
+    request: {
+      cwd: parsed.cwd,
+      workflow: parent.workflow ?? "dev",
+      task: parsed.task,
+      session: parent.sessionId,
+      continue: true,
+      background: parsed.background
+    },
+    parentJobId: parent.id
+  });
+  if (parsed.background) {
+    const pid = (deps.spawnJobWorker ?? spawnJobWorker)(parsed.cwd, "compose", child.id);
+    return renderJobLaunch(updateJob(parsed.cwd, child.id, { pid }));
+  }
+  return {
+    jobId: child.id,
+    parentJobId: parent.id,
+    sessionId: parent.sessionId,
+    status: child.status,
+    summary: "Resume job created. Run it in background with background=true."
+  };
 }
 
 async function captureWorktreeFiles(cwd: string): Promise<Set<string>> {
