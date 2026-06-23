@@ -30,6 +30,48 @@ describe("compose runner", () => {
     expect(report.reportPaths.json).toContain("run-1.json");
   });
 
+  it("extracts planText from events containing plan structure", () => {
+    const planContent = "# Implementation Plan\n\n## Task 1: Setup\n\n- [ ] Step 1: Create files\n- [ ] Step 2: Run tests";
+    const report = buildComposeReportFromRun({
+      id: "run-plan",
+      createdAt: "2026-06-23T00:00:00.000Z",
+      input: { cwd: "E:/project/app", workflow: "plan", task: "Write a plan" },
+      mimoArgs: ["run", "--format", "json"],
+      requestedSkills: ["compose:plan"],
+      eventsStdout: `{"type":"message","text":"Analyzing codebase..."}\n{"type":"message","text":"${planContent.replace(/\n/g, "\\n")}"}\n`,
+      diff: { changedFiles: [], diffStat: "", diff: "" },
+      verification: [],
+      reportDir: "E:/project/app/.codex-mimo/reports",
+      eventsDir: "E:/project/app/.codex-mimo/events",
+      diffsDir: "E:/project/app/.codex-mimo/diffs",
+      status: "passed"
+    });
+
+    expect(report.planText).toContain("Implementation Plan");
+    expect(report.planText).toContain("Task 1");
+    expect(report.reviewText).toBeDefined();
+  });
+
+  it("leaves planText undefined when no plan content found", () => {
+    const report = buildComposeReportFromRun({
+      id: "run-no-plan",
+      createdAt: "2026-06-23T00:00:00.000Z",
+      input: { cwd: "E:/project/app", workflow: "dev", task: "Fix bug" },
+      mimoArgs: ["run", "--format", "json"],
+      requestedSkills: ["compose:debug"],
+      eventsStdout: `{"type":"message","text":"Found the bug in line 42"}\n`,
+      diff: { changedFiles: [], diffStat: "", diff: "" },
+      verification: [],
+      reportDir: "E:/project/app/.codex-mimo/reports",
+      eventsDir: "E:/project/app/.codex-mimo/events",
+      diffsDir: "E:/project/app/.codex-mimo/diffs",
+      status: "passed"
+    });
+
+    expect(report.planText).toBeUndefined();
+    expect(report.reviewText).toBe("Found the bug in line 42");
+  });
+
   it("runs MiMoCode, captures events, diff, verification, and report", async () => {
     const result = await runComposeWorkflow(
       {

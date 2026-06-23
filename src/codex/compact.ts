@@ -18,6 +18,7 @@ export interface CompactComposeReport {
     durationMs: number;
   }>;
   reviewText?: string;
+  planText?: string;
   error?: string;
   reportPaths: ComposeReport["reportPaths"];
 }
@@ -46,6 +47,7 @@ export function compactComposeReportForCodex(report: ComposeReport): CompactComp
       durationMs: result.durationMs
     })),
     reviewText: report.reviewText,
+    planText: report.planText,
     error: report.error,
     reportPaths: report.reportPaths
   };

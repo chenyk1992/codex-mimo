@@ -99,6 +99,40 @@ describe("streaming MiMo CLI runner", () => {
     expect(result.exitCode).toBe(124);
   });
 
+  it("fires onTimeoutWarning before hard kill", async () => {
+    let warningFired = false;
+    let warningPid: number | null | undefined;
+
+    const result = await runMimoCliStreaming("E:/project/app", ["run"], {
+      timeoutMs: 1000,
+      timeoutWarningMs: 500,
+      spawnProcess: () => {
+        const child = new EventEmitter() as EventEmitter & {
+          stdout: Readable;
+          stderr: Readable;
+          pid: number;
+          kill: () => boolean;
+        };
+        child.pid = 888;
+        child.stdout = Readable.from([""]);
+        child.stderr = Readable.from([""]);
+        child.kill = () => true;
+        return child;
+      },
+      terminateProcessTree: (_pid, child) => {
+        child.emit("close", null);
+      },
+      onTimeoutWarning: (pid) => {
+        warningFired = true;
+        warningPid = pid;
+      }
+    });
+
+    expect(warningFired).toBe(true);
+    expect(warningPid).toBe(888);
+    expect(result.exitCode).toBe(124);
+  });
+
   it("terminates the process when abort signal fires", async () => {
     const ac = new AbortController();
     let killedPid: number | null | undefined;

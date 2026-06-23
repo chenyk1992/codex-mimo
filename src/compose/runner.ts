@@ -430,6 +430,7 @@ export function buildComposeReportFromRun(input: {
     gitStatusAfter: input.gitStatusAfter,
     verification: input.verification,
     reviewText: extractReviewText(events),
+    planText: extractPlanText(events),
     error: input.error,
     reportPaths: {
       json: path.join(input.reportDir, `${input.id}.json`),
@@ -445,4 +446,21 @@ function extractReviewText(events: ReturnType<typeof parseMimoJsonLines>): strin
     .map((event) => event.text)
     .filter(Boolean);
   return messages.length > 0 ? messages.join("\n\n") : undefined;
+}
+
+function extractPlanText(events: ReturnType<typeof parseMimoJsonLines>): string | undefined {
+  const planMessages = events
+    .filter((event) => event.type === "message" && event.text)
+    .map((event) => event.text!)
+    .filter((text) => {
+      const lower = text.toLowerCase();
+      return (
+        lower.includes("implementation plan") ||
+        lower.includes("# plan") ||
+        lower.includes("## task") ||
+        (lower.includes("### task") && lower.includes("step")) ||
+        (lower.includes("- [ ]") && lower.length > 200)
+      );
+    });
+  return planMessages.length > 0 ? planMessages.join("\n\n") : undefined;
 }

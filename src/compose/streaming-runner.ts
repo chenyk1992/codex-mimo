@@ -20,9 +20,11 @@ interface StreamingChildProcess extends EventEmitter {
 interface StreamingRunOptions {
   onStart?: (pid: number | null) => void;
   timeoutMs?: number;
+  timeoutWarningMs?: number;
   signal?: AbortSignal;
   onLine?: (line: string) => void;
   onStderr?: (chunk: string) => void;
+  onTimeoutWarning?: (pid: number | null) => void;
   spawnProcess?: (cwd: string, args: string[]) => StreamingChildProcess;
   terminateProcessTree?: (pid: number | null, child: StreamingChildProcess) => void;
 }
@@ -119,6 +121,12 @@ export async function runMimoCliStreaming(
       }, options.timeoutMs)
     : null;
 
+  const warningTimeout = options.timeoutMs && options.timeoutWarningMs && options.onTimeoutWarning
+    ? setTimeout(() => {
+        options.onTimeoutWarning!(child.pid ?? null);
+      }, Math.max(0, options.timeoutMs - options.timeoutWarningMs))
+    : null;
+
   let abortCleanup: (() => void) | undefined;
   if (options.signal) {
     if (options.signal.aborted) {
@@ -168,6 +176,7 @@ export async function runMimoCliStreaming(
   });
 
   if (timeout) clearTimeout(timeout);
+  if (warningTimeout) clearTimeout(warningTimeout);
   abortCleanup?.();
   await Promise.all([stdoutDone, stderrDone]);
 

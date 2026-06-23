@@ -149,12 +149,21 @@ export function buildComposePrompt(input: BuildComposePromptInput): string {
   lines.push("- Keep changes minimal and focused.");
   lines.push("- Do not commit, push, reset, or delete files.");
   lines.push("- Record actions taken, verification evidence, and remaining risks.");
+  lines.push("- On Windows: use PowerShell-compatible commands. Avoid `2>/dev/null`, `||`, `wc -l`, `grep`. Use `Get-Content | Measure-Object`, `Select-String`, `Test-Path` instead.");
 
   if (workflow.name === "plan") {
     lines.push("");
     lines.push(
       "The Objective above is the requirement/spec for compose:plan. Produce a plan from it; do not ask for a separate spec unless it is genuinely missing critical information."
     );
+    lines.push("");
+    lines.push("CONVERGENCE RULES:");
+    lines.push("- Your final deliverable MUST be a plan document, not an analysis report.");
+    lines.push("- Limit exploration to the minimum needed. Do not read every file in the codebase.");
+    lines.push("- If the Objective covers multiple independent subsystems, produce a plan index with sub-plan outlines — do not attempt one exhaustive plan.");
+    lines.push("- Stop exploring and start writing the plan as soon as you have enough context to identify files and interfaces.");
+    lines.push("- Intermediate analysis (code reviews, file surveys) must feed into the plan, not replace it.");
+    lines.push("- If you cannot complete the full plan, output a partial plan with clear gaps listed.");
   }
 
   if (workflow.name === "brainstorm") {

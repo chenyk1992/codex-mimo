@@ -22,6 +22,7 @@ export interface ComposeReport {
   gitStatusAfter?: GitStatusSnapshot;
   verification: VerificationResult[];
   reviewText?: string;
+  planText?: string;
   error?: string;
   reportPaths: {
     json: string;
@@ -120,6 +121,15 @@ export function renderMarkdownReport(report: ComposeReport): string {
     report.reviewText || "No review text was captured.",
     ""
   );
+
+  if (report.planText) {
+    lines.push(
+      "## Plan",
+      "",
+      report.planText,
+      ""
+    );
+  }
 
   if (report.error) {
     lines.push(
