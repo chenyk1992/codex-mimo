@@ -24,6 +24,7 @@ import { createJobStore, listJobs, readJob, updateJob } from "../core/job-store.
 import { spawnJobWorker, terminateJobProcess } from "../core/job-process.js";
 import { renderJobLaunch, renderJobResult, renderJobStatus } from "../core/job-render.js";
 import { readRecentJobLogLines } from "../core/job-log.js";
+import { SessionStore } from "../core/sessions.js";
 
 export async function mimoHealthcheck(input: unknown) {
   const parsed = HealthcheckInput.parse(input);
@@ -204,6 +205,19 @@ export async function mimoResult(input: unknown) {
   const jobs = listJobs(parsed.cwd).filter((job) => job.status !== "queued" && job.status !== "running");
   const job = parsed.jobId ? readJob(parsed.cwd, parsed.jobId) : jobs[0];
   if (!job) throw new Error("No finished jobs recorded for this workspace.");
+  if (job.sessionId) {
+    new SessionStore(job.cwd).save({
+      sessionId: job.sessionId,
+      workflow: job.workflow ?? job.kind,
+      task: job.task,
+      cwd: job.cwd,
+      jobId: job.id,
+      parentJobId: job.parentJobId ?? null,
+      status: job.status,
+      reportPaths: job.reportPaths,
+      summary: job.summary
+    });
+  }
   return renderJobResult(job);
 }
 

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createJobStore, updateJob } from "../../src/core/job-store.js";
+import { SessionStore } from "../../src/core/sessions.js";
 import { mimoCancel, mimoJobs, mimoResult, mimoResumeJob, mimoStatus } from "../../src/codex/tools.js";
 
 function tempWorkspace(): string {
@@ -32,6 +33,26 @@ describe("job MCP tools", () => {
       resumeHint: { tool: "mimo_resume_job", jobId: job.id }
     });
     expect(await mimoJobs({ cwd })).toHaveLength(1);
+  });
+
+  it("stores completed job sessions when reading results", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "compose", workflow: "dev", task: "Run dev", request: {} });
+    updateJob(cwd, job.id, {
+      status: "completed",
+      phase: "done",
+      summary: "dev passed",
+      sessionId: "sess_1",
+      reportPaths: { json: "report.json" }
+    });
+
+    await mimoResult({ cwd, jobId: job.id });
+
+    expect(new SessionStore(cwd).get("sess_1")).toMatchObject({
+      jobId: job.id,
+      status: "completed",
+      summary: "dev passed"
+    });
   });
 
   it("cancels an active job", async () => {
