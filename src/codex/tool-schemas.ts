@@ -52,5 +52,34 @@ export const ComposeInput = z.object({
   verification: z.array(z.string()).optional(),
   dryRun: z.boolean().default(false),
   reportDir: z.string().optional(),
-  timeoutMs: z.number().int().positive().optional()
+  timeoutMs: z.number().int().positive().optional(),
+  background: z.boolean().default(false),
+  wait: z.boolean().default(false)
+});
+
+export const JobStatusInput = z.object({
+  cwd: z.string(),
+  jobId: z.string().optional()
+});
+
+export const JobResultInput = z.object({
+  cwd: z.string(),
+  jobId: z.string().optional()
+});
+
+export const JobCancelInput = z.object({
+  cwd: z.string(),
+  jobId: z.string()
+});
+
+export const JobListInput = z.object({
+  cwd: z.string(),
+  all: z.boolean().default(false)
+});
+
+export const ResumeJobInput = z.object({
+  cwd: z.string(),
+  jobId: z.string(),
+  task: z.string().min(1),
+  background: z.boolean().default(false)
 });

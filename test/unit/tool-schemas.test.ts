@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { ComposeInput } from "../../src/codex/tool-schemas.js";
+import {
+  ComposeInput,
+  JobCancelInput,
+  JobListInput,
+  JobResultInput,
+  JobStatusInput,
+  ResumeJobInput
+} from "../../src/codex/tool-schemas.js";
 import { COMPOSE_WORKFLOW_NAMES, composeWorkflowUsage } from "../../src/compose/workflow-names.js";
 
 describe("tool schemas", () => {
@@ -33,5 +40,31 @@ describe("tool schemas", () => {
     expect(
       ComposeInput.parse({ cwd: "E:/project/app", workflow: "dev", task: "Test task", timeoutMs: 110000 }).timeoutMs
     ).toBe(110000);
+  });
+
+  it("accepts job management inputs", () => {
+    expect(JobStatusInput.parse({ cwd: "E:/project/app", jobId: "compose-1" }).jobId).toBe("compose-1");
+    expect(JobResultInput.parse({ cwd: "E:/project/app" }).cwd).toBe("E:/project/app");
+    expect(JobCancelInput.parse({ cwd: "E:/project/app", jobId: "compose-1" }).jobId).toBe("compose-1");
+    expect(JobListInput.parse({ cwd: "E:/project/app", all: true }).all).toBe(true);
+  });
+
+  it("accepts resume by job input", () => {
+    const parsed = ResumeJobInput.parse({
+      cwd: "E:/project/app",
+      jobId: "compose-1",
+      task: "Continue with the next fix"
+    });
+    expect(parsed.jobId).toBe("compose-1");
+  });
+
+  it("accepts background compose input", () => {
+    const parsed = ComposeInput.parse({
+      cwd: "E:/project/app",
+      workflow: "dev",
+      task: "Implement login throttling",
+      background: true
+    });
+    expect(parsed.background).toBe(true);
   });
 });
