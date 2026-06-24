@@ -8,6 +8,7 @@ import { writeComposeReport, type ComposeReport } from "./report.js";
 import { runMimoCliStreaming } from "./streaming-runner.js";
 import { normalizeVerificationCommands, runVerificationCommands, type VerificationResult } from "./verify.js";
 import { buildComposePrompt, getComposeWorkflow, type ComposeWorkflowName } from "./workflow.js";
+import { preparePromptTransport } from "../mimo/prompt-transport.js";
 
 export interface ComposeRunInput {
   cwd: string;
@@ -58,16 +59,18 @@ export async function runComposeWorkflow(
     since: input.since
   });
 
+  const transportedPrompt = preparePromptTransport(prompt, { cwd: input.cwd });
+
   const mimoArgs = buildMimoRunArgs({
     cwd: input.cwd,
     agent: "compose",
     model: input.model,
-    message: prompt,
+    message: transportedPrompt.message,
     title: `codex-mimo compose ${workflow.name}`,
     session: input.session,
     fork: input.fork,
     attach: input.attach,
-    files: input.file ? [input.file] : [],
+    files: [...transportedPrompt.files, ...(input.file ? [input.file] : [])],
     continue: input.continue
   });
 

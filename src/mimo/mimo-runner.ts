@@ -1,5 +1,6 @@
 import { execa } from "execa";
 import { buildMimoRunArgs, type MimoRunOptions } from "./run-json.js";
+import { preparePromptTransport } from "./prompt-transport.js";
 
 export interface MimoRunResult {
   sessionId: string | null;
@@ -12,7 +13,12 @@ export interface MimoRunResult {
 }
 
 export async function runAndCapture(options: MimoRunOptions & { timeoutMs?: number }): Promise<MimoRunResult> {
-  const args = buildMimoRunArgs(options);
+  const transported = preparePromptTransport(options.message, { cwd: options.cwd });
+  const args = buildMimoRunArgs({
+    ...options,
+    message: transported.message,
+    files: [...transported.files, ...(options.files ?? [])]
+  });
   const result = await execa("mimo", args, {
     cwd: options.cwd,
     stdin: "ignore",
