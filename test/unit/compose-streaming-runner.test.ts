@@ -97,6 +97,7 @@ describe("streaming MiMo CLI runner", () => {
 
     expect(killedPid).toBe(789);
     expect(result.exitCode).toBe(124);
+    expect(result.terminationReason).toBe("process_timeout");
   });
 
   it("fires onTimeoutWarning before hard kill", async () => {
@@ -173,6 +174,7 @@ describe("streaming MiMo CLI runner", () => {
 
     const result = await runPromise;
     expect(result.exitCode).toBe(124);
+    expect(result.terminationReason).toBe("host_abort");
   });
 });
 

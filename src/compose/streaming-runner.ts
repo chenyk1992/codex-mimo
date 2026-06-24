@@ -3,11 +3,14 @@ import { EventEmitter } from "node:events";
 import readline from "node:readline";
 import type { Readable } from "node:stream";
 
+export type TerminationReason = "process_timeout" | "host_abort" | "user_cancelled";
+
 export interface StreamingRunResult {
   stdout: string;
   stderr: string;
   exitCode: number;
   pid: number | null;
+  terminationReason?: TerminationReason;
 }
 
 interface StreamingChildProcess extends EventEmitter {
@@ -108,7 +111,7 @@ export async function runMimoCliStreaming(
   const child = (options.spawnProcess ?? defaultSpawn)(cwd, args);
   const stdoutParts: string[] = [];
   const stderrParts: string[] = [];
-  let timedOut = false;
+  let terminationReason: TerminationReason | undefined;
 
   options.onStart?.(child.pid ?? null);
 
@@ -116,7 +119,7 @@ export async function runMimoCliStreaming(
 
   const timeout = options.timeoutMs
     ? setTimeout(() => {
-        timedOut = true;
+        terminationReason = "process_timeout";
         terminateTree(child.pid ?? null, child);
       }, options.timeoutMs)
     : null;
@@ -130,11 +133,11 @@ export async function runMimoCliStreaming(
   let abortCleanup: (() => void) | undefined;
   if (options.signal) {
     if (options.signal.aborted) {
-      timedOut = true;
+      terminationReason = "host_abort";
       terminateTree(child.pid ?? null, child);
     } else {
       const onAbort = () => {
-        timedOut = true;
+        terminationReason = "host_abort";
         terminateTree(child.pid ?? null, child);
       };
       options.signal.addEventListener("abort", onAbort, { once: true });
@@ -172,7 +175,7 @@ export async function runMimoCliStreaming(
 
   const exitCode = await new Promise<number>((resolve, reject) => {
     child.on("error", reject);
-    child.on("close", (code: number | null) => resolve(timedOut ? 124 : code ?? 1));
+    child.on("close", (code: number | null) => resolve(terminationReason ? 124 : code ?? 1));
   });
 
   if (timeout) clearTimeout(timeout);
@@ -184,6 +187,7 @@ export async function runMimoCliStreaming(
     stdout: stdoutParts.join(""),
     stderr: stderrParts.join(""),
     exitCode,
-    pid: child.pid ?? null
+    pid: child.pid ?? null,
+    terminationReason
   };
 }

@@ -31,6 +31,7 @@ interface MimoRunResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  terminationReason?: "process_timeout" | "host_abort" | "user_cancelled";
 }
 
 interface ComposeRunnerDeps {
@@ -262,8 +263,10 @@ export async function runComposeWorkflow(
     eventsDir,
     diffsDir,
     status,
+    terminationReason: mimoResult.terminationReason,
     gitStatusBefore,
-    gitStatusAfter
+    gitStatusAfter,
+    error: status === "timeout" ? timeoutError(mimoResult.terminationReason) : undefined
   });
 
   writeReport(report);
@@ -297,6 +300,12 @@ function determineStatus(
   if (verification.some((result) => !result.passed)) return "failed";
   if (verification.length === 0 && changedFiles.length > 0) return "needs_review";
   return "passed";
+}
+
+export function timeoutError(reason?: "process_timeout" | "host_abort" | "user_cancelled"): string {
+  if (reason === "host_abort") return "MiMoCode was interrupted by the host tool call before completion.";
+  if (reason === "user_cancelled") return "MiMoCode was cancelled by the user.";
+  return "MiMoCode exceeded the configured process timeout.";
 }
 
 function detectSemanticFailure(eventsStdout: string): string | undefined {
@@ -401,6 +410,7 @@ export function buildComposeReportFromRun(input: {
   eventsDir: string;
   diffsDir: string;
   status: "passed" | "failed" | "needs_review" | "timeout";
+  terminationReason?: "process_timeout" | "host_abort" | "user_cancelled";
   gitStatusBefore?: GitStatusSnapshot;
   gitStatusAfter?: GitStatusSnapshot;
   error?: string;
@@ -426,6 +436,7 @@ export function buildComposeReportFromRun(input: {
     changedFiles: input.diff.changedFiles,
     diffStat: input.diff.diffStat,
     diffPath,
+    terminationReason: input.terminationReason,
     gitStatusBefore: input.gitStatusBefore,
     gitStatusAfter: input.gitStatusAfter,
     verification: input.verification,

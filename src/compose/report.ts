@@ -18,6 +18,7 @@ export interface ComposeReport {
   changedFiles: string[];
   diffStat: string;
   diffPath?: string;
+  terminationReason?: "process_timeout" | "host_abort" | "user_cancelled";
   gitStatusBefore?: GitStatusSnapshot;
   gitStatusAfter?: GitStatusSnapshot;
   verification: VerificationResult[];
@@ -127,6 +128,15 @@ export function renderMarkdownReport(report: ComposeReport): string {
       "## Plan",
       "",
       report.planText,
+      ""
+    );
+  }
+
+  if (report.terminationReason) {
+    lines.push(
+      "## Termination",
+      "",
+      `Reason: \`${report.terminationReason}\``,
       ""
     );
   }
