@@ -476,12 +476,14 @@ test/unit/
 ## Issue #4: reviewPrompt 不使用 "Objective:" 前缀
 
 **表象**: `reviewPrompt()` 以 "You are being invoked by Codex as a specialist MiMoCode review agent." 开头，而非 "Objective:"
-**原因**: review 接收的是 diff 内容而非任务描述，不需要 Objective 格式
-**影响范围**: mimo_review 工具的 prompt 格式
-**严重程度**: P3 (设计决策)
+**原因**: review 接收的是 diff 内容而非任务描述，最初设计时未使用 Objective 格式
+**影响范围**: mimo_review 工具的 prompt 格式，可能导致 MiMoCode 进入交互澄清模式
+**严重程度**: P3 (优化)
 **相关代码**: `src/core/prompt.ts`
 **复现步骤**: 调用 reviewPrompt("diff content") → 不以 "Objective:" 开头
-**建议修复方向**: 无需修复，这是设计意图
+**建议修复方向**: 统一使用 "Objective:" 前缀，任务描述为 "Review the following diff..."
+
+**状态**: ✅ 已修复（reviewPrompt 现在以 "Objective:" 开头，与 planPrompt/implementPrompt 格式一致）
 
 ## Issue #5: captureWorktreeFiles 吞没错误
 
@@ -545,4 +547,4 @@ test/unit/
 
 **测试套件**: 60 个测试文件, 363 个测试, 全部通过
 **类型检查**: tsc --noEmit 通过
-**发现 Issue**: 8 个 (全部已修复或标记为设计决策)
+**发现 Issue**: 8 个 (6 个已修复, 1 个设计决策跳过, 1 个设计决策已解决)

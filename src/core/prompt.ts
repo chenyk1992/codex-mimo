@@ -36,10 +36,12 @@ export function implementPrompt(task: string): string {
 
 export function reviewPrompt(diffSummary: string): string {
   return [
-    "You are being invoked by Codex as a specialist MiMoCode review agent.",
+    "Objective:",
+    `Review the following diff for correctness, regressions, security issues, and missing test coverage.\n\n${diffSummary}`,
     "",
-    "Review the current diff:",
-    diffSummary,
+    "Execute this objective now. Do not ask what the task is; the Objective above is the task.",
+    "",
+    "You are being invoked by Codex as a specialist MiMoCode review agent.",
     "",
     "Rules:",
     "- Do not edit files.",

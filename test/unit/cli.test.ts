@@ -229,8 +229,8 @@ describe("prompt templates", () => {
     expect(implementPrompt("x").startsWith("Objective:")).toBe(true);
   });
 
-  it("review prompt starts with review agent label", () => {
-    expect(reviewPrompt("x").startsWith("You are being invoked")).toBe(true);
+  it("review prompt starts with Objective:", () => {
+    expect(reviewPrompt("x").startsWith("Objective:")).toBe(true);
   });
 });
 
