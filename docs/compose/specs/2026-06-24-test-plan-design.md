@@ -515,7 +515,9 @@ test/unit/
 **严重程度**: P3 (测试挑战，非运行时问题)
 **相关代码**: `src/mimo/acp-client.ts`
 **复现步骤**: 在测试中验证 agent request 响应时需要轮询
-**建议修复方向**: 测试中使用 vi.waitFor() 或 mock 响应同步化
+**建议修复方向**: 在 AcpClient 中跟踪 pending agent requests，提供 waitForPendingAgentRequests() 方法
+
+**状态**: ✅ 已修复（AcpClient 添加 pendingAgentRequests 跟踪 + waitForPendingAgentRequests()，bridge.run() 在返回前等待所有 pending 请求完成）
 
 ## Issue #8: Windows 进程清理导致 EPERM
 
@@ -525,7 +527,9 @@ test/unit/
 **严重程度**: P2 (边界)
 **相关代码**: `src/core/terminal.ts`
 **复现步骤**: 在 Windows 上运行 TerminalManager 测试 → afterEach 清理可能失败
-**建议修复方向**: 测试中 mock TerminalManager.create 或在 afterEach 中等待进程完全退出
+**建议修复方向**: 添加 releaseAsync() 方法等待进程完全退出后再删除
+
+**状态**: ✅ 已修复（TerminalManager 添加 releaseAsync() 方法，AcpBridge.cleanup() 使用 releaseAsync 确保进程退出后再清理）
 
 # [S10] Summary
 
@@ -541,4 +545,4 @@ test/unit/
 
 **测试套件**: 60 个测试文件, 363 个测试, 全部通过
 **类型检查**: tsc --noEmit 通过
-**发现 Issue**: 8 个 (1 个 P1 已修复, 3 个 P2, 4 个 P3)
+**发现 Issue**: 8 个 (全部已修复或标记为设计决策)

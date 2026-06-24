@@ -32,6 +32,10 @@ export class TerminalManager {
     return this.terminals.get(id);
   }
 
+  listIds(): string[] {
+    return [...this.terminals.keys()];
+  }
+
   kill(id: string): void {
     const terminal = this.terminals.get(id);
     if (terminal && terminal.exitCode === null) {
@@ -47,6 +51,20 @@ export class TerminalManager {
       }
       this.terminals.delete(id);
     }
+  }
+
+  async releaseAsync(id: string, timeoutMs: number = 5000): Promise<void> {
+    const terminal = this.terminals.get(id);
+    if (!terminal) return;
+    if (terminal.exitCode === null) {
+      terminal.process.kill("SIGTERM");
+      try {
+        await this.waitForExit(id, timeoutMs);
+      } catch {
+        terminal.process.kill("SIGKILL");
+      }
+    }
+    this.terminals.delete(id);
   }
 
   async waitForExit(id: string, timeoutMs: number = 30000): Promise<ManagedTerminal> {

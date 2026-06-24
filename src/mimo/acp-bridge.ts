@@ -100,6 +100,8 @@ export class AcpBridge {
         prompt: [{ type: "text", text: task }]
       })) as SessionPromptResult;
 
+      await this.client.waitForPendingAgentRequests();
+
       const changedFiles = this.extractChangedFiles();
 
       this.audit.log({
@@ -300,6 +302,8 @@ export class AcpBridge {
   }
 
   private async cleanup(): Promise<void> {
+    const terminalIds = this.terminals.listIds();
+    await Promise.all(terminalIds.map((id) => this.terminals.releaseAsync(id)));
     await this.audit.close();
     this.acp?.stop();
   }

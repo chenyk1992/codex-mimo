@@ -53,6 +53,7 @@ export class AcpClient {
   private writeFn: (data: string) => void;
   private onAgentRequest: AgentRequestHandler;
   private onUpdate: UpdateHandler;
+  private pendingAgentRequests = new Set<Promise<void>>();
 
   constructor(
     writeFn: (data: string) => void,
@@ -77,6 +78,12 @@ export class AcpClient {
     }
   }
 
+  async waitForPendingAgentRequests(): Promise<void> {
+    while (this.pendingAgentRequests.size > 0) {
+      await Promise.all([...this.pendingAgentRequests]);
+    }
+  }
+
   private handleResponse(response: JsonRpcResponse): void {
     const pending = this.pending.get(response.id);
     if (!pending) return;
@@ -90,24 +97,28 @@ export class AcpClient {
     }
   }
 
-  private async handleAgentRequest(request: JsonRpcRequest): Promise<void> {
-    try {
-      const result = await this.onAgentRequest(request.method, request.params);
-      this.send({
-        jsonrpc: "2.0",
-        id: request.id,
-        result
-      });
-    } catch (err) {
-      this.send({
-        jsonrpc: "2.0",
-        id: request.id,
-        error: {
-          code: -32000,
-          message: err instanceof Error ? err.message : "Unknown error"
-        }
-      });
-    }
+  private handleAgentRequest(request: JsonRpcRequest): void {
+    const promise = (async () => {
+      try {
+        const result = await this.onAgentRequest(request.method, request.params);
+        this.send({
+          jsonrpc: "2.0",
+          id: request.id,
+          result
+        });
+      } catch (err) {
+        this.send({
+          jsonrpc: "2.0",
+          id: request.id,
+          error: {
+            code: -32000,
+            message: err instanceof Error ? err.message : "Unknown error"
+          }
+        });
+      }
+    })();
+    this.pendingAgentRequests.add(promise);
+    promise.finally(() => this.pendingAgentRequests.delete(promise));
   }
 
   private handleNotification(notification: JsonRpcNotification): void {
