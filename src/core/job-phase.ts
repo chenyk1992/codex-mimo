@@ -9,6 +9,7 @@ export function inferPhaseFromEvent(event: NormalizedMimoEvent): JobPhase | null
   if (event.type === "error") return "failed";
   if (event.type === "diff") return "editing";
   if (event.type === "message") return "investigating";
+  if (event.type === "progress") return "investigating";
   if (event.type !== "tool") return null;
 
   const toolName = event.toolName?.toLowerCase();

@@ -23,7 +23,7 @@ describe("compose event parsing", () => {
 
   it("summarizes message and tool counts", () => {
     const events = parseMimoJsonLines('{"type":"message","text":"hello"}\n{"type":"tool","tool":"edit","status":"completed"}\n');
-    expect(summarizeEvents(events)).toEqual({
+    expect(summarizeEvents(events)).toMatchObject({
       messages: 1,
       tools: 1,
       diffs: 0,
@@ -50,6 +50,43 @@ describe("compose event parsing", () => {
     expect(events[0]).toMatchObject({
       type: "message",
       text: "What would you like me to help with?"
+    });
+  });
+
+  it("normalizes MiMo tool_use raw events as tool progress", () => {
+    const event = normalizeMimoEvent({
+      type: "tool_use",
+      part: {
+        type: "tool",
+        tool: "read",
+        state: {
+          status: "completed",
+          input: { filePath: "src/compose/events.ts" }
+        }
+      }
+    });
+
+    expect(event).toMatchObject({
+      type: "tool",
+      toolName: "read",
+      status: "completed"
+    });
+  });
+
+  it("counts raw progress events separately from unknown raw events", () => {
+    const summary = summarizeEvents([
+      normalizeMimoEvent({ type: "step_start", part: { type: "step-start" } }),
+      normalizeMimoEvent({ type: "step_finish", part: { type: "step-finish", reason: "tool-calls" } }),
+      normalizeMimoEvent({ type: "unexpected_shape", value: true })
+    ]);
+
+    expect(summary).toMatchObject({
+      messages: 0,
+      tools: 0,
+      diffs: 0,
+      errors: 0,
+      progress: 2,
+      raw: 1
     });
   });
 });

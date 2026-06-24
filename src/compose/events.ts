@@ -1,9 +1,10 @@
 export interface NormalizedMimoEvent {
-  type: "message" | "tool" | "diff" | "usage" | "error" | "raw";
+  type: "message" | "tool" | "diff" | "usage" | "error" | "progress" | "raw";
   text?: string;
   toolName?: string;
   status?: string;
   path?: string;
+  progressKind?: "step_start" | "step_finish";
   usage?: {
     inputTokens?: number;
     outputTokens?: number;
@@ -17,6 +18,10 @@ interface EventSummary {
   tools: number;
   diffs: number;
   errors: number;
+  progress: number;
+  raw: number;
+  lastEvent?: string;
+  lastTool?: string;
 }
 
 export function parseMimoJsonLines(stdout: string): NormalizedMimoEvent[] {
@@ -74,15 +79,45 @@ export function normalizeMimoEvent(raw: unknown): NormalizedMimoEvent {
     return { type: "error", text: stringValue(raw.error ?? raw.message), raw };
   }
 
+  if (type === "tool_use") {
+    const part = raw.part;
+    if (isRecord(part) && stringValue(part.type) === "tool") {
+      const state = isRecord(part.state) ? part.state : undefined;
+      return {
+        type: "tool",
+        toolName: stringValue(part.tool ?? part.name ?? part.toolName),
+        status: stringValue(state?.status ?? part.status),
+        text: nestedToolCommandText(part),
+        raw
+      };
+    }
+  }
+
+  if (type === "step_start" || type === "step_finish") {
+    return {
+      type: "progress",
+      progressKind: type === "step_start" ? "step_start" : "step_finish",
+      text: type === "step_start" ? "MiMoCode step started." : "MiMoCode step finished.",
+      raw
+    };
+  }
+
   return { type: "raw", raw };
 }
 
 export function summarizeEvents(events: NormalizedMimoEvent[]): EventSummary {
+  const last = [...events].reverse().find((event) => event.type !== "usage");
+  const lastTool = [...events].reverse().find((event) => event.type === "tool" && event.toolName);
+
   return {
     messages: events.filter((event) => event.type === "message").length,
     tools: events.filter((event) => event.type === "tool").length,
     diffs: events.filter((event) => event.type === "diff").length,
-    errors: events.filter((event) => event.type === "error").length
+    errors: events.filter((event) => event.type === "error").length,
+    progress: events.filter((event) => event.type === "progress").length,
+    raw: events.filter((event) => event.type === "raw").length,
+    lastEvent: last ? describeEvent(last) : undefined,
+    lastTool: lastTool?.toolName
   };
 }
 
@@ -114,4 +149,22 @@ function nestedRawMessageText(raw: Record<string, unknown>): string | undefined 
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
+}
+
+function nestedToolCommandText(part: Record<string, unknown>): string | undefined {
+  const state = part.state;
+  if (!isRecord(state)) return undefined;
+  const input = state.input;
+  if (!isRecord(input)) return undefined;
+  return stringValue(input.command ?? input.filePath ?? input.path);
+}
+
+function describeEvent(event: NormalizedMimoEvent): string {
+  if (event.type === "tool") return `tool:${event.toolName ?? "unknown"}${event.status ? `:${event.status}` : ""}`;
+  if (event.type === "progress") return event.progressKind ?? "progress";
+  if (event.type === "message") return "message";
+  if (event.type === "error") return "error";
+  if (event.type === "diff") return `diff:${event.path ?? "unknown"}`;
+  if (event.type === "usage") return "usage";
+  return "raw";
 }

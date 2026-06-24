@@ -82,4 +82,32 @@ describe("Codex compact compose report", () => {
     expect(result.reportPaths.json).toBe("report.json");
     expect(result).not.toHaveProperty("events");
   });
+
+  it("summarizes progress and last tool in compact compose reports", () => {
+    const result = compactComposeReportForCodex({
+      id: "run1",
+      createdAt: "2026-06-24T00:00:00.000Z",
+      workflow: "plan",
+      cwd: "/tmp/project",
+      task: "Plan",
+      mimoArgs: ["run"],
+      requestedSkills: ["compose:plan"],
+      status: "timeout",
+      events: [
+        { type: "progress", progressKind: "step_start", text: "MiMoCode step started.", raw: {} },
+        { type: "tool", toolName: "read", status: "completed", raw: {} }
+      ],
+      changedFiles: [],
+      diffStat: "",
+      verification: [],
+      reportPaths: { json: "run.json", markdown: "run.md", eventsJsonl: "run.jsonl" }
+    });
+
+    expect(result.eventSummary).toMatchObject({
+      progress: 1,
+      tools: 1,
+      lastEvent: "tool:read:completed",
+      lastTool: "read"
+    });
+  });
 });
