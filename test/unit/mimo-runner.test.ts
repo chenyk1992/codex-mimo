@@ -54,4 +54,24 @@ describe("parseMimoOutput", () => {
 
     expect(result.errors).toEqual(["model failed", "tool failed"]);
   });
+
+  it("parses tool_use with nested part.state for bash commands", () => {
+    const result = parseMimoOutput([
+      { type: "text", part: { text: "done" } },
+      {
+        type: "tool_use",
+        part: {
+          type: "tool",
+          tool: "bash",
+          state: {
+            input: { command: "npm test" },
+            metadata: { exit: 0 }
+          }
+        }
+      }
+    ]);
+
+    expect(result.summary).toBe("done");
+    expect(result.commands).toEqual([{ command: "npm test", exitCode: 0 }]);
+  });
 });

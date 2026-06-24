@@ -43,13 +43,21 @@ export async function mimoHealthcheck(input: unknown) {
   }
 }
 
+function rejectBackground(parsed: { background?: boolean }, toolName: string): void {
+  if (parsed.background) {
+    throw new Error(`Background execution is not yet supported for ${toolName}. Use mimo_compose with background=true instead.`);
+  }
+}
+
 export async function mimoPlan(input: unknown) {
   const parsed = PlanInput.parse(input);
+  rejectBackground(parsed, "mimo_plan");
   const result = await runAndCapture({
     cwd: parsed.cwd,
     agent: parsed.agent,
     model: parsed.model,
-    message: planPrompt(parsed.task)
+    message: planPrompt(parsed.task),
+    timeoutMs: parsed.timeoutMs
   });
   return {
     summary: result.summary,
@@ -61,6 +69,7 @@ export async function mimoPlan(input: unknown) {
 
 export async function mimoImplement(input: unknown) {
   const parsed = ImplementInput.parse(input);
+  rejectBackground(parsed, "mimo_implement");
   if (!parsed.allowWrite) {
     throw new Error("mimo_implement requires allowWrite=true.");
   }
@@ -68,7 +77,8 @@ export async function mimoImplement(input: unknown) {
   const result = await runAndCapture({
     cwd: parsed.cwd,
     agent: "build",
-    message: implementPrompt(parsed.task)
+    message: implementPrompt(parsed.task),
+    timeoutMs: parsed.timeoutMs
   });
   const after = await captureWorktreeFiles(parsed.cwd);
   return {
@@ -82,6 +92,7 @@ export async function mimoImplement(input: unknown) {
 
 export async function mimoReview(input: unknown) {
   const parsed = ReviewInput.parse(input);
+  rejectBackground(parsed, "mimo_review");
   const diffResult = await execa("git", ["diff", parsed.base], { cwd: parsed.cwd, reject: false });
   if (diffResult.exitCode !== 0) {
     throw new Error(`Git diff capture failed: ${diffResult.stderr || `exit ${diffResult.exitCode}`}`);
@@ -134,12 +145,14 @@ function writeReviewDiffInput(cwd: string, base: string, diff: string): string {
 
 export async function mimoFixCi(input: unknown) {
   const parsed = FixCiInput.parse(input);
+  rejectBackground(parsed, "mimo_fix_ci");
   const before = await captureWorktreeFiles(parsed.cwd);
   const result = await runAndCapture({
     cwd: parsed.cwd,
     agent: "build",
     message: implementPrompt(parsed.task ?? "Fix the CI failures shown in the attached log."),
-    files: [parsed.file]
+    files: [parsed.file],
+    timeoutMs: parsed.timeoutMs
   });
   const after = await captureWorktreeFiles(parsed.cwd);
   return {
@@ -153,12 +166,14 @@ export async function mimoFixCi(input: unknown) {
 
 export async function mimoResume(input: unknown) {
   const parsed = ResumeInput.parse(input);
+  rejectBackground(parsed, "mimo_resume");
   const before = await captureWorktreeFiles(parsed.cwd);
   const result = await runAndCapture({
     cwd: parsed.cwd,
     agent: "build",
     message: parsed.task,
-    session: parsed.session
+    session: parsed.session,
+    timeoutMs: parsed.timeoutMs
   });
   const after = await captureWorktreeFiles(parsed.cwd);
   return {

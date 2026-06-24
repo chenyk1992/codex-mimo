@@ -11,12 +11,13 @@ export interface MimoRunResult {
   raw: unknown[];
 }
 
-export async function runAndCapture(options: MimoRunOptions): Promise<MimoRunResult> {
+export async function runAndCapture(options: MimoRunOptions & { timeoutMs?: number }): Promise<MimoRunResult> {
   const args = buildMimoRunArgs(options);
   const result = await execa("mimo", args, {
     cwd: options.cwd,
     stdin: "ignore",
     stderr: "pipe",
+    timeout: options.timeoutMs,
     reject: false
   });
 
