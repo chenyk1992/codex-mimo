@@ -2,11 +2,16 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   ComposeInput,
+  FixCiInput,
+  ImplementInput,
   JobCancelInput,
   JobListInput,
   JobResultInput,
   JobStatusInput,
-  ResumeJobInput
+  PlanInput,
+  ResumeInput,
+  ResumeJobInput,
+  ReviewInput
 } from "../../src/codex/tool-schemas.js";
 import { COMPOSE_WORKFLOW_NAMES, composeWorkflowUsage } from "../../src/compose/workflow-names.js";
 
@@ -66,5 +71,21 @@ describe("tool schemas", () => {
       background: true
     });
     expect(parsed.background).toBe(true);
+  });
+
+  it("rejects unknown fields on direct tool schemas", () => {
+    expect(() => PlanInput.parse({ cwd: "E:/project/app", task: "Test", background: true })).toThrow();
+    expect(() => ImplementInput.parse({ cwd: "E:/project/app", task: "Test", allowWrite: true, background: true })).toThrow();
+    expect(() => ReviewInput.parse({ cwd: "E:/project/app", background: true })).toThrow();
+    expect(() => FixCiInput.parse({ cwd: "E:/project/app", file: "log.txt", background: true })).toThrow();
+    expect(() => ResumeInput.parse({ cwd: "E:/project/app", session: "s1", task: "Test", background: true })).toThrow();
+  });
+
+  it("accepts valid direct tool inputs without background/wait", () => {
+    expect(PlanInput.parse({ cwd: "E:/project/app", task: "Test" }).task).toBe("Test");
+    expect(ImplementInput.parse({ cwd: "E:/project/app", task: "Test", allowWrite: true }).allowWrite).toBe(true);
+    expect(ReviewInput.parse({ cwd: "E:/project/app" }).base).toBe("HEAD");
+    expect(FixCiInput.parse({ cwd: "E:/project/app", file: "log.txt" }).file).toBe("log.txt");
+    expect(ResumeInput.parse({ cwd: "E:/project/app", session: "s1", task: "Test" }).session).toBe("s1");
   });
 });

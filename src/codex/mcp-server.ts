@@ -58,8 +58,6 @@ export function createMcpServer(): McpServer {
       task: z.string().describe("Task description"),
       agent: z.string().default("plan").describe("MiMoCode agent name"),
       model: z.string().optional().describe("Model override"),
-      background: z.boolean().default(false).describe("Run as background job"),
-      wait: z.boolean().default(false).describe("Wait briefly for background job to complete"),
       timeoutMs: z.number().int().positive().default(1_800_000).describe("MiMoCode process timeout in milliseconds")
     },
     async (args) => {
@@ -76,8 +74,6 @@ export function createMcpServer(): McpServer {
       task: z.string().describe("Task description"),
       allowWrite: z.boolean().default(false).describe("Allow MiMoCode to write files"),
       allowInstall: z.boolean().default(false).describe("Allow package install"),
-      background: z.boolean().default(false).describe("Run as background job"),
-      wait: z.boolean().default(false).describe("Wait briefly for background job to complete"),
       timeoutMs: z.number().int().positive().default(1_800_000).describe("MiMoCode process timeout in milliseconds")
     },
     async (args) => {
@@ -92,8 +88,6 @@ export function createMcpServer(): McpServer {
     {
       cwd: z.string().describe("Project root directory"),
       base: z.string().default("HEAD").describe("Git base ref to diff against"),
-      background: z.boolean().default(false).describe("Run as background job"),
-      wait: z.boolean().default(false).describe("Wait briefly for background job to complete"),
       timeoutMs: z.number().int().positive().default(1_800_000).describe("MiMoCode process timeout in milliseconds")
     },
     async (args) => {
@@ -109,8 +103,6 @@ export function createMcpServer(): McpServer {
       cwd: z.string().describe("Project root directory"),
       file: z.string().describe("Path to CI log file"),
       task: z.string().optional().describe("Additional task context"),
-      background: z.boolean().default(false).describe("Run as background job"),
-      wait: z.boolean().default(false).describe("Wait briefly for background job to complete"),
       timeoutMs: z.number().int().positive().default(1_800_000).describe("MiMoCode process timeout in milliseconds")
     },
     async (args) => {
@@ -126,8 +118,6 @@ export function createMcpServer(): McpServer {
       cwd: z.string().describe("Project root directory"),
       session: z.string().describe("MiMoCode session ID"),
       task: z.string().describe("Task to continue"),
-      background: z.boolean().default(false).describe("Run as background job"),
-      wait: z.boolean().default(false).describe("Wait briefly for background job to complete"),
       timeoutMs: z.number().int().positive().default(1_800_000).describe("MiMoCode process timeout in milliseconds")
     },
     async (args) => {

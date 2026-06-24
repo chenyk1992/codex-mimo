@@ -6,46 +6,36 @@ export const PlanInput = z.object({
   task: z.string(),
   agent: z.string().default("plan"),
   model: z.string().optional(),
-  background: z.boolean().default(false),
-  wait: z.boolean().default(false),
   timeoutMs: z.number().int().positive().default(1_800_000)
-});
+}).strict();
 
 export const ImplementInput = z.object({
   cwd: z.string(),
   task: z.string(),
   allowWrite: z.boolean().default(false),
   allowInstall: z.boolean().default(false),
-  background: z.boolean().default(false),
-  wait: z.boolean().default(false),
   timeoutMs: z.number().int().positive().default(1_800_000)
-});
+}).strict();
 
 export const ReviewInput = z.object({
   cwd: z.string(),
   base: z.string().default("HEAD"),
-  background: z.boolean().default(false),
-  wait: z.boolean().default(false),
   timeoutMs: z.number().int().positive().default(1_800_000)
-});
+}).strict();
 
 export const FixCiInput = z.object({
   cwd: z.string(),
   file: z.string(),
   task: z.string().optional(),
-  background: z.boolean().default(false),
-  wait: z.boolean().default(false),
   timeoutMs: z.number().int().positive().default(1_800_000)
-});
+}).strict();
 
 export const ResumeInput = z.object({
   cwd: z.string(),
   session: z.string(),
   task: z.string(),
-  background: z.boolean().default(false),
-  wait: z.boolean().default(false),
   timeoutMs: z.number().int().positive().default(1_800_000)
-});
+}).strict();
 
 export const HealthcheckInput = z.object({
   cwd: z.string().optional()
