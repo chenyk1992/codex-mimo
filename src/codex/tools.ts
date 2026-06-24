@@ -1,5 +1,6 @@
 import { execa } from "execa";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   ComposeInput,
@@ -123,7 +124,7 @@ export async function mimoReview(input: unknown) {
 }
 
 function writeReviewDiffInput(cwd: string, base: string, diff: string): string {
-  const dir = path.join(cwd, ".codex-mimo", "review-inputs");
+  const dir = path.join(os.tmpdir(), "codex-mimo-review-inputs");
   fs.mkdirSync(dir, { recursive: true });
   const safeBase = base.replace(/[^a-zA-Z0-9_.-]/g, "_") || "HEAD";
   const file = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${safeBase}.diff`);
@@ -319,7 +320,7 @@ export async function mimoResumeJob(
   };
 }
 
-async function captureWorktreeFiles(cwd: string): Promise<Set<string>> {
+async function captureWorktreeFiles(cwd: string): Promise<Set<string> | undefined> {
   try {
     const result = await execa("git", ["status", "--short", "--untracked-files=all"], {
       cwd,
@@ -334,11 +335,12 @@ async function captureWorktreeFiles(cwd: string): Promise<Set<string>> {
         .filter(Boolean)
     );
   } catch {
-    return new Set();
+    return undefined;
   }
 }
 
-function diffAddedFiles(before: Set<string>, after: Set<string>): string[] {
+function diffAddedFiles(before: Set<string> | undefined, after: Set<string> | undefined): string[] {
+  if (!before || !after) return [];
   return [...after].filter((file) => !before.has(file));
 }
 

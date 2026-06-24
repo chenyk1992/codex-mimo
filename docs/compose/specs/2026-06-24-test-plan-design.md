@@ -491,7 +491,9 @@ test/unit/
 **严重程度**: P2 (边界)
 **相关代码**: `src/codex/tools.ts:322-339`
 **复现步骤**: 在非 git 仓库中调用 mimo_implement → changedFiles 可能不完整
-**建议修复方向**: 考虑在非 git 环境下返回 undefined 或记录警告
+**建议修复方向**: 返回 undefined，让调用方决定如何处理
+
+**状态**: ✅ 已修复（返回 undefined，diffAddedFiles 处理 undefined 输入返回空数组）
 
 ## Issue #6: writeReviewDiffInput 在 cwd 内创建临时文件
 
@@ -501,7 +503,9 @@ test/unit/
 **严重程度**: P3 (优化)
 **相关代码**: `src/codex/tools.ts:125-132`
 **复现步骤**: 调用 mimo_review → 在项目 .codex-mimo/review-inputs/ 下创建 .diff 文件
-**建议修复方向**: 考虑使用 os.tmpdir() 或添加清理机制
+**建议修复方向**: 使用 os.tmpdir() 存放临时文件
+
+**状态**: ✅ 已修复（改为使用 os.tmpdir()/codex-mimo-review-inputs/）
 
 ## Issue #7: AcpClient handleAgentRequest 是 fire-and-forget
 
