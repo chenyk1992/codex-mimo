@@ -823,4 +823,25 @@ describe("compose runner", () => {
     expect(capturedArgs).toContain("--continue");
     expect(result.status).toBe("passed");
   });
+
+  it("stores sessionId from MiMo events on compose reports", () => {
+    const report = buildComposeReportFromRun({
+      id: "run-session",
+      createdAt: "2026-06-24T00:00:00.000Z",
+      input: { cwd: "E:/project/app", workflow: "plan", task: "Plan" },
+      mimoArgs: ["run", "--format", "json"],
+      requestedSkills: ["compose:plan"],
+      eventsStdout: "{\"type\":\"step_start\",\"sessionID\":\"ses_real\",\"part\":{\"type\":\"step-start\"}}\n",
+      diff: { changedFiles: [], diffStat: "", diff: "" },
+      verification: [],
+      reportDir: "E:/project/app/.codex-mimo/reports",
+      eventsDir: "E:/project/app/.codex-mimo/events",
+      diffsDir: "E:/project/app/.codex-mimo/diffs",
+      status: "timeout",
+      terminationReason: "process_timeout",
+      error: "MiMoCode exceeded the configured process timeout."
+    });
+
+    expect(report.sessionId).toBe("ses_real");
+  });
 });

@@ -20,6 +20,11 @@ export interface CompactComposeReport {
   reviewText?: string;
   planText?: string;
   error?: string;
+  sessionId?: string | null;
+  resumeHint?: {
+    tool: "mimo_resume";
+    session: string;
+  };
   reportPaths: ComposeReport["reportPaths"];
 }
 
@@ -49,6 +54,8 @@ export function compactComposeReportForCodex(report: ComposeReport): CompactComp
     reviewText: report.reviewText,
     planText: report.planText,
     error: report.error,
+    sessionId: report.sessionId ?? null,
+    ...(report.sessionId ? { resumeHint: { tool: "mimo_resume" as const, session: report.sessionId } } : {}),
     reportPaths: report.reportPaths
   };
 }

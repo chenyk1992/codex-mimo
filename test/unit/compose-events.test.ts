@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeMimoEvent, parseMimoJsonLines, summarizeEvents } from "../../src/compose/events.js";
+import { extractSessionIdFromEvents, normalizeMimoEvent, parseMimoJsonLines, summarizeEvents } from "../../src/compose/events.js";
 
 describe("compose event parsing", () => {
   it("normalizes public message events", () => {
@@ -88,5 +88,33 @@ describe("compose event parsing", () => {
       progress: 2,
       raw: 1
     });
+  });
+
+  it("extracts MiMo sessionID from raw events", () => {
+    const events = [
+      normalizeMimoEvent({
+        type: "step_start",
+        sessionID: "ses_upper",
+        part: { type: "step-start", sessionID: "ses_part" }
+      })
+    ];
+
+    expect(extractSessionIdFromEvents(events)).toBe("ses_upper");
+  });
+
+  it("extracts MiMo sessionId from nested part events", () => {
+    const events = [
+      normalizeMimoEvent({
+        type: "tool_use",
+        part: {
+          type: "tool",
+          tool: "read",
+          sessionId: "ses_nested",
+          state: { status: "completed", input: { filePath: "README.md" } }
+        }
+      })
+    ];
+
+    expect(extractSessionIdFromEvents(events)).toBe("ses_nested");
   });
 });

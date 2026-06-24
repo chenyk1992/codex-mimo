@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
 import { captureGitDiff, type GitDiffSnapshot } from "../git/diff.js";
 import { captureGitStatus, type GitStatusSnapshot } from "../git/status.js";
-import { parseMimoJsonLines } from "./events.js";
+import { extractSessionIdFromEvents, parseMimoJsonLines } from "./events.js";
 import { writeComposeReport, type ComposeReport } from "./report.js";
 import { runMimoCliStreaming } from "./streaming-runner.js";
 import { normalizeVerificationCommands, runVerificationCommands, type VerificationResult } from "./verify.js";
@@ -419,6 +419,7 @@ export function buildComposeReportFromRun(input: {
   error?: string;
 }): ComposeReport {
   const events = parseMimoJsonLines(input.eventsStdout);
+  const sessionId = extractSessionIdFromEvents(events);
   const diffPath = input.diff.diff ? path.join(input.diffsDir, `${input.id}.diff`) : undefined;
 
   if (diffPath && input.diff.diff) {
@@ -440,6 +441,7 @@ export function buildComposeReportFromRun(input: {
     diffStat: input.diff.diffStat,
     diffPath,
     terminationReason: input.terminationReason,
+    sessionId,
     gitStatusBefore: input.gitStatusBefore,
     gitStatusAfter: input.gitStatusAfter,
     verification: input.verification,

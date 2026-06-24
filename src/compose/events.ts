@@ -121,6 +121,14 @@ export function summarizeEvents(events: NormalizedMimoEvent[]): EventSummary {
   };
 }
 
+export function extractSessionIdFromEvents(events: NormalizedMimoEvent[]): string | null {
+  for (const event of events) {
+    const sessionId = extractSessionId(event.raw);
+    if (sessionId) return sessionId;
+  }
+  return null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -167,4 +175,22 @@ function describeEvent(event: NormalizedMimoEvent): string {
   if (event.type === "diff") return `diff:${event.path ?? "unknown"}`;
   if (event.type === "usage") return "usage";
   return "raw";
+}
+
+function extractSessionId(value: unknown): string | null {
+  if (!isRecord(value)) return null;
+
+  const direct = stringValue(value.sessionID ?? value.sessionId);
+  if (direct) return direct;
+
+  const part = value.part;
+  if (isRecord(part)) {
+    const partId = stringValue(part.sessionID ?? part.sessionId);
+    if (partId) return partId;
+  }
+
+  const raw = value.raw;
+  if (isRecord(raw)) return extractSessionId(raw);
+
+  return null;
 }

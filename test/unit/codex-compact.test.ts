@@ -110,4 +110,29 @@ describe("Codex compact compose report", () => {
       lastTool: "read"
     });
   });
+
+  it("includes sessionId and resumeHint for timeout compose reports", () => {
+    const result = compactComposeReportForCodex({
+      id: "run1",
+      createdAt: "2026-06-24T00:00:00.000Z",
+      workflow: "plan",
+      cwd: "/tmp/project",
+      task: "Plan",
+      mimoArgs: ["run"],
+      requestedSkills: ["compose:plan"],
+      status: "timeout",
+      sessionId: "ses_real",
+      events: [],
+      changedFiles: [],
+      diffStat: "",
+      verification: [],
+      reportPaths: { json: "run.json", markdown: "run.md", eventsJsonl: "run.jsonl" }
+    });
+
+    expect(result.sessionId).toBe("ses_real");
+    expect(result.resumeHint).toEqual({
+      tool: "mimo_resume",
+      session: "ses_real"
+    });
+  });
 });

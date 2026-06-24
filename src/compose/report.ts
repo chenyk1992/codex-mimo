@@ -19,6 +19,7 @@ export interface ComposeReport {
   diffStat: string;
   diffPath?: string;
   terminationReason?: "process_timeout" | "host_abort" | "user_cancelled";
+  sessionId?: string | null;
   gitStatusBefore?: GitStatusSnapshot;
   gitStatusAfter?: GitStatusSnapshot;
   verification: VerificationResult[];
@@ -51,6 +52,7 @@ export function renderMarkdownReport(report: ComposeReport): string {
     `Workflow: \`${report.workflow}\``,
     `Status: \`${report.status}\``,
     `CWD: \`${report.cwd}\``,
+    ...(report.sessionId ? [`Session ID: \`${report.sessionId}\``] : []),
     "",
     "## Task",
     "",
