@@ -71,6 +71,7 @@ export function failRuntimeJob(
   failure: {
     errorCode: string;
     error: string;
+    sessionId?: string | null;
     reportPaths?: JobReportPaths;
   }
 ): JobRecord {
@@ -84,6 +85,7 @@ export function failRuntimeJob(
     completedAt: new Date().toISOString(),
     errorCode: failure.errorCode,
     error: failure.error,
+    sessionId: failure.sessionId ?? job.sessionId ?? null,
     reportPaths: failure.reportPaths ?? job.reportPaths
   });
 }

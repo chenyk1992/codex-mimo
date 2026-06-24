@@ -63,4 +63,28 @@ describe("job rendering", () => {
     expect(result.resumeHint).toEqual({ tool: "mimo_resume_job", jobId: "compose-1" });
     expect(result.reportPaths?.json).toBe("report.json");
   });
+
+  it("renders result with directResumeHint when sessionId exists", () => {
+    const result = renderJobResult(job({
+      status: "failed",
+      phase: "failed",
+      sessionId: "ses_abc",
+      error: "timeout",
+      errorCode: "timeout"
+    }));
+
+    expect(result.directResumeHint).toEqual({ tool: "mimo_resume", session: "ses_abc" });
+  });
+
+  it("renders result without directResumeHint when sessionId is null", () => {
+    const result = renderJobResult(job({
+      status: "failed",
+      phase: "failed",
+      sessionId: null,
+      error: "timeout",
+      errorCode: "timeout"
+    }));
+
+    expect(result.directResumeHint).toBeUndefined();
+  });
 });

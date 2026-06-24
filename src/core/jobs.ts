@@ -97,6 +97,10 @@ export interface JobResult {
     tool: "mimo_resume_job";
     jobId: string;
   };
+  directResumeHint?: {
+    tool: "mimo_resume";
+    session: string;
+  };
 }
 
 export function nowIso(): string {

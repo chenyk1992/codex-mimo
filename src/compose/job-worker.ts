@@ -125,6 +125,7 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
     failRuntimeJob(cwd, jobId, {
       errorCode: "report_write_failed",
       error: report.error ?? "Compose post-processing failed.",
+      sessionId: report.sessionId ?? input.session ?? null,
       reportPaths: jobReportPaths(report)
     });
     return;
@@ -158,6 +159,7 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
     failRuntimeJob(cwd, jobId, {
       errorCode: runResult.exitCode === 124 ? "timeout" : "nonzero_exit",
       error: report.error ?? "MiMoCode failed.",
+      sessionId: report.sessionId ?? input.session ?? null,
       reportPaths: jobReportPaths(report)
     });
     return;

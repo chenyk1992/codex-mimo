@@ -57,6 +57,7 @@ export function renderJobResult(job: JobRecord): JobResult {
     error: job.error,
     errorCode: job.errorCode,
     reportPaths: job.reportPaths,
-    ...(job.sessionId ? { resumeHint: { tool: "mimo_resume_job" as const, jobId: job.id } } : {})
+    ...(job.sessionId ? { resumeHint: { tool: "mimo_resume_job" as const, jobId: job.id } } : {}),
+    ...(job.sessionId ? { directResumeHint: { tool: "mimo_resume" as const, session: job.sessionId } } : {})
   };
 }
