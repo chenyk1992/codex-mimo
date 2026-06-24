@@ -147,3 +147,16 @@ codex-mimo sessions
 | Child process remains after timeout | Use `--timeout-ms` or `mimo_compose.timeoutMs` lower than the outer timeout. |
 | Audit log is too large | Adjust `audit.maxFileSize` in config. |
 | Session not found | Run `codex-mimo sessions` to list known sessions. |
+| `terminationReason: host_abort` | The Codex/MCP host stopped waiting before MiMoCode completed. Re-run with `background: true`; inspect with `mimo_status` and `mimo_result`. |
+| `terminationReason: process_timeout` | codex-mimo reached its configured MiMoCode timeout. Increase `timeoutMs` or split the task. |
+| `eventSummary.progress > 0` but no final message | MiMoCode was active but did not finish. Inspect `eventsJsonl` and resume if a session ID exists. |
+
+## Background Wait
+
+For long workflows, prefer:
+
+```json
+{ "workflow": "plan", "task": "...", "background": true, "wait": true }
+```
+
+`wait` only waits briefly (5 seconds) for fast jobs. If the job is still running, use `mimo_status` and `mimo_result`.

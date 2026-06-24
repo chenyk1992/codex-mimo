@@ -63,12 +63,16 @@ codex-mimo compose --workflow plan --timeout-ms 110000 "Create a validation plan
 
 Use `background: true` for long workflows such as `dev`, `fix`, `fix-ci`, `execute-plan`, and `parallel`.
 
+Use synchronous `mimo_compose` for dry runs, smoke tests, and small read-only tasks. Use `background: true` for `dev`, `fix`, `fix-ci`, `execute-plan`, `parallel`, and any `plan` or `review` task with large attached context.
+
 The launch response includes a `jobId`. Use job tools to check progress, retrieve results, or cancel:
 
 - `mimo_status`
 - `mimo_result`
 - `mimo_cancel`
 - `mimo_jobs`
+
+With `wait: true`, the response waits briefly (5 seconds) for fast jobs. If the job is still running, it returns the current status with the `jobId`.
 
 Reports remain the full artifact of record. Job responses stay compact so they are safe to return to Codex.
 
