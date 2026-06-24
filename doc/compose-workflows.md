@@ -79,3 +79,11 @@ Reports remain the full artifact of record. Job responses stay compact so they a
 ## Safety
 
 The launcher never passes `--dangerously-skip-permissions`. It does not commit, push, reset, or delete files.
+
+## Timeout Resume
+
+When a background Compose job times out, `mimo_result` includes a `directResumeHint` with the MiMoCode session ID. Use `mimo_resume` with that session ID and a continuation task to pick up where the job left off. The session ID is preserved even on failed and timed-out jobs.
+
+## Prompt Transport
+
+Background Compose jobs use prompt transport to write non-ASCII or long prompts to a UTF-8 file under `.codex-mimo/inputs/`. MiMoCode reads the file as the task input, avoiding encoding issues with characters outside the ASCII range.

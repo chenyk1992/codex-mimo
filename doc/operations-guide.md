@@ -150,6 +150,7 @@ codex-mimo sessions
 | `terminationReason: host_abort` | The Codex/MCP host stopped waiting before MiMoCode completed. Re-run with `background: true`; inspect with `mimo_status` and `mimo_result`. |
 | `terminationReason: process_timeout` | codex-mimo reached its configured MiMoCode timeout. Increase `timeoutMs` or split the task. |
 | `eventSummary.progress > 0` but no final message | MiMoCode was active but did not finish. Inspect `eventsJsonl` and resume if a session ID exists. |
+| Background job timed out, need to resume | `mimo_result` includes `directResumeHint` with the session ID. Call `mimo_resume` with that session and a continuation task. |
 
 ## Background Wait
 
@@ -160,3 +161,11 @@ For long workflows, prefer:
 ```
 
 `wait` only waits briefly (5 seconds) for fast jobs. If the job is still running, use `mimo_status` and `mimo_result`.
+
+## Background Prompt Transport
+
+Background Compose jobs automatically use prompt transport for non-ASCII or long prompts. The prompt is written to a UTF-8 file under `.codex-mimo/inputs/` and passed as a file reference to MiMoCode. This prevents encoding issues with Chinese, Japanese, or other non-ASCII task descriptions in background workers.
+
+## Direct Tools Are Foreground-Only
+
+`mimo_plan`, `mimo_implement`, `mimo_review`, `mimo_fix_ci`, and `mimo_resume` run synchronously and do not accept `background` or `wait` fields. For long-running work, use `mimo_compose` with `background: true` instead.
