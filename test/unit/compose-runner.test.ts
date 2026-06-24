@@ -844,4 +844,25 @@ describe("compose runner", () => {
 
     expect(report.sessionId).toBe("ses_real");
   });
+
+  it("does not treat compose startup chatter as planText", () => {
+    const report = buildComposeReportFromRun({
+      id: "run-chatter",
+      createdAt: "2026-06-24T01:00:00.000Z",
+      input: { cwd: "E:/project/app", workflow: "plan", task: "Write a plan" },
+      mimoArgs: ["run", "--format", "json"],
+      requestedSkills: ["compose:plan"],
+      eventsStdout: `{"type":"message","text":"I'm using the compose:plan skill to create an implementation plan for your task."}\n{"type":"message","text":"# Implementation Plan\\n\\n## Task 1: Setup\\n\\n- [ ] Step 1: Create files\\n- [ ] Step 2: Run tests"}\n`,
+      diff: { changedFiles: [], diffStat: "", diff: "" },
+      verification: [],
+      reportDir: "E:/project/app/.codex-mimo/reports",
+      eventsDir: "E:/project/app/.codex-mimo/events",
+      diffsDir: "E:/project/app/.codex-mimo/diffs",
+      status: "passed"
+    });
+
+    expect(report.planText).toBeDefined();
+    expect(report.planText).toContain("Implementation Plan");
+    expect(report.planText).not.toContain("compose:plan skill");
+  });
 });

@@ -468,15 +468,26 @@ function extractPlanText(events: ReturnType<typeof parseMimoJsonLines>): string 
   const planMessages = events
     .filter((event) => event.type === "message" && event.text)
     .map((event) => event.text!)
-    .filter((text) => {
-      const lower = text.toLowerCase();
-      return (
-        lower.includes("implementation plan") ||
-        lower.includes("# plan") ||
-        lower.includes("## task") ||
-        (lower.includes("### task") && lower.includes("step")) ||
-        (lower.includes("- [ ]") && lower.length > 200)
-      );
-    });
+    .filter(isStructuredPlanText);
   return planMessages.length > 0 ? planMessages.join("\n\n") : undefined;
+}
+
+function isStructuredPlanText(text: string): boolean {
+  const hasStructure =
+    /^##\s+task\b/m.test(text) ||
+    /^###\s+task\b/m.test(text) ||
+    /^##\s+step\b/m.test(text) ||
+    /^###\s+step\b/m.test(text) ||
+    /^##\s+phase\b/m.test(text) ||
+    /^-\s+\[[ x]\]/m.test(text) ||
+    /^\d+\.\s+/m.test(text);
+  if (!hasStructure) return false;
+  const chatterPatterns = [
+    /i'm using the compose:/i,
+    /i'll use the compose:/i,
+    /using the .* skill/i,
+    /skill to create/i,
+    /skill to generate/i,
+  ];
+  return !chatterPatterns.some((p) => p.test(text));
 }
