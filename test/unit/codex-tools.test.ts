@@ -23,7 +23,7 @@ vi.mock("../../src/compose/runner.js", () => ({
 
 import { mimoCompose, mimoReview } from "../../src/codex/tools.js";
 import { MIMO_TOOL_NAMES } from "../../src/codex/mcp-server.js";
-import { readJob } from "../../src/core/job-store.js";
+import { readJob, updateJob } from "../../src/core/job-store.js";
 
 function buildComposeReport(overrides: Record<string, unknown> = {}) {
   return {
@@ -229,5 +229,27 @@ describe("codex tool handlers", () => {
     expect(mocks.runComposeWorkflow).toHaveBeenCalledWith(
       expect.objectContaining({ reportDir: customDir })
     );
+  });
+
+  it("waits briefly for a background compose job when wait=true", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-wait-"));
+    const result = await mimoCompose(
+      { cwd, workflow: "plan", task: "Plan", background: true, wait: true },
+      {
+        spawnJobWorker: (jobCwd, kind, jobId) => {
+          const job = readJob(jobCwd, jobId)!;
+          updateJob(jobCwd, job.id, {
+            status: "completed",
+            phase: "done",
+            completedAt: new Date().toISOString(),
+            summary: "plan completed",
+            reportPaths: { json: "run.json", markdown: "run.md", eventsJsonl: "run.jsonl" }
+          });
+          return 123;
+        }
+      }
+    );
+
+    expect(JSON.stringify(result)).toContain("plan completed");
   });
 });

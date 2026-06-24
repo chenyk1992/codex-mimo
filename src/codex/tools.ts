@@ -174,7 +174,7 @@ export async function mimoCompose(
   input: unknown,
   deps: { spawnJobWorker?: typeof spawnJobWorker } = {},
   options: { signal?: AbortSignal } = {}
-): Promise<CompactComposeReport | ReturnType<typeof renderJobLaunch>> {
+): Promise<CompactComposeReport | ReturnType<typeof renderJobLaunch> | ReturnType<typeof renderJobStatus>> {
   const parsed = ComposeInput.parse(input);
   if (parsed.background) {
     const store = createJobStore(parsed.cwd);
@@ -201,6 +201,12 @@ export async function mimoCompose(
       }
     });
     const queued = updateJob(parsed.cwd, job.id, { pid });
+    if (parsed.wait) {
+      const settled = await waitForJobToSettle(parsed.cwd, job.id);
+      return renderJobStatus(settled ?? queued, {
+        progress: readRecentJobLogLines((settled ?? queued).logFile, 5)
+      });
+    }
     return renderJobLaunch(queued);
   }
 
@@ -346,4 +352,17 @@ function diffAddedFiles(before: Set<string> | undefined, after: Set<string> | un
 
 function mergeChangedFiles(primary: string[], fallback: string[]): string[] {
   return [...new Set([...primary, ...fallback])];
+}
+
+const DEFAULT_BACKGROUND_WAIT_MS = 5_000;
+const BACKGROUND_WAIT_POLL_MS = 250;
+
+async function waitForJobToSettle(cwd: string, jobId: string, waitMs = DEFAULT_BACKGROUND_WAIT_MS) {
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    const job = readJob(cwd, jobId);
+    if (!job || !isActiveJobStatus(job.status)) return job;
+    await new Promise((resolve) => setTimeout(resolve, BACKGROUND_WAIT_POLL_MS));
+  }
+  return readJob(cwd, jobId);
 }
