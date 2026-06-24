@@ -9,6 +9,7 @@ import { runMimoCliStreaming, type StreamingRunResult } from "./streaming-runner
 import { appendRuntimeEvent, completeRuntimeJob, failRuntimeJob, startRuntimeJob } from "../core/job-runtime.js";
 import { readJob, updateJob } from "../core/job-store.js";
 import { isActiveJobStatus } from "../core/jobs.js";
+import { preparePromptTransport } from "../mimo/prompt-transport.js";
 
 interface ComposeWorkerRequest {
   cwd: string;
@@ -56,16 +57,17 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
     file: input.file,
     since: input.since
   });
+  const transportedPrompt = preparePromptTransport(prompt, { cwd: input.cwd });
   const mimoArgs = buildMimoRunArgs({
     cwd: input.cwd,
     agent: "compose",
     model: input.model,
-    message: prompt,
+    message: transportedPrompt.message,
     title: `codex-mimo compose ${workflow.name}`,
     session: input.session,
     fork: input.fork,
     attach: input.attach,
-    files: input.file ? [input.file] : [],
+    files: [...transportedPrompt.files, ...(input.file ? [input.file] : [])],
     continue: input.continue
   });
   const now = deps.now ?? (() => new Date());

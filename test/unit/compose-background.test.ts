@@ -105,4 +105,30 @@ describe("compose job worker", () => {
     expect(updated.reportPaths?.json).toContain(".json");
     expect(fs.existsSync(updated.reportPaths!.json!)).toBe(true);
   });
+
+  it("uses prompt transport for Chinese prompts", async () => {
+    const cwd = tempWorkspace();
+    const chineseTask = "实现登录节流功能，确保安全性";
+    const job = createJobStore(cwd).create({
+      kind: "compose",
+      workflow: "dev",
+      task: chineseTask,
+      request: { cwd, workflow: "dev", task: chineseTask }
+    });
+
+    let capturedArgs: string[] = [];
+    await runComposeJobWorker(cwd, job.id, {
+      runMimoStreaming: async (_cwd, args, _options) => {
+        capturedArgs = args;
+        return { stdout: "{\"type\":\"message\",\"text\":\"done\"}\n", stderr: "", exitCode: 0, pid: 555 };
+      },
+      captureDiff: async () => ({ changedFiles: [], diffStat: "", diff: "" }),
+      captureStatus: async () => ({ short: "", dirty: false }),
+      runVerification: async () => [],
+      now: () => new Date("2026-06-23T00:00:00.000Z")
+    });
+
+    expect(capturedArgs.some((a) => a.includes("Objective is stored in UTF-8 prompt file"))).toBe(true);
+    expect(capturedArgs.some((a) => a.includes("prompt.md"))).toBe(true);
+  });
 });
