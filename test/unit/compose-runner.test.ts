@@ -398,6 +398,43 @@ describe("compose runner", () => {
     expect(result.error).toContain("Read-only workflow plan modified files: package.json, smoke.test.js");
   });
 
+  it("includes newly created untracked files in changedFiles for write-allowed workflows", async () => {
+    let statusCalls = 0;
+    const result = await runComposeWorkflow(
+      {
+        cwd: "E:/project/app",
+        workflow: "dev",
+        task: "Create new module",
+        reportDir: "E:/project/app/.codex-mimo/reports"
+      },
+      {
+        runMimo: async () => ({
+          stdout: '{"type":"message","text":"Created new module"}\n',
+          stderr: "",
+          exitCode: 0
+        }),
+        captureDiff: async () => ({
+          changedFiles: [],
+          diffStat: "",
+          diff: ""
+        }),
+        captureStatus: async () => {
+          statusCalls += 1;
+          return statusCalls === 1
+            ? { short: "", dirty: false }
+            : { short: "?? src/new-module.ts\n?? tests/new-module.test.ts", dirty: true };
+        },
+        runVerification: async () => [],
+        writeReport: () => undefined,
+        now: () => new Date("2026-06-25T10:00:00.000Z")
+      }
+    );
+
+    expect(result.changedFiles).toContain("src/new-module.ts");
+    expect(result.changedFiles).toContain("tests/new-module.test.ts");
+    expect(result.status).toBe("needs_review");
+  });
+
   it("does not report pre-existing dirty files as read-only workflow changes", async () => {
     const result = await runComposeWorkflow(
       {

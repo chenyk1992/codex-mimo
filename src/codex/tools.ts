@@ -65,18 +65,49 @@ export async function mimoImplement(input: unknown) {
   if (!parsed.allowWrite) {
     throw new Error("mimo_implement requires allowWrite=true.");
   }
-  const before = await captureWorktreeFiles(parsed.cwd);
-  const result = await runAndCapture({
-    cwd: parsed.cwd,
-    agent: "build",
-    message: implementPrompt(parsed.task),
-    timeoutMs: parsed.timeoutMs
+  const store = createJobStore(parsed.cwd);
+  const job = store.create({
+    kind: "implement",
+    task: parsed.task,
+    request: parsed
   });
+  updateJob(parsed.cwd, job.id, { status: "running", phase: "starting", startedAt: new Date().toISOString() });
+
+  const before = await captureWorktreeFiles(parsed.cwd);
+  let result: Awaited<ReturnType<typeof runAndCapture>>;
+  try {
+    result = await runAndCapture({
+      cwd: parsed.cwd,
+      agent: "build",
+      message: implementPrompt(parsed.task),
+      timeoutMs: parsed.timeoutMs
+    });
+  } catch (error) {
+    updateJob(parsed.cwd, job.id, {
+      status: "failed",
+      phase: "failed",
+      completedAt: new Date().toISOString(),
+      error: error instanceof Error ? error.message : String(error)
+    });
+    throw error;
+  }
+
   const after = await captureWorktreeFiles(parsed.cwd);
+  const changedFiles = mergeChangedFiles(result.changedFiles, diffAddedFiles(before, after));
+
+  updateJob(parsed.cwd, job.id, {
+    status: "completed",
+    phase: "done",
+    completedAt: new Date().toISOString(),
+    summary: result.summary,
+    sessionId: result.sessionId,
+    changedFiles
+  });
+
   return {
     summary: result.summary,
     sessionId: result.sessionId,
-    changedFiles: mergeChangedFiles(result.changedFiles, diffAddedFiles(before, after)),
+    changedFiles,
     commands: result.commands,
     risks: result.errors
   };
@@ -112,6 +143,10 @@ export async function mimoReview(input: unknown) {
   if (result.summary === "Completed." && result.raw.length === 0) {
     throw new Error("MiMoCode review produced no review output.");
   }
+
+  if (isGreetingResponse(result.summary)) {
+    throw new Error("MiMoCode review returned a greeting instead of review content. Agent may not have initialized properly.");
+  }
   
   // Return findings based on review content
   const findings = result.summary && result.summary !== "Completed."
@@ -123,6 +158,26 @@ export async function mimoReview(input: unknown) {
     sessionId: result.sessionId,
     findings
   };
+}
+
+function isGreetingResponse(summary: string | undefined): boolean {
+  if (!summary) return false;
+  const text = summary.toLowerCase().trim();
+  if (text.length > 300) return false;
+  const patterns = [
+    /您好/,
+    /消息.*空/,
+    /有什么.*帮/,
+    /^hello[!\s.]/i,
+    /^hi[!\s.]/i,
+    /^hey[!\s.]/i,
+    /how can i help/i,
+    /how may i help/i,
+    /what can i help/i,
+    /what would you like/i,
+    /how can i assist/i,
+  ];
+  return patterns.some((p) => p.test(text));
 }
 
 function writeReviewDiffInput(cwd: string, base: string, diff: string): string {
@@ -214,7 +269,38 @@ export async function mimoCompose(
     return renderJobLaunch(queued);
   }
 
-  const report = await runComposeWorkflow({ ...parsed, signal: options.signal });
+  const store = createJobStore(parsed.cwd);
+  const job = store.create({
+    kind: "compose",
+    workflow: parsed.workflow,
+    task: parsed.task ?? `Run ${parsed.workflow} workflow.`,
+    request: parsed
+  });
+  updateJob(parsed.cwd, job.id, { status: "running", phase: "starting", startedAt: new Date().toISOString() });
+
+  let report;
+  try {
+    report = await runComposeWorkflow({ ...parsed, signal: options.signal });
+  } catch (error) {
+    updateJob(parsed.cwd, job.id, {
+      status: "failed",
+      phase: "failed",
+      completedAt: new Date().toISOString(),
+      error: error instanceof Error ? error.message : String(error)
+    });
+    throw error;
+  }
+
+  updateJob(parsed.cwd, job.id, {
+    status: report.status === "failed" ? "failed" : "completed",
+    phase: report.status === "failed" ? "failed" : "done",
+    completedAt: new Date().toISOString(),
+    summary: report.error ?? `Compose ${parsed.workflow} ${report.status}.`,
+    sessionId: report.sessionId,
+    changedFiles: report.changedFiles,
+    reportPaths: report.reportPaths
+  });
+
   return compactComposeReportForCodex(report);
 }
 

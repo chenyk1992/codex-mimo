@@ -201,7 +201,14 @@ export async function runComposeWorkflow(
     return report;
   }
 
-  const reportDiff = workflow.writesAllowed ? diff : buildReadOnlyReportDiff(diff, readOnlyViolationFiles);
+  let reportDiff = workflow.writesAllowed ? diff : buildReadOnlyReportDiff(diff, readOnlyViolationFiles);
+  if (workflow.writesAllowed && gitStatusBefore && gitStatusAfter) {
+    const statusNewFiles = detectNewFilesFromStatus(gitStatusBefore, gitStatusAfter);
+    if (statusNewFiles.length > 0) {
+      const merged = [...new Set([...reportDiff.changedFiles, ...statusNewFiles])];
+      reportDiff = { ...reportDiff, changedFiles: merged };
+    }
+  }
   const verificationCommands = normalizeVerificationCommands(input.verification, workflow.defaultVerification, input.cwd);
   let verification: VerificationResult[] = [];
   try {
@@ -388,6 +395,12 @@ function buildReadOnlyReportDiff(diff: GitDiffSnapshot, readOnlyViolationFiles: 
     ...diff,
     changedFiles: readOnlyViolationFiles
   };
+}
+
+function detectNewFilesFromStatus(before: GitStatusSnapshot, after: GitStatusSnapshot): string[] {
+  const beforeFiles = parseGitStatusFiles(before.short);
+  const afterFiles = parseGitStatusFiles(after.short);
+  return [...afterFiles].filter((file) => !beforeFiles.has(file));
 }
 
 function parseGitStatusFiles(status: string): Set<string> {

@@ -21,7 +21,7 @@ vi.mock("../../src/compose/runner.js", () => ({
   runComposeWorkflow: mocks.runComposeWorkflow
 }));
 
-import { mimoCompose, mimoReview } from "../../src/codex/tools.js";
+import { mimoCompose, mimoReview, mimoStatus, mimoResult } from "../../src/codex/tools.js";
 import { MIMO_TOOL_NAMES } from "../../src/codex/mcp-server.js";
 import { readJob, updateJob } from "../../src/core/job-store.js";
 
@@ -229,6 +229,20 @@ describe("codex tool handlers", () => {
     expect(mocks.runComposeWorkflow).toHaveBeenCalledWith(
       expect.objectContaining({ reportDir: customDir })
     );
+  });
+
+  it("creates a job record for foreground compose discoverable by mimo_status", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-fg-"));
+    mocks.runComposeWorkflow.mockResolvedValue(buildComposeReport({
+      sessionId: "ses_fg_compose",
+      status: "passed"
+    }));
+    await mimoCompose({ cwd, workflow: "dev", task: "Implement feature" });
+
+    const status = await mimoStatus({ cwd });
+    expect(status.jobId).toMatch(/^compose-/);
+    expect(status.status).toBe("completed");
+    expect(status.sessionId).toBe("ses_fg_compose");
   });
 
   it("waits briefly for a background compose job when wait=true", async () => {

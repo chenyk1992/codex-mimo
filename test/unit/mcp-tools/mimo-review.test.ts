@@ -102,4 +102,34 @@ describe("mimo_review", () => {
     expect(call.files).toBeUndefined();
     expect(call.message).toContain("No changes found.");
   });
+
+  it("throws when agent returns a greeting instead of review content", async () => {
+    const cwd = tempWorkspace();
+    mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "diff --git a/a b/a\n+const x = 1;\n", stderr: "" });
+    mocks.runAndCapture.mockResolvedValue({
+      sessionId: "ses_greeting",
+      summary: "您好！您的消息似乎是空的。请问有什么我可以帮您的吗？",
+      changedFiles: [],
+      commands: [],
+      errors: [],
+      exitCode: 0,
+      raw: [{ type: "text" }]
+    });
+    await expect(mimoReview({ cwd, base: "HEAD" })).rejects.toThrow("greeting");
+  });
+
+  it("throws when agent returns an English greeting instead of review content", async () => {
+    const cwd = tempWorkspace();
+    mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "diff --git a/a b/a\n+const x = 1;\n", stderr: "" });
+    mocks.runAndCapture.mockResolvedValue({
+      sessionId: "ses_greeting_en",
+      summary: "Hello! How can I help you today?",
+      changedFiles: [],
+      commands: [],
+      errors: [],
+      exitCode: 0,
+      raw: [{ type: "text" }]
+    });
+    await expect(mimoReview({ cwd, base: "HEAD" })).rejects.toThrow("greeting");
+  });
 });

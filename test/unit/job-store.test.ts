@@ -179,7 +179,7 @@ describe("failStaleJobs", () => {
     const store = createJobStore(cwd);
     const job = store.create({ kind: "compose", workflow: "dev", task: "Stuck task", request: {} });
 
-    const failed = failStaleJobs(cwd, { staleThresholdMs: 0 });
+    const failed = failStaleJobs(cwd, { staleThresholdMs: -1 });
     expect(failed).toHaveLength(1);
     expect(failed[0].id).toBe(job.id);
 

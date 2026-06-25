@@ -13,7 +13,7 @@ vi.mock("../../../src/mimo/mimo-runner.js", () => ({
   runAndCapture: mocks.runAndCapture
 }));
 
-import { mimoImplement } from "../../../src/codex/tools.js";
+import { mimoImplement, mimoStatus, mimoResult } from "../../../src/codex/tools.js";
 
 const tempDirs: string[] = [];
 function tempWorkspace(): string {
@@ -80,5 +80,45 @@ describe("mimo_implement", () => {
     });
     const result = await mimoImplement({ cwd, task: "Review only", allowWrite: true });
     expect(result.changedFiles).toEqual([]);
+  });
+
+  it("creates a job record discoverable by mimo_status", async () => {
+    const cwd = tempWorkspace();
+    mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    mocks.runAndCapture.mockResolvedValue({
+      sessionId: "ses_impl_job",
+      summary: "Done.",
+      changedFiles: ["src/a.ts"],
+      commands: [],
+      errors: [],
+      exitCode: 0,
+      raw: []
+    });
+    await mimoImplement({ cwd, task: "Add feature", allowWrite: true });
+
+    const status = await mimoStatus({ cwd });
+    expect(status.jobId).toMatch(/^implement-/);
+    expect(status.status).toBe("completed");
+    expect(status.sessionId).toBe("ses_impl_job");
+  });
+
+  it("creates a job record discoverable by mimo_result", async () => {
+    const cwd = tempWorkspace();
+    mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    mocks.runAndCapture.mockResolvedValue({
+      sessionId: "ses_impl_res",
+      summary: "Feature added.",
+      changedFiles: ["src/b.ts"],
+      commands: [{ command: "npm test", exitCode: 0 }],
+      errors: [],
+      exitCode: 0,
+      raw: []
+    });
+    await mimoImplement({ cwd, task: "Add feature", allowWrite: true });
+
+    const result = await mimoResult({ cwd });
+    expect(result.jobId).toMatch(/^implement-/);
+    expect(result.status).toBe("completed");
+    expect(result.summary).toBe("Feature added.");
   });
 });
