@@ -202,7 +202,7 @@ export async function runComposeWorkflow(
   }
 
   const reportDiff = workflow.writesAllowed ? diff : buildReadOnlyReportDiff(diff, readOnlyViolationFiles);
-  const verificationCommands = normalizeVerificationCommands(input.verification, workflow.defaultVerification);
+  const verificationCommands = normalizeVerificationCommands(input.verification, workflow.defaultVerification, input.cwd);
   let verification: VerificationResult[] = [];
   try {
     verification = await runVerification(input.cwd, verificationCommands);

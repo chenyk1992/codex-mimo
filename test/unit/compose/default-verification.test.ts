@@ -35,9 +35,9 @@ const baseDeps = (overrides?: {
 });
 
 describe("default verification", () => {
-  it("dev workflow → default verification is ['npm test']", () => {
+  it("dev workflow → default verification is empty (auto-detected from project type)", () => {
     const workflow = getComposeWorkflow("dev");
-    expect(workflow.defaultVerification).toEqual(["npm test"]);
+    expect(workflow.defaultVerification).toEqual([]);
   });
 
   it("brainstorm → no default verification", () => {

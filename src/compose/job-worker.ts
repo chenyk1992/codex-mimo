@@ -104,7 +104,7 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
   try {
     diff = await captureDiff(input.cwd, input.since ?? "HEAD");
     gitStatusAfter = await captureStatus(input.cwd);
-    verification = await runVerification(input.cwd, normalizeVerificationCommands(input.verification, workflow.defaultVerification));
+    verification = await runVerification(input.cwd, normalizeVerificationCommands(input.verification, workflow.defaultVerification, input.cwd));
   } catch (error) {
     const report = buildComposeReportFromRun({
       id: job.id,

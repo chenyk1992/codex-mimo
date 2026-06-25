@@ -33,7 +33,7 @@ const workflows: Record<ComposeWorkflowName, ComposeWorkflow> = {
     name: "dev",
     description: "Feature development loop",
     skillChain: ["compose:brainstorm", "compose:plan", "compose:tdd", "compose:verify", "compose:review"],
-    defaultVerification: ["npm test"],
+    defaultVerification: [],
     writesAllowed: true,
     requiresTask: true,
     requiresFile: false
@@ -42,7 +42,7 @@ const workflows: Record<ComposeWorkflowName, ComposeWorkflow> = {
     name: "fix",
     description: "Bug fixing loop",
     skillChain: ["compose:debug", "compose:tdd", "compose:verify", "compose:feedback"],
-    defaultVerification: ["npm test"],
+    defaultVerification: [],
     writesAllowed: true,
     requiresTask: true,
     requiresFile: false
@@ -51,7 +51,7 @@ const workflows: Record<ComposeWorkflowName, ComposeWorkflow> = {
     name: "fix-ci",
     description: "CI failure repair loop",
     skillChain: ["compose:debug", "compose:tdd", "compose:verify", "compose:review"],
-    defaultVerification: ["npm test"],
+    defaultVerification: [],
     writesAllowed: true,
     requiresTask: false,
     requiresFile: true
@@ -69,7 +69,7 @@ const workflows: Record<ComposeWorkflowName, ComposeWorkflow> = {
     name: "execute-plan",
     description: "Execute an approved implementation plan",
     skillChain: ["compose:execute", "compose:tdd", "compose:verify", "compose:review"],
-    defaultVerification: ["npm test"],
+    defaultVerification: [],
     writesAllowed: true,
     requiresTask: false,
     requiresFile: true
@@ -87,7 +87,7 @@ const workflows: Record<ComposeWorkflowName, ComposeWorkflow> = {
     name: "parallel",
     description: "Parallel exploration loop",
     skillChain: ["compose:parallel", "compose:subagent", "compose:verify"],
-    defaultVerification: ["npm test"],
+    defaultVerification: [],
     writesAllowed: true,
     requiresTask: true,
     requiresFile: false

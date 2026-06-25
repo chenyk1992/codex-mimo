@@ -29,11 +29,11 @@ Do NOT use MiMoCode when:
 - The task requires interactive back-and-forth with the user
 - Codex must inspect a small, specific file directly to answer a question
 
-## Available Tools
+## Available Tools (12)
 
 ### `mimo_healthcheck`
 
-Check if MiMoCode is installed and configured before first use.
+Check MiMoCode installation and auth state.
 
 ```
 Input: { "cwd": "<project-root>" }
@@ -42,20 +42,32 @@ Output: { "ok": true, "version": "...", "cwd": "..." }
 
 ### `mimo_plan`
 
-Create an implementation plan. MiMoCode will inspect the codebase and produce a plan without editing files.
+Create an implementation plan using MiMoCode planning agent.
 
 ```
-Input: { "cwd": "<project-root>", "task": "<task description>" }
-Output: { "summary": "...", "changedFiles": [], "verification": [] }
+Input: {
+  "cwd": "<project-root>",
+  "task": "<task description>",
+  "agent": "plan",
+  "model": "<optional model override>",
+  "timeoutMs": 1800000
+}
+Output: { "summary": "...", "sessionId": "...", "changedFiles": [], "verification": [] }
 ```
 
 ### `mimo_implement`
 
-Delegate implementation. MiMoCode will make surgical code changes.
+Implement code changes using MiMoCode implementation agent.
 
 ```
-Input: { "cwd": "<project-root>", "task": "<task description>", "allowWrite": true }
-Output: { "summary": "...", "changedFiles": [...], "verification": [] }
+Input: {
+  "cwd": "<project-root>",
+  "task": "<task description>",
+  "allowWrite": true,
+  "allowInstall": false,
+  "timeoutMs": 1800000
+}
+Output: { "summary": "...", "sessionId": "...", "changedFiles": [...], "commands": [] }
 ```
 
 **Important:** Always set `allowWrite: true` when you want MiMoCode to actually modify files.
@@ -67,20 +79,29 @@ After `mimo_implement`, you MUST:
 
 ### `mimo_review`
 
-Review the current diff. MiMoCode will analyze changes for bugs, regressions, and missing tests.
+Review the current diff using MiMoCode review agent.
 
 ```
-Input: { "cwd": "<project-root>", "base": "HEAD" }
-Output: { "findings": [...], "summary": "..." }
+Input: {
+  "cwd": "<project-root>",
+  "base": "HEAD",
+  "timeoutMs": 1800000
+}
+Output: { "summary": "...", "sessionId": "...", "findings": [...] }
 ```
 
 ### `mimo_fix_ci`
 
-Fix CI failures by providing a log file.
+Fix CI failures using MiMoCode with a CI log file.
 
 ```
-Input: { "cwd": "<project-root>", "file": "./ci.log", "task": "optional context" }
-Output: { "summary": "...", "changedFiles": [...], "verification": [] }
+Input: {
+  "cwd": "<project-root>",
+  "file": "./ci.log",
+  "task": "<optional context>",
+  "timeoutMs": 1800000
+}
+Output: { "summary": "...", "sessionId": "...", "changedFiles": [...], "commands": [] }
 ```
 
 ### `mimo_resume`
@@ -88,26 +109,94 @@ Output: { "summary": "...", "changedFiles": [...], "verification": [] }
 Resume a previous MiMoCode session to continue work.
 
 ```
-Input: { "cwd": "<project-root>", "session": "<session-id>", "task": "continue the task" }
-Output: { "summary": "...", "changedFiles": [...], "verification": [] }
+Input: {
+  "cwd": "<project-root>",
+  "session": "<session-id>",
+  "task": "continue the task",
+  "timeoutMs": 1800000
+}
+Output: { "summary": "...", "sessionId": "...", "changedFiles": [...], "commands": [] }
+```
+
+### `mimo_status`
+
+Show active or recent MiMoCode job status.
+
+```
+Input: { "cwd": "<project-root>", "jobId": "<optional-job-id>" }
+Output: { "jobId": "...", "status": "running|completed|failed|cancelled", "phase": "...", "elapsed": "..." }
+```
+
+### `mimo_result`
+
+Return the compact final result for a finished MiMoCode job.
+
+```
+Input: { "cwd": "<project-root>", "jobId": "<optional-job-id>" }
+Output: { "status": "...", "changedFiles": [...], "reportPaths": {...}, "directResumeHint": "..." }
+```
+
+### `mimo_cancel`
+
+Cancel a running background job.
+
+```
+Input: { "cwd": "<project-root>", "jobId": "<job-id>" }
+Output: { "cancelled": true }
+```
+
+### `mimo_jobs`
+
+List recent jobs for a workspace.
+
+```
+Input: { "cwd": "<project-root>", "all": false }
+Output: { "jobs": [{ "jobId": "...", "status": "...", "workflow": "..." }] }
+```
+
+### `mimo_resume_job`
+
+Create a child job from a parent job's session.
+
+```
+Input: {
+  "cwd": "<project-root>",
+  "jobId": "<parent-job-id>",
+  "task": "<continuation task>",
+  "background": false
+}
+Output: { "jobId": "<new-job-id>" }
 ```
 
 ### `mimo_compose`
 
-Run a Compose workflow for structured development tasks. Best for multi-step workflows that benefit from skill chaining.
+Run a MiMoCode Compose workflow and return a structured report.
 
 ```
-Input: { 
+Input: {
   "cwd": "<project-root>",
   "workflow": "brainstorm|dev|fix|fix-ci|plan|execute-plan|review|parallel|worktree|merge|new-skill",
   "task": "<task description>",
   "file": "<optional attached file>",
+  "since": "<optional git ref>",
+  "model": "<optional model override>",
+  "attach": "<optional MiMoCode server URL>",
+  "session": "<optional session ID>",
+  "fork": false,
+  "continue": false,
   "verification": ["<optional verification commands>"],
   "dryRun": false,
-  "timeoutMs": 110000
+  "reportDir": "<optional report directory>",
+  "timeoutMs": 1800000,
+  "background": false,
+  "wait": false
 }
-Output: { "status": "passed|failed|needs_review", "changedFiles": [...], "reportPaths": {...} }
+Output: { "status": "passed|failed|needs_review|timeout", "changedFiles": [...], "reportPaths": {...} }
 ```
+
+**Background jobs:** Set `background: true` for long-running tasks. Returns `jobId` immediately. Use `mimo_status`, `mimo_result`, `mimo_cancel` to manage.
+
+**Verification:** Commands are auto-detected from project type (`python -m pytest` for Python, `cargo test` for Rust, `go test ./...` for Go, `npm test` for Node). Override with `verification` array.
 
 The MCP response is intentionally compact. Full JSON events, Markdown report, and event logs are persisted under `.codex-mimo/` and linked from `reportPaths`.
 
@@ -171,6 +260,8 @@ Use this loop for software projects where Codex owns the overall plan and MiMoCo
 - Prefer explicit verification commands in `mimo_compose.verification` so the returned evidence is short and decisive.
 - For long or tool-time-limited runs, set `mimo_compose.timeoutMs` lower than the caller timeout so `codex-mimo` can stop MiMoCode and write a failure report instead of leaving a stray child process.
 - If `status` is `needs_review`, Codex must inspect the report and relevant diff before accepting the work.
+- For tasks > 5 minutes, use `background: true` and poll with `mimo_status` / `mimo_result`.
+- Default `timeoutMs` is 30 minutes (1,800,000ms). Increase for very large tasks.
 
 ## Recommended Workflow
 
