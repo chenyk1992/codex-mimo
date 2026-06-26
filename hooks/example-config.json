@@ -1,0 +1,12 @@
+{
+  "httpCallback": {
+    "endpoint": "http://localhost:3000/api/mimo-callback",
+    "headers": {
+      "Authorization": "Bearer your-token-here",
+      "X-Custom-Header": "custom-value"
+    },
+    "events": ["session.post", "actor.postStop"],
+    "timeout": 5000,
+    "retryCount": 3
+  }
+}
