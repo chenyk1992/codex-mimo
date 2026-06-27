@@ -77,6 +77,15 @@ describe("spawnJobWorker", () => {
     expect(pid).toBe(42);
   });
 
+  it("spawns the Node worker directly without a shell", () => {
+    const child = fakeChild(42);
+    const spawnProcess = vi.fn(() => child);
+    spawnJobWorker("E:/project", "compose", "job-1", { spawnProcess });
+
+    expect(spawnProcess).toHaveBeenCalled();
+    expect(spawnProcess.mock.calls[0][2]).toMatchObject({ shell: false });
+  });
+
   it("forwards child error events to onError callback", () => {
     const child = fakeChild(50);
     const onError = vi.fn();

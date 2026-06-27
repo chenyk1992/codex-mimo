@@ -52,7 +52,7 @@ export function spawnJobWorker(
     detached: process.platform !== "win32",
     stdio: "ignore",
     windowsHide: true,
-    shell: process.platform === "win32"
+    shell: false
   });
   child.unref();
   if (options.onError) {

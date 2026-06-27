@@ -83,6 +83,38 @@ describe("job runtime lifecycle", () => {
     });
   });
 
+  it("clears stale failure metadata when a job is restarted and completed", () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "compose",
+      task: "retry",
+      request: {}
+    });
+
+    updateJob(cwd, job.id, {
+      status: "failed",
+      phase: "failed",
+      errorCode: "worker_exit",
+      error: "Worker exited before starting."
+    });
+
+    startRuntimeJob(cwd, job.id);
+    completeRuntimeJob(cwd, job.id, {
+      summary: "done after retry",
+      changedFiles: ["agent-output.txt"],
+      verification: []
+    });
+
+    const completed = readJob(cwd, job.id);
+    expect(completed).toMatchObject({
+      status: "completed",
+      phase: "done",
+      summary: "done after retry"
+    });
+    expect(completed).not.toHaveProperty("errorCode");
+    expect(completed).not.toHaveProperty("error");
+  });
+
   it("does not overwrite a job that was cancelled while the worker was still exiting", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd);

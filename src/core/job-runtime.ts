@@ -11,7 +11,12 @@ export function startRuntimeJob(cwd: string, jobId: string, patch: { pid?: numbe
     phase: "starting",
     startedAt: new Date().toISOString(),
     pid: patch.pid ?? null,
-    summary: "Starting MiMoCode job."
+    summary: "Starting MiMoCode job.",
+    completedAt: undefined,
+    errorCode: undefined,
+    error: undefined,
+    callback: undefined,
+    reportPaths: undefined
   });
 }
 
@@ -63,7 +68,9 @@ export function completeRuntimeJob(
     changedFiles: result.changedFiles,
     verification: result.verification,
     callback: result.callback,
-    reportPaths: result.reportPaths
+    reportPaths: result.reportPaths,
+    errorCode: undefined,
+    error: undefined
   });
 }
 
