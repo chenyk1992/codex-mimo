@@ -21,6 +21,12 @@ export interface CompactComposeReport {
   planText?: string;
   error?: string;
   sessionId?: string | null;
+  callback?: {
+    outcome: "completed" | "error" | "cancelled" | "missing" | "unknown";
+    sessionId?: string | null;
+    receivedAt?: string;
+    error?: string;
+  };
   resumeHint?: {
     tool: "mimo_resume";
     session: string;
@@ -55,7 +61,21 @@ export function compactComposeReportForCodex(report: ComposeReport): CompactComp
     planText: report.planText,
     error: report.error,
     sessionId: report.sessionId ?? null,
+    ...(compactCallback(report) ? { callback: compactCallback(report) } : {}),
     ...(report.sessionId ? { resumeHint: { tool: "mimo_resume" as const, session: report.sessionId } } : {}),
     reportPaths: report.reportPaths
   };
+}
+
+function compactCallback(report: ComposeReport): CompactComposeReport["callback"] | undefined {
+  if (report.callback) {
+    return {
+      outcome: report.callback.outcome ?? "unknown",
+      sessionId: report.callback.sessionId ?? null,
+      receivedAt: report.callback.receivedAt,
+      ...(report.callback.error ? { error: report.callback.error } : {})
+    };
+  }
+  if (report.callbackTimedOut) return { outcome: "missing" };
+  return undefined;
 }

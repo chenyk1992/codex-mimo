@@ -117,4 +117,64 @@ describe("compose report", () => {
     expect(markdown).toContain("## Error");
     expect(markdown).toContain("MiMoCode startup failed: mimo not found");
   });
+
+  it("renders callback summary when callback is present", () => {
+    const markdown = renderMarkdownReport({
+      id: "run_5",
+      createdAt: "2026-06-21T18:40:00.000Z",
+      workflow: "dev",
+      cwd: "E:/project/app",
+      task: "Test task",
+      mimoArgs: ["run", "--agent", "compose"],
+      requestedSkills: ["compose:tdd"],
+      status: "passed",
+      events: [],
+      changedFiles: [],
+      diffStat: "",
+      verification: [],
+      callback: {
+        invocationId: "compose-dev-1",
+        event: "session.post",
+        outcome: "completed",
+        sessionId: "ses_callback",
+        receivedAt: "2026-06-21T18:41:00.000Z"
+      },
+      reportPaths: {
+        json: "report.json",
+        markdown: "report.md",
+        eventsJsonl: "events.jsonl"
+      }
+    });
+
+    expect(markdown).toContain("## Completion Callback");
+    expect(markdown).toContain("Outcome: `completed`");
+    expect(markdown).toContain("Session ID: `ses_callback`");
+    expect(markdown).toContain("Received At: `2026-06-21T18:41:00.000Z`");
+  });
+
+  it("renders missing callback note when callback timed out", () => {
+    const markdown = renderMarkdownReport({
+      id: "run_6",
+      createdAt: "2026-06-21T18:40:00.000Z",
+      workflow: "dev",
+      cwd: "E:/project/app",
+      task: "Test task",
+      mimoArgs: ["run", "--agent", "compose"],
+      requestedSkills: ["compose:tdd"],
+      status: "failed",
+      events: [],
+      changedFiles: [],
+      diffStat: "",
+      verification: [],
+      callbackTimedOut: true,
+      reportPaths: {
+        json: "report.json",
+        markdown: "report.md",
+        eventsJsonl: "events.jsonl"
+      }
+    });
+
+    expect(markdown).toContain("## Completion Callback");
+    expect(markdown).toContain("No session.post callback was received");
+  });
 });

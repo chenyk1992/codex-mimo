@@ -219,6 +219,9 @@ describe("codex tool handlers", () => {
     const result = await mimoCompose({ cwd, workflow: "dev", task: "Long task" });
     expect(result.status).toBe("timeout");
     expect(result.error).toContain("timed out");
+    const status = await mimoStatus({ cwd });
+    expect(status.status).toBe("failed");
+    expect(status.phase).toBe("failed");
   });
 
   it("passes custom reportDir to compose runner", async () => {

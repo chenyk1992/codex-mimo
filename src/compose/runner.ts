@@ -1,14 +1,26 @@
 import path from "node:path";
 import fs from "node:fs";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
-import { captureGitDiff, type GitDiffSnapshot } from "../git/diff.js";
-import { captureGitStatus, type GitStatusSnapshot } from "../git/status.js";
+import { captureGitDiff, type GitDiffSnapshot, captureGitStatus, type GitStatusSnapshot } from "../git/diff.js";
 import { extractSessionIdFromEvents, parseMimoJsonLines } from "./events.js";
 import { writeComposeReport, type ComposeReport } from "./report.js";
 import { runMimoCliStreaming } from "./streaming-runner.js";
 import { normalizeVerificationCommands, runVerificationCommands, type VerificationResult } from "./verify.js";
 import { buildComposePrompt, getComposeWorkflow, type ComposeWorkflowName } from "./workflow.js";
 import { preparePromptTransport } from "../mimo/prompt-transport.js";
+import {
+  createHookCallbackController,
+  type HookCallbackController,
+  type MimoHookCallbackSummary
+} from "../mimo/hook-callback.js";
+import {
+  detectSemanticFailure,
+  detectReadOnlyViolationFiles,
+  buildReadOnlyReportDiff,
+  detectNewFilesFromStatus
+} from "./post-checks.js";
+
+import type { TerminationReason } from "./streaming-runner.js";
 
 export interface ComposeRunInput {
   cwd: string;
@@ -28,19 +40,20 @@ export interface ComposeRunInput {
   signal?: AbortSignal;
 }
 
-interface MimoRunResult {
+interface ComposeProcessResult {
   stdout: string;
   stderr: string;
   exitCode: number;
-  terminationReason?: "process_timeout" | "host_abort" | "user_cancelled";
+  terminationReason?: TerminationReason;
 }
 
 interface ComposeRunnerDeps {
-  runMimo?: (cwd: string, args: string[], options?: { timeoutMs?: number; signal?: AbortSignal }) => Promise<MimoRunResult>;
+  runMimo?: (cwd: string, args: string[], options?: { timeoutMs?: number; signal?: AbortSignal; env?: NodeJS.ProcessEnv }) => Promise<ComposeProcessResult>;
   captureDiff?: (cwd: string, base?: string) => Promise<GitDiffSnapshot>;
   captureStatus?: (cwd: string) => Promise<GitStatusSnapshot>;
   runVerification?: (cwd: string, commands: string[]) => Promise<VerificationResult[]>;
   writeReport?: (report: ComposeReport) => void;
+  createHookCallbackController?: typeof createHookCallbackController;
   now?: () => Date;
 }
 
@@ -114,9 +127,19 @@ export async function runComposeWorkflow(
   const captureDiff = deps.captureDiff ?? captureGitDiff;
   const runVerification = deps.runVerification ?? runVerificationCommands;
 
-  let mimoResult: MimoRunResult;
+  let mimoResult: ComposeProcessResult;
+  let callback: MimoHookCallbackSummary | null = null;
+  let callbackTimedOut = false;
+  let hook: HookCallbackController | null = null;
   try {
-    mimoResult = await runMimo(input.cwd, mimoArgs, { timeoutMs, signal: input.signal });
+    hook = await createComposeHook(input.cwd, `compose-${workflow.name}`, deps);
+    try {
+      mimoResult = await runMimo(input.cwd, mimoArgs, { timeoutMs, signal: input.signal, env: hook.env });
+      callback = await hook.waitForCallback();
+      callbackTimedOut = callback === null;
+    } finally {
+      await hook.close();
+    }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const report = buildComposeReportFromRun({
@@ -133,11 +156,14 @@ export async function runComposeWorkflow(
       diffsDir,
       status: "failed",
       gitStatusBefore,
+      callback,
+      callbackTimedOut,
       error: `MiMoCode execution failed: ${errorMessage}`
     });
     writeReport(report);
     return report;
   }
+  const callbackError = callbackFailureMessage(callback, callbackTimedOut);
 
   let diff: GitDiffSnapshot;
   try {
@@ -159,7 +185,9 @@ export async function runComposeWorkflow(
       diffsDir,
       status: "failed",
       gitStatusBefore,
-      error: `Git diff capture failed: ${errorMessage}`
+      callback,
+      callbackTimedOut,
+      error: callbackError ?? `Git diff capture failed: ${errorMessage}`
     });
     writeReport(report);
     return report;
@@ -195,7 +223,9 @@ export async function runComposeWorkflow(
       status: "failed",
       gitStatusBefore,
       gitStatusAfter,
-      error: `Read-only workflow ${workflow.name} modified files: ${readOnlyViolationFiles.join(", ")}`
+      callback,
+      callbackTimedOut,
+      error: callbackError ?? `Read-only workflow ${workflow.name} modified files: ${readOnlyViolationFiles.join(", ")}`
     });
     writeReport(report);
     return report;
@@ -230,7 +260,9 @@ export async function runComposeWorkflow(
       status: "failed",
       gitStatusBefore,
       gitStatusAfter,
-      error: `Verification execution failed: ${errorMessage}`
+      callback,
+      callbackTimedOut,
+      error: callbackError ?? `Verification execution failed: ${errorMessage}`
     });
     writeReport(report);
     return report;
@@ -253,13 +285,15 @@ export async function runComposeWorkflow(
       status: "failed",
       gitStatusBefore,
       gitStatusAfter,
-      error: semanticFailure
+      callback,
+      callbackTimedOut,
+      error: callbackError ?? semanticFailure
     });
     writeReport(report);
     return report;
   }
 
-  const status = determineStatus(mimoResult.exitCode, reportDiff.changedFiles, verification);
+  const status = determineStatus(mimoResult.exitCode, reportDiff.changedFiles, verification, callback, callbackTimedOut);
   const report = buildComposeReportFromRun({
     id,
     createdAt,
@@ -276,7 +310,9 @@ export async function runComposeWorkflow(
     terminationReason: mimoResult.terminationReason,
     gitStatusBefore,
     gitStatusAfter,
-    error: status === "timeout" ? timeoutError(mimoResult.terminationReason) : undefined
+    callback,
+    callbackTimedOut,
+    error: status === "timeout" ? timeoutError(mimoResult.terminationReason) : callbackError
   });
 
   writeReport(report);
@@ -286,9 +322,18 @@ export async function runComposeWorkflow(
 async function defaultRunMimo(
   cwd: string,
   args: string[],
-  options: { timeoutMs?: number; signal?: AbortSignal } = {}
-): Promise<MimoRunResult> {
-  return runMimoCliStreaming(cwd, args, { timeoutMs: options.timeoutMs, signal: options.signal });
+  options: { timeoutMs?: number; signal?: AbortSignal; env?: NodeJS.ProcessEnv } = {}
+): Promise<ComposeProcessResult> {
+  return runMimoCliStreaming(cwd, args, { timeoutMs: options.timeoutMs, signal: options.signal, env: options.env });
+}
+
+async function createComposeHook(
+  cwd: string,
+  kind: string,
+  deps: ComposeRunnerDeps
+): Promise<HookCallbackController> {
+  const createHook = deps.createHookCallbackController ?? createHookCallbackController;
+  return createHook({ cwd, kind });
 }
 
 function validateComposeInput(input: ComposeRunInput, requiresTask: boolean, requiresFile: boolean): void {
@@ -303,115 +348,33 @@ function validateComposeInput(input: ComposeRunInput, requiresTask: boolean, req
 function determineStatus(
   mimoExitCode: number,
   changedFiles: string[],
-  verification: VerificationResult[]
+  verification: VerificationResult[],
+  callback?: MimoHookCallbackSummary | null,
+  callbackTimedOut = false
 ): "passed" | "failed" | "needs_review" | "timeout" {
   if (mimoExitCode === 124) return "timeout";
+  if (callbackTimedOut || callback?.outcome === "error" || callback?.outcome === "cancelled") return "failed";
   if (mimoExitCode !== 0) return "failed";
   if (verification.some((result) => !result.passed)) return "failed";
   if (verification.length === 0 && changedFiles.length > 0) return "needs_review";
   return "passed";
 }
 
-export function timeoutError(reason?: "process_timeout" | "host_abort" | "user_cancelled"): string {
+function callbackFailureMessage(callback: MimoHookCallbackSummary | null, callbackTimedOut: boolean): string | undefined {
+  if (callbackTimedOut) return "MiMoCode exited before codex-mimo received session.post.";
+  if (callback?.outcome === "error" || callback?.outcome === "cancelled") {
+    return callback.error ?? `MiMoCode completion callback reported ${callback.outcome}.`;
+  }
+  return undefined;
+}
+
+export function timeoutError(reason?: TerminationReason): string {
   if (reason === "host_abort") return "MiMoCode was interrupted by the host tool call before completion.";
   if (reason === "user_cancelled") return "MiMoCode was cancelled by the user.";
   return "MiMoCode exceeded the configured process timeout.";
 }
 
-function detectSemanticFailure(eventsStdout: string): string | undefined {
-  const events = parseMimoJsonLines(eventsStdout);
-  const messages = events.filter((event) => event.type === "message" && event.text);
 
-  // Only check first 3 messages - real failures appear early
-  const earlyMessages = messages.slice(0, 3);
-
-  for (const event of earlyMessages) {
-    const text = (event.text ?? "").toLowerCase().trim();
-
-    // Skip long messages (likely code analysis, not actual failure)
-    if (text.length > 500) continue;
-
-    // Skip messages containing code blocks (source code references)
-    if (text.includes("```")) continue;
-
-    // Skip messages that look like they're explaining code (contain function signatures)
-    if (/\bfunction\s+\w+\s*\(/.test(text) || /\bconst\s+\w+\s*=/.test(text)) continue;
-
-    // Match patterns - allow at start of sentence or after common delimiters
-    const failurePatterns = [
-      /what would you like me to help/i,
-      /what would you like to work on/i,
-      /what would you like to accomplish/i,
-      /what task or problem/i,
-      /what do you need/i,
-      /how can i help/i,
-      /what are you trying to accomplish/i,
-      /please share your task/i,
-      /objective is empty/i,
-      /task is empty/i,
-      /no objective provided/i,
-      /no task provided/i,
-      /haven't provided a task/i,
-      /haven't provided an actual task/i,
-      /message got cut off/i,
-      /what's the objective/i,
-      /what is the objective/i,
-    ];
-
-    const matchesFailure = failurePatterns.some((pattern) => pattern.test(text));
-
-    // Also check for standalone questions (short message ending with ?)
-    const isStandaloneQuestion = text.length < 150 && text.endsWith("?") &&
-      /^(what|how|please)\s/i.test(text);
-
-    if (matchesFailure || isStandaloneQuestion) {
-      return "MiMoCode did not receive or accept the task objective.";
-    }
-  }
-
-  return undefined;
-}
-
-function detectReadOnlyViolationFiles(
-  writesAllowed: boolean,
-  changedFiles: string[],
-  gitStatusBefore?: GitStatusSnapshot,
-  gitStatusAfter?: GitStatusSnapshot
-): string[] {
-  if (writesAllowed) return [];
-  if (!gitStatusBefore || !gitStatusAfter) return changedFiles;
-
-  const beforeFiles = parseGitStatusFiles(gitStatusBefore.short);
-  const afterFiles = parseGitStatusFiles(gitStatusAfter.short);
-  return [...afterFiles].filter((file) => !beforeFiles.has(file));
-}
-
-function buildReadOnlyReportDiff(diff: GitDiffSnapshot, readOnlyViolationFiles: string[]): GitDiffSnapshot {
-  if (readOnlyViolationFiles.length === 0) {
-    return { changedFiles: [], diffStat: "", diff: "" };
-  }
-
-  return {
-    ...diff,
-    changedFiles: readOnlyViolationFiles
-  };
-}
-
-function detectNewFilesFromStatus(before: GitStatusSnapshot, after: GitStatusSnapshot): string[] {
-  const beforeFiles = parseGitStatusFiles(before.short);
-  const afterFiles = parseGitStatusFiles(after.short);
-  return [...afterFiles].filter((file) => !beforeFiles.has(file));
-}
-
-function parseGitStatusFiles(status: string): Set<string> {
-  return new Set(
-    status
-      .split(/\r?\n/)
-      .filter((line) => line.trim())
-      .map((line) => (line.length > 3 ? line.slice(3).trim() : line.trim()))
-      .filter(Boolean)
-  );
-}
 
 export function buildComposeReportFromRun(input: {
   id: string;
@@ -426,13 +389,15 @@ export function buildComposeReportFromRun(input: {
   eventsDir: string;
   diffsDir: string;
   status: "passed" | "failed" | "needs_review" | "timeout";
-  terminationReason?: "process_timeout" | "host_abort" | "user_cancelled";
+  terminationReason?: TerminationReason;
+  callback?: MimoHookCallbackSummary | null;
+  callbackTimedOut?: boolean;
   gitStatusBefore?: GitStatusSnapshot;
   gitStatusAfter?: GitStatusSnapshot;
   error?: string;
 }): ComposeReport {
   const events = parseMimoJsonLines(input.eventsStdout);
-  const sessionId = extractSessionIdFromEvents(events);
+  const sessionId = input.callback?.sessionId ?? extractSessionIdFromEvents(events);
   const diffPath = input.diff.diff ? path.join(input.diffsDir, `${input.id}.diff`) : undefined;
 
   if (diffPath && input.diff.diff) {
@@ -455,6 +420,8 @@ export function buildComposeReportFromRun(input: {
     diffPath,
     terminationReason: input.terminationReason,
     sessionId,
+    callback: input.callback,
+    callbackTimedOut: input.callbackTimedOut,
     gitStatusBefore: input.gitStatusBefore,
     gitStatusAfter: input.gitStatusAfter,
     verification: input.verification,

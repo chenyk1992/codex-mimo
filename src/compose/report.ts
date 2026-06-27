@@ -3,7 +3,9 @@ import path from "node:path";
 import type { NormalizedMimoEvent } from "./events.js";
 import type { ComposeWorkflowName } from "./workflow.js";
 import type { VerificationResult } from "./verify.js";
-import type { GitStatusSnapshot } from "../git/status.js";
+import type { GitStatusSnapshot } from "../git/diff.js";
+import type { MimoHookCallbackSummary } from "../mimo/hook-callback.js";
+import type { TerminationReason } from "./streaming-runner.js";
 
 export interface ComposeReport {
   id: string;
@@ -18,8 +20,10 @@ export interface ComposeReport {
   changedFiles: string[];
   diffStat: string;
   diffPath?: string;
-  terminationReason?: "process_timeout" | "host_abort" | "user_cancelled";
+  terminationReason?: TerminationReason;
   sessionId?: string | null;
+  callback?: MimoHookCallbackSummary | null;
+  callbackTimedOut?: boolean;
   gitStatusBefore?: GitStatusSnapshot;
   gitStatusAfter?: GitStatusSnapshot;
   verification: VerificationResult[];
@@ -90,6 +94,28 @@ export function renderMarkdownReport(report: ComposeReport): string {
       "```",
       ""
     );
+  }
+
+  if (report.callback || report.callbackTimedOut) {
+    lines.push(
+      "## Completion Callback",
+      ""
+    );
+    if (report.callback) {
+      lines.push(
+        `Outcome: \`${report.callback.outcome ?? "unknown"}\``,
+        `Invocation ID: \`${report.callback.invocationId}\``,
+        ...(report.callback.sessionId ? [`Session ID: \`${report.callback.sessionId}\``] : []),
+        `Received At: \`${report.callback.receivedAt}\``,
+        ...(report.callback.error ? [`Error: \`${report.callback.error}\``] : []),
+        ""
+      );
+    } else {
+      lines.push(
+        "No session.post callback was received before the callback wait timed out.",
+        ""
+      );
+    }
   }
 
   lines.push(

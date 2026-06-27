@@ -71,6 +71,26 @@ describe("mimo_fix_ci", () => {
     expect(call.message).toContain("Fix the CI failures");
   });
 
+  it("throws when direct MiMo run returns a nonzero exit code", async () => {
+    const cwd = tempWorkspace();
+    const logFile = path.join(cwd, "ci.log");
+    fs.writeFileSync(logFile, "FAIL test_login");
+    mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    mocks.runAndCapture.mockResolvedValue({
+      sessionId: "ses_fix_failed",
+      summary: "Completed.",
+      changedFiles: [],
+      commands: [],
+      errors: ["MiMoCode hook callback timed out before session.post was received."],
+      exitCode: 1,
+      raw: [],
+      callbackTimedOut: true
+    });
+
+    await expect(mimoFixCi({ cwd, file: logFile }))
+      .rejects.toThrow("MiMoCode fix-ci failed: MiMoCode hook callback timed out before session.post was received.");
+  });
+
   it("uses custom task when provided", async () => {
     const cwd = tempWorkspace();
     const logFile = path.join(cwd, "ci.log");

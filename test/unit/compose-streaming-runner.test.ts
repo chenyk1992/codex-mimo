@@ -72,6 +72,23 @@ describe("streaming MiMo CLI runner", () => {
     expect(result.stderr).toBe("failed\n");
   });
 
+  it("passes custom environment to the spawned process", async () => {
+    let seenEnv: NodeJS.ProcessEnv | undefined;
+
+    const result = await runMimoCliStreaming("E:/project/app", ["run"], {
+      env: { CODEX_MIMO_INVOCATION_ID: "inv-stream" },
+      spawnProcess: (_cwd, _args, env) => {
+        seenEnv = env;
+        const child = makeChild(654);
+        queueMicrotask(() => child.emit("close", 0));
+        return child;
+      }
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(seenEnv).toEqual({ CODEX_MIMO_INVOCATION_ID: "inv-stream" });
+  });
+
   it("terminates the process tree on timeout", async () => {
     let killedPid: number | null | undefined;
     const result = await runMimoCliStreaming("E:/project/app", ["run"], {

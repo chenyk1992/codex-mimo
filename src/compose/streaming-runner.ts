@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import readline from "node:readline";
 import type { Readable } from "node:stream";
+import { resolveMimoCommand } from "../mimo/run-json.js";
 
 export type TerminationReason = "process_timeout" | "host_abort" | "user_cancelled";
 
@@ -20,22 +21,24 @@ interface StreamingChildProcess extends EventEmitter {
   kill: () => boolean;
 }
 
-interface StreamingRunOptions {
+export interface StreamingRunOptions {
   onStart?: (pid: number | null) => void;
   timeoutMs?: number;
   timeoutWarningMs?: number;
   signal?: AbortSignal;
+  env?: NodeJS.ProcessEnv;
   onLine?: (line: string) => void;
   onStderr?: (chunk: string) => void;
   onTimeoutWarning?: (pid: number | null) => void;
-  spawnProcess?: (cwd: string, args: string[]) => StreamingChildProcess;
+  spawnProcess?: (cwd: string, args: string[], env?: NodeJS.ProcessEnv) => StreamingChildProcess;
   terminateProcessTree?: (pid: number | null, child: StreamingChildProcess) => void;
 }
 
-function defaultSpawn(cwd: string, args: string[]): StreamingChildProcess {
-  return spawn("mimo", args, {
+function defaultSpawn(cwd: string, args: string[], env?: NodeJS.ProcessEnv): StreamingChildProcess {
+  return spawn(resolveMimoCommand(), args, {
     cwd,
     detached: process.platform !== "win32",
+    env: { ...process.env, ...env },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
     shell: process.platform === "win32"
@@ -108,7 +111,7 @@ export async function runMimoCliStreaming(
   args: string[],
   options: StreamingRunOptions = {}
 ): Promise<StreamingRunResult> {
-  const child = (options.spawnProcess ?? defaultSpawn)(cwd, args);
+  const child = (options.spawnProcess ?? defaultSpawn)(cwd, args, options.env);
   const stdoutParts: string[] = [];
   const stderrParts: string[] = [];
   let terminationReason: TerminationReason | undefined;

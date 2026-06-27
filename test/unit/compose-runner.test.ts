@@ -1,5 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildComposeReportFromRun, runComposeWorkflow } from "../../src/compose/runner.js";
+
+const completedHook = {
+  createHookCallbackController: async () => ({
+    invocationId: "compose-test-1",
+    token: "token",
+    endpoint: "http://127.0.0.1:1/mimo-hook",
+    configDir: "hook-dir",
+    callbackFile: "callback.json",
+    env: {},
+    waitForCallback: async () => ({
+      invocationId: "compose-test-1",
+      event: "session.post" as const,
+      outcome: "completed" as const,
+      sessionId: "ses_callback",
+      receivedAt: "2026-06-22T13:00:00.000Z"
+    }),
+    close: async () => undefined
+  })
+};
 
 describe("compose runner", () => {
   it("builds a compose report from captured streaming stdout", () => {
@@ -82,6 +101,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: '{"type":"message","text":"done"}\n',
           stderr: "",
@@ -119,8 +139,172 @@ describe("compose runner", () => {
     expect(result.diffPath).toBeDefined();
   });
 
+  it("foreground compose passes hook env, waits, closes, and uses callback session", async () => {
+    const waitForCallback = vi.fn(async () => ({
+      invocationId: "compose-dev-1",
+      event: "session.post" as const,
+      outcome: "completed" as const,
+      sessionId: "ses_callback",
+      receivedAt: "2026-06-22T13:00:02.000Z"
+    }));
+    const close = vi.fn(async () => undefined);
+    let capturedEnv: NodeJS.ProcessEnv | undefined;
+
+    const result = await runComposeWorkflow(
+      {
+        cwd: "E:/project/app",
+        workflow: "dev",
+        task: "Test task",
+        reportDir: "E:/project/app/.codex-mimo/reports"
+      },
+      {
+        createHookCallbackController: async () => ({
+          invocationId: "compose-dev-1",
+          token: "token",
+          endpoint: "http://127.0.0.1:1/mimo-hook",
+          configDir: "E:/project/app/.codex-mimo/runtime-hooks/compose-dev-1",
+          callbackFile: "E:/project/app/.codex-mimo/callbacks/compose-dev-1.json",
+          env: { CODEX_MIMO_INVOCATION_ID: "compose-dev-1" },
+          waitForCallback,
+          close
+        }),
+        runMimo: async (_cwd, _args, options) => {
+          capturedEnv = options?.env;
+          return {
+            stdout: "{\"type\":\"step_start\",\"sessionID\":\"ses_events\",\"part\":{\"type\":\"step-start\"}}\n",
+            stderr: "",
+            exitCode: 0
+          };
+        },
+        captureDiff: async () => ({ changedFiles: [], diffStat: "", diff: "" }),
+        captureStatus: async () => ({ short: "", dirty: false }),
+        runVerification: async () => [],
+        writeReport: () => undefined,
+        now: () => new Date("2026-06-22T13:00:00.000Z")
+      }
+    );
+
+    expect(capturedEnv).toMatchObject({ CODEX_MIMO_INVOCATION_ID: "compose-dev-1" });
+    expect(waitForCallback).toHaveBeenCalledTimes(1);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(result.sessionId).toBe("ses_callback");
+    expect(result.callback).toMatchObject({ outcome: "completed", sessionId: "ses_callback" });
+  });
+
+  it("marks foreground compose failed when callback is missing", async () => {
+    const result = await runComposeWorkflow(
+      {
+        cwd: "E:/project/app",
+        workflow: "dev",
+        task: "Test task",
+        reportDir: "E:/project/app/.codex-mimo/reports"
+      },
+      {
+        createHookCallbackController: async () => ({
+          invocationId: "compose-dev-2",
+          token: "token",
+          endpoint: "http://127.0.0.1:1/mimo-hook",
+          configDir: "hook-dir",
+          callbackFile: "callback.json",
+          env: {},
+          waitForCallback: async () => null,
+          close: async () => undefined
+        }),
+        runMimo: async () => ({ stdout: "{\"type\":\"message\",\"text\":\"done\"}\n", stderr: "", exitCode: 0 }),
+        captureDiff: async () => ({ changedFiles: [], diffStat: "", diff: "" }),
+        captureStatus: async () => ({ short: "", dirty: false }),
+        runVerification: async () => [],
+        writeReport: () => undefined,
+        now: () => new Date("2026-06-22T13:01:00.000Z")
+      }
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.callbackTimedOut).toBe(true);
+    expect(result.error).toContain("MiMoCode exited before codex-mimo received session.post");
+  });
+
+  it("marks foreground compose timeout even when callback is missing", async () => {
+    const result = await runComposeWorkflow(
+      {
+        cwd: "E:/project/app",
+        workflow: "dev",
+        task: "Long task",
+        reportDir: "E:/project/app/.codex-mimo/reports"
+      },
+      {
+        createHookCallbackController: async () => ({
+          invocationId: "compose-dev-timeout",
+          token: "token",
+          endpoint: "http://127.0.0.1:1/mimo-hook",
+          configDir: "hook-dir",
+          callbackFile: "callback.json",
+          env: {},
+          waitForCallback: async () => null,
+          close: async () => undefined
+        }),
+        runMimo: async () => ({
+          stdout: "",
+          stderr: "",
+          exitCode: 124,
+          terminationReason: "process_timeout"
+        }),
+        captureDiff: async () => ({ changedFiles: [], diffStat: "", diff: "" }),
+        captureStatus: async () => ({ short: "", dirty: false }),
+        runVerification: async () => [],
+        writeReport: () => undefined,
+        now: () => new Date("2026-06-22T13:01:30.000Z")
+      }
+    );
+
+    expect(result.status).toBe("timeout");
+    expect(result.callbackTimedOut).toBe(true);
+    expect(result.error).toContain("configured process timeout");
+  });
+
+  it("marks foreground compose failed when callback reports cancellation or error", async () => {
+    const result = await runComposeWorkflow(
+      {
+        cwd: "E:/project/app",
+        workflow: "dev",
+        task: "Test task",
+        reportDir: "E:/project/app/.codex-mimo/reports"
+      },
+      {
+        createHookCallbackController: async () => ({
+          invocationId: "compose-dev-3",
+          token: "token",
+          endpoint: "http://127.0.0.1:1/mimo-hook",
+          configDir: "hook-dir",
+          callbackFile: "callback.json",
+          env: {},
+          waitForCallback: async () => ({
+            invocationId: "compose-dev-3",
+            event: "session.post",
+            outcome: "cancelled",
+            sessionId: "ses_cancelled",
+            receivedAt: "2026-06-22T13:02:00.000Z",
+            error: "Cancelled by MiMoCode"
+          }),
+          close: async () => undefined
+        }),
+        runMimo: async () => ({ stdout: "{\"type\":\"message\",\"text\":\"done\"}\n", stderr: "", exitCode: 0 }),
+        captureDiff: async () => ({ changedFiles: [], diffStat: "", diff: "" }),
+        captureStatus: async () => ({ short: "", dirty: false }),
+        runVerification: async () => [],
+        writeReport: () => undefined,
+        now: () => new Date("2026-06-22T13:02:00.000Z")
+      }
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("Cancelled by MiMoCode");
+    expect(result.callback).toMatchObject({ outcome: "cancelled", sessionId: "ses_cancelled" });
+  });
+
   it("writes report on dry-run", async () => {
     let reportWritten = false;
+    let hookCreated = false;
     const result = await runComposeWorkflow(
       {
         cwd: "E:/project/app",
@@ -130,6 +314,10 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        createHookCallbackController: async () => {
+          hookCreated = true;
+          throw new Error("dry-run should not create hook");
+        },
         writeReport: () => { reportWritten = true; },
         now: () => new Date("2026-06-21T18:40:00.000Z")
       }
@@ -137,6 +325,7 @@ describe("compose runner", () => {
 
     expect(result.status).toBe("needs_review");
     expect(reportWritten).toBe(true);
+    expect(hookCreated).toBe(false);
   });
 
   it("writes report when MiMoCode execution fails", async () => {
@@ -149,6 +338,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => { throw new Error("mimo not found"); },
         writeReport: () => { reportWritten = true; },
         now: () => new Date("2026-06-21T18:40:00.000Z")
@@ -171,6 +361,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async (_cwd, _args, options) => {
           capturedTimeout = options?.timeoutMs;
           return {
@@ -208,6 +399,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: '{"type":"message","text":"done"}\n',
           stderr: "",
@@ -235,6 +427,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: '{"type":"message","text":"done"}\n',
           stderr: "",
@@ -266,6 +459,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: '{"type":"message","text":"done"}\n',
           stderr: "",
@@ -304,6 +498,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: '{"type":"message","text":"done"}\n',
           stderr: "",
@@ -333,6 +528,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: '{"type":"message","text":"I changed a file."}\n',
           stderr: "",
@@ -371,6 +567,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: '{"type":"message","text":"Created package.json"}\n',
           stderr: "",
@@ -408,6 +605,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: '{"type":"message","text":"Created new module"}\n',
           stderr: "",
@@ -444,6 +642,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: '{"type":"message","text":"No file changes needed."}\n',
           stderr: "",
@@ -481,6 +680,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: '{"type":"message","text":"It looks like the objective is empty. What would you like me to help with?"}\n',
           stderr: "",
@@ -524,6 +724,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout:
             "{\"type\":\"message\",\"text\":\"It looks like your message got cut off — what's the objective or task you'd like help with?\"}\n",
@@ -559,6 +760,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout:
             `{"type":"message","text":"I see you've loaded the compose agent environment with all the skills, but you haven't provided an actual task or objective yet.\\n\\nWhat would you like me to help you with? Please share your task, and I'll use the appropriate skills to assist you."}\n`,
@@ -594,6 +796,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: '{"type":"message","text":"What would you like to work on?"}\n',
           stderr: "",
@@ -628,6 +831,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout:
             '{"type":"message","raw":{"type":"text","part":{"type":"text","text":"It looks like your message got cut off. What would you like to accomplish?"}}}\n',
@@ -663,6 +867,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout:
             '{"type":"text","part":{"type":"text","text":"What would you like me to help with?"}}\n',
@@ -698,6 +903,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: '{"type":"text","part":{"type":"text","text":"Ready. What do you need?"}}\n',
           stderr: "",
@@ -732,6 +938,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: '{"type":"text","part":{"type":"text","text":"How can I help you?"}}\n',
           stderr: "",
@@ -766,6 +973,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout:
             '{"type":"text","part":{"type":"text","text":"How can I help? What task or problem would you like to work on?"}}\n',
@@ -801,6 +1009,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout:
             '{"type":"text","part":{"type":"text","text":"The skill \\"arch:android-misconfig\\" is not available.\\n\\nWhat are you trying to accomplish?"}}\n',
@@ -838,6 +1047,7 @@ describe("compose runner", () => {
         reportDir: "E:/project/app/.codex-mimo/reports"
       },
       {
+        ...completedHook,
         runMimo: async (_cwd, args) => {
           capturedArgs = args;
           return {
@@ -880,6 +1090,33 @@ describe("compose runner", () => {
     });
 
     expect(report.sessionId).toBe("ses_real");
+  });
+
+  it("prefers callback sessionId over MiMo event sessionId on compose reports", () => {
+    const report = buildComposeReportFromRun({
+      id: "run-session-callback",
+      createdAt: "2026-06-24T00:00:00.000Z",
+      input: { cwd: "E:/project/app", workflow: "plan", task: "Plan" },
+      mimoArgs: ["run", "--format", "json"],
+      requestedSkills: ["compose:plan"],
+      eventsStdout: "{\"type\":\"step_start\",\"sessionID\":\"ses_events\",\"part\":{\"type\":\"step-start\"}}\n",
+      diff: { changedFiles: [], diffStat: "", diff: "" },
+      verification: [],
+      reportDir: "E:/project/app/.codex-mimo/reports",
+      eventsDir: "E:/project/app/.codex-mimo/events",
+      diffsDir: "E:/project/app/.codex-mimo/diffs",
+      status: "passed",
+      callback: {
+        invocationId: "compose-plan-1",
+        event: "session.post",
+        outcome: "completed",
+        sessionId: "ses_callback",
+        receivedAt: "2026-06-24T00:00:01.000Z"
+      }
+    });
+
+    expect(report.sessionId).toBe("ses_callback");
+    expect(report.callback?.outcome).toBe("completed");
   });
 
   it("does not treat compose startup chatter as planText", () => {

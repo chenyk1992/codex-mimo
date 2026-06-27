@@ -17,7 +17,7 @@ import {
   ReviewInput
 } from "./tool-schemas.js";
 import { implementPrompt, planPrompt, reviewPrompt } from "../core/prompt.js";
-import { runAndCapture } from "../mimo/mimo-runner.js";
+import { runAndCapture, type MimoRunResult } from "../mimo/mimo-runner.js";
 import { runComposeWorkflow } from "../compose/runner.js";
 import { compactComposeReportForCodex } from "./compact.js";
 import type { CompactComposeReport } from "./compact.js";
@@ -27,12 +27,14 @@ import { isActiveJobStatus } from "../core/jobs.js";
 import { renderJobLaunch, renderJobResult, renderJobStatus } from "../core/job-render.js";
 import { readRecentJobLogLines } from "../core/job-log.js";
 import { SessionStore } from "../core/sessions.js";
+import { resolveMimoCommand } from "../mimo/run-json.js";
+import { detectDirectSemanticFailure } from "../compose/post-checks.js";
 
 export async function mimoHealthcheck(input: unknown) {
   const parsed = HealthcheckInput.parse(input);
   const cwd = parsed.cwd ?? process.cwd();
   try {
-    const result = await execa("mimo", ["--version"], { cwd });
+    const result = await execa(resolveMimoCommand(), ["--version"], { cwd });
     return {
       ok: true,
       version: result.stdout.trim(),
@@ -52,6 +54,7 @@ export async function mimoPlan(input: unknown) {
     message: planPrompt(parsed.task),
     timeoutMs: parsed.timeoutMs
   });
+  assertMimoRunSucceeded(result, "plan");
   return {
     summary: result.summary,
     sessionId: result.sessionId,
@@ -93,6 +96,18 @@ export async function mimoImplement(input: unknown) {
   }
 
   const after = await captureWorktreeFiles(parsed.cwd);
+  const failure = mimoRunFailureMessage(result, "implement");
+  if (failure) {
+    updateJob(parsed.cwd, job.id, {
+      status: "failed",
+      phase: "failed",
+      completedAt: new Date().toISOString(),
+      summary: failure,
+      error: failure
+    });
+    throw new Error(failure);
+  }
+
   const changedFiles = mergeChangedFiles(result.changedFiles, diffAddedFiles(before, after));
 
   updateJob(parsed.cwd, job.id, {
@@ -133,7 +148,8 @@ export async function mimoReview(input: unknown) {
     cwd: parsed.cwd,
     agent: "plan",
     message: prompt,
-    files
+    files,
+    timeoutMs: parsed.timeoutMs
   });
 
   if (result.exitCode !== 0 || result.errors.length > 0) {
@@ -199,6 +215,7 @@ export async function mimoFixCi(input: unknown) {
     files: [parsed.file],
     timeoutMs: parsed.timeoutMs
   });
+  assertMimoRunSucceeded(result, "fix-ci");
   const after = await captureWorktreeFiles(parsed.cwd);
   return {
     summary: result.summary,
@@ -215,10 +232,11 @@ export async function mimoResume(input: unknown) {
   const result = await runAndCapture({
     cwd: parsed.cwd,
     agent: "build",
-    message: parsed.task,
+    message: implementPrompt(parsed.task),
     session: parsed.session,
     timeoutMs: parsed.timeoutMs
   });
+  assertMimoRunSucceeded(result, "resume");
   const after = await captureWorktreeFiles(parsed.cwd);
   return {
     summary: result.summary,
@@ -261,7 +279,7 @@ export async function mimoCompose(
     });
     const queued = updateJob(parsed.cwd, job.id, { pid });
     if (parsed.wait) {
-      const settled = await waitForJobToSettle(parsed.cwd, job.id);
+      const settled = await waitForJobToSettle(parsed.cwd, job.id, parsed.timeoutMs);
       return renderJobStatus(settled ?? queued, {
         progress: readRecentJobLogLines((settled ?? queued).logFile, 5)
       });
@@ -291,13 +309,29 @@ export async function mimoCompose(
     throw error;
   }
 
+  const failedStatus = report.status === "failed" || report.status === "timeout";
   updateJob(parsed.cwd, job.id, {
-    status: report.status === "failed" ? "failed" : "completed",
-    phase: report.status === "failed" ? "failed" : "done",
+    status: failedStatus ? "failed" : "completed",
+    phase: failedStatus ? "failed" : "done",
     completedAt: new Date().toISOString(),
     summary: report.error ?? `Compose ${parsed.workflow} ${report.status}.`,
     sessionId: report.sessionId,
     changedFiles: report.changedFiles,
+    callback: report.callback
+      ? {
+          invocationId: report.callback.invocationId,
+          outcome: report.callback.outcome ?? "error",
+          sessionId: report.callback.sessionId ?? null,
+          receivedAt: report.callback.receivedAt,
+          error: report.callback.error
+        }
+      : report.callbackTimedOut
+      ? {
+          invocationId: "foreground-compose",
+          outcome: "missing",
+          error: "MiMoCode exited before codex-mimo received session.post."
+        }
+      : undefined,
     reportPaths: report.reportPaths
   });
 
@@ -444,11 +478,23 @@ function mergeChangedFiles(primary: string[], fallback: string[]): string[] {
   return [...new Set([...primary, ...fallback])];
 }
 
-const DEFAULT_BACKGROUND_WAIT_MS = 5_000;
-const BACKGROUND_WAIT_POLL_MS = 250;
+function assertMimoRunSucceeded(result: MimoRunResult, label: string): void {
+  const failure = mimoRunFailureMessage(result, label);
+  if (failure) throw new Error(failure);
+}
 
-async function waitForJobToSettle(cwd: string, jobId: string, waitMs = DEFAULT_BACKGROUND_WAIT_MS) {
-  const deadline = Date.now() + waitMs;
+function mimoRunFailureMessage(result: MimoRunResult, label: string): string | null {
+  const semanticFailure = detectDirectSemanticFailure(result.summary);
+  if (semanticFailure) return `MiMoCode ${label} failed: ${semanticFailure}`;
+  if (result.exitCode === 0) return null;
+  return `MiMoCode ${label} failed: ${result.errors.join("\n") || `exit ${result.exitCode}`}`;
+}
+
+const BACKGROUND_WAIT_POLL_MS = 250;
+const BACKGROUND_WAIT_CALLBACK_GRACE_MS = 10_000;
+
+async function waitForJobToSettle(cwd: string, jobId: string, waitMs: number) {
+  const deadline = Date.now() + waitMs + BACKGROUND_WAIT_CALLBACK_GRACE_MS;
   while (Date.now() < deadline) {
     const job = readJob(cwd, jobId);
     if (!job || !isActiveJobStatus(job.status)) return job;

@@ -1,10 +1,16 @@
 import { execa } from "execa";
 
-interface DiffResult {
-  stat: string;
-  diff: string;
-  changedFiles: string[];
-  hasChanges: boolean;
+export interface GitStatusSnapshot {
+  short: string;
+  dirty: boolean;
+}
+
+export async function captureGitStatus(cwd: string): Promise<GitStatusSnapshot> {
+  const result = await execa("git", ["status", "--short"], { cwd, reject: false });
+  return {
+    short: result.stdout ?? "",
+    dirty: (result.stdout ?? "").trim().length > 0
+  };
 }
 
 export interface GitDiffSnapshot {
@@ -20,23 +26,6 @@ export function parseChangedFiles(output: string): string[] {
     .filter(Boolean);
 }
 
-export async function captureDiff(cwd: string, base: string = "HEAD"): Promise<DiffResult> {
-  const [statResult, diffResult, nameResult] = await Promise.all([
-    execa("git", ["diff", "--stat", base], { cwd, reject: false }),
-    execa("git", ["diff", base], { cwd, reject: false }),
-    execa("git", ["diff", "--name-only", base], { cwd, reject: false })
-  ]);
-
-  const changedFiles = parseChangedFiles(nameResult.stdout ?? "");
-
-  return {
-    stat: statResult.stdout ?? "",
-    diff: diffResult.stdout ?? "",
-    changedFiles,
-    hasChanges: changedFiles.length > 0
-  };
-}
-
 export async function captureGitDiff(cwd: string, base = "HEAD"): Promise<GitDiffSnapshot> {
   const [names, stat, diff] = await Promise.all([
     execa("git", ["diff", "--name-only", base], { cwd }),
@@ -50,5 +39,4 @@ export async function captureGitDiff(cwd: string, base = "HEAD"): Promise<GitDif
     diff: diff.stdout
   };
 }
-
 

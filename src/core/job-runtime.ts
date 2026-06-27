@@ -3,7 +3,7 @@ import { appendJobEventLine, appendJobLogLine } from "./job-log.js";
 import { inferPhaseFromEvent, summarizeEventForLog } from "./job-phase.js";
 import { readJob, updateJob } from "./job-store.js";
 import { isActiveJobStatus } from "./jobs.js";
-import type { JobRecord, JobReportPaths, JobVerification } from "./jobs.js";
+import type { JobCallbackSummary, JobRecord, JobReportPaths, JobVerification } from "./jobs.js";
 
 export function startRuntimeJob(cwd: string, jobId: string, patch: { pid?: number | null } = {}): JobRecord {
   return updateJob(cwd, jobId, {
@@ -47,6 +47,7 @@ export function completeRuntimeJob(
     changedFiles: string[];
     verification: JobVerification[];
     reportPaths?: JobReportPaths;
+    callback?: JobCallbackSummary;
   }
 ): JobRecord {
   const job = mustReadJob(cwd, jobId);
@@ -61,6 +62,7 @@ export function completeRuntimeJob(
     sessionId: result.sessionId ?? job.sessionId ?? null,
     changedFiles: result.changedFiles,
     verification: result.verification,
+    callback: result.callback,
     reportPaths: result.reportPaths
   });
 }
@@ -73,6 +75,7 @@ export function failRuntimeJob(
     error: string;
     sessionId?: string | null;
     reportPaths?: JobReportPaths;
+    callback?: JobCallbackSummary;
   }
 ): JobRecord {
   const job = mustReadJob(cwd, jobId);
@@ -86,6 +89,7 @@ export function failRuntimeJob(
     errorCode: failure.errorCode,
     error: failure.error,
     sessionId: failure.sessionId ?? job.sessionId ?? null,
+    callback: failure.callback,
     reportPaths: failure.reportPaths ?? job.reportPaths
   });
 }

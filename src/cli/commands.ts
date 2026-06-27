@@ -1,59 +1,91 @@
-import { execa } from "execa";
-import { buildMimoRunArgs } from "../mimo/run-json.js";
 import { implementPrompt, planPrompt, reviewPrompt } from "../core/prompt.js";
-import { captureDiff } from "../git/diff.js";
-import { preparePromptTransport } from "../mimo/prompt-transport.js";
+import { captureGitDiff } from "../git/diff.js";
+import { runAndCapture, type MimoRunResult } from "../mimo/mimo-runner.js";
 
-const commonOpts = { stdin: "ignore" as const, stdout: "inherit" as const, stderr: "inherit" as const };
+export function formatMimoRunResult(command: string, result: MimoRunResult): string {
+  const lines = [
+    `Command: ${command}`,
+    `Status: ${result.exitCode === 0 ? "completed" : "failed"}`,
+    `Session: ${result.sessionId ?? "unknown"}`,
+    `Summary: ${result.summary || "Completed."}`
+  ];
 
-export async function runPlan(cwd: string, task: string, files?: string[]): Promise<void> {
+  if (result.changedFiles.length > 0) {
+    lines.push("Changed files:");
+    for (const file of result.changedFiles) lines.push(`  - ${file}`);
+  }
+
+  if (result.commands.length > 0) {
+    lines.push("Commands:");
+    for (const commandResult of result.commands) {
+      lines.push(`  - ${commandResult.command} exit=${commandResult.exitCode ?? "unknown"}`);
+    }
+  }
+
+  if (result.errors.length > 0) {
+    lines.push("Errors:");
+    for (const error of result.errors) lines.push(`  - ${error}`);
+  }
+
+  return lines.join("\n");
+}
+
+export function composeStatusExitCode(status: string): number {
+  return status === "failed" || status === "timeout" ? 1 : 0;
+}
+
+export async function runPlan(cwd: string, task: string, files?: string[]): Promise<MimoRunResult> {
   const message = planPrompt(task);
-  const transported = preparePromptTransport(message, { cwd });
-  const args = buildMimoRunArgs({
+  return runAndCapture({
     cwd,
     agent: "plan",
-    message: transported.message,
-    files: [...transported.files, ...(files ?? [])]
+    message,
+    files: files ?? []
   });
-  await execa("mimo", args, { cwd, ...commonOpts });
 }
 
-export async function runImplement(cwd: string, task: string, files?: string[], ciMode?: boolean): Promise<void> {
+export async function runImplement(cwd: string, task: string, files?: string[], ciMode?: boolean): Promise<MimoRunResult> {
   const message = implementPrompt(task);
-  const transported = preparePromptTransport(message, { cwd });
-  const args = buildMimoRunArgs({
+  return runAndCapture({
     cwd,
     agent: "build",
-    message: transported.message,
-    files: [...transported.files, ...(files ?? [])]
+    message,
+    files: files ?? []
   });
-  await execa("mimo", args, { cwd, ...commonOpts });
 }
 
-export async function runReview(cwd: string, base?: string, files?: string[]): Promise<void> {
-  const diff = await captureDiff(cwd, base ?? "HEAD");
-  const diffSummary = diff.hasChanges
+export async function runReview(cwd: string, base?: string, files?: string[]): Promise<MimoRunResult> {
+  const diff = await captureGitDiff(cwd, base ?? "HEAD");
+  const hasChanges = diff.changedFiles.length > 0;
+  const diffSummary = hasChanges
     ? `Changed files:\n${diff.changedFiles.join("\n")}\n\nDiff:\n${diff.diff}`
     : "No changes found.";
   const message = reviewPrompt(diffSummary);
-  const transported = preparePromptTransport(message, { cwd });
-  const args = buildMimoRunArgs({
+  return runAndCapture({
     cwd,
     agent: "plan",
-    message: transported.message,
-    files: [...transported.files, ...(files ?? [])]
+    message,
+    files: files ?? []
   });
-  await execa("mimo", args, { cwd, ...commonOpts });
 }
 
-export async function runFixCi(cwd: string, file: string, task?: string, files?: string[]): Promise<void> {
+export async function runFixCi(cwd: string, file: string, task?: string, files?: string[]): Promise<MimoRunResult> {
   const message = implementPrompt(task ?? "Fix the CI failures shown in the attached log.");
-  const transported = preparePromptTransport(message, { cwd });
-  const args = buildMimoRunArgs({
+  return runAndCapture({
     cwd,
     agent: "build",
-    message: transported.message,
-    files: [file, ...transported.files, ...(files ?? [])]
+    message,
+    files: [file, ...(files ?? [])]
   });
-  await execa("mimo", args, { cwd, ...commonOpts });
+}
+
+export async function runResume(cwd: string, session: string, task?: string, files?: string[]): Promise<MimoRunResult> {
+  const message = implementPrompt(task || "Continue the previous task.");
+  return runAndCapture({
+    cwd,
+    agent: "build",
+    session,
+    message,
+    files: files ?? []
+  });
 }

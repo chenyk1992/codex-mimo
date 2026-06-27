@@ -103,6 +103,24 @@ describe("mimo_review", () => {
     expect(call.message).toContain("No changes found.");
   });
 
+  it("passes timeoutMs to MiMoCode review runner", async () => {
+    const cwd = tempWorkspace();
+    mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    mocks.runAndCapture.mockResolvedValue({
+      sessionId: "ses_timeout",
+      summary: "No issues found.",
+      changedFiles: [],
+      commands: [],
+      errors: [],
+      exitCode: 0,
+      raw: [{ type: "text" }]
+    });
+
+    await mimoReview({ cwd, base: "HEAD", timeoutMs: 12345 });
+
+    expect(mocks.runAndCapture.mock.calls[0][0]).toMatchObject({ timeoutMs: 12345 });
+  });
+
   it("throws when agent returns a greeting instead of review content", async () => {
     const cwd = tempWorkspace();
     mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "diff --git a/a b/a\n+const x = 1;\n", stderr: "" });

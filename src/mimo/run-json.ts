@@ -1,3 +1,7 @@
+export function resolveMimoCommand(env: NodeJS.ProcessEnv = process.env): string {
+  return env.CODEX_MIMO_COMMAND || env.MIMO_COMMAND || "mimo";
+}
+
 export interface MimoRunOptions {
   cwd: string;
   message: string;

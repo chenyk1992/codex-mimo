@@ -10,6 +10,7 @@ import { mimoHealthcheck } from "../../../src/codex/tools.js";
 
 describe("mimo_healthcheck", () => {
   beforeEach(() => {
+    vi.unstubAllEnvs();
     mocks.execa.mockReset();
   });
 
@@ -18,6 +19,19 @@ describe("mimo_healthcheck", () => {
     const result = await mimoHealthcheck({ cwd: "/tmp/proj" });
     expect(result).toEqual({ ok: true, version: "mimo 0.5.0", cwd: "/tmp/proj" });
     expect(mocks.execa).toHaveBeenCalledWith("mimo", ["--version"], { cwd: "/tmp/proj" });
+  });
+
+  it("uses CODEX_MIMO_COMMAND when provided", async () => {
+    vi.stubEnv("CODEX_MIMO_COMMAND", "C:/Users/Administrator/AppData/Roaming/npm/mimo.cmd");
+    mocks.execa.mockResolvedValue({ stdout: "mimo 0.5.0\n", stderr: "" });
+
+    await mimoHealthcheck({ cwd: "/tmp/proj" });
+
+    expect(mocks.execa).toHaveBeenCalledWith(
+      "C:/Users/Administrator/AppData/Roaming/npm/mimo.cmd",
+      ["--version"],
+      { cwd: "/tmp/proj" }
+    );
   });
 
   it("returns error when mimo is not installed", async () => {

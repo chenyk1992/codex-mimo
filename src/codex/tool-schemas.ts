@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { COMPOSE_WORKFLOW_NAMES } from "../compose/workflow-names.js";
+import { COMPOSE_WORKFLOW_NAMES } from "../compose/workflow.js";
 
 export const PlanInput = z.object({
   cwd: z.string(),

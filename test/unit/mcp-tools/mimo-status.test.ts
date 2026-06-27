@@ -27,6 +27,28 @@ describe("mimo_status", () => {
     expect(result.phase).toBe("investigating");
   });
 
+  it("returns callback metadata when recorded", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
+    updateJob(cwd, job.id, {
+      status: "completed",
+      phase: "done",
+      callback: {
+        invocationId: "compose-dev-1",
+        outcome: "completed",
+        sessionId: "ses_1",
+        receivedAt: "2026-06-23T00:00:00.000Z"
+      }
+    });
+
+    const result = await mimoStatus({ cwd, jobId: job.id });
+    expect(result.callback).toMatchObject({
+      invocationId: "compose-dev-1",
+      outcome: "completed",
+      sessionId: "ses_1"
+    });
+  });
+
   it("defaults to most recent job when jobId is omitted", async () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd);

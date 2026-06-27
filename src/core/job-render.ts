@@ -39,6 +39,7 @@ export function renderJobStatus(
     sessionId: job.sessionId ?? null,
     summary: job.summary ?? `${job.kind} job ${job.status}.`,
     changedFiles: job.changedFiles,
+    callback: job.callback,
     progress: options.progress ?? [],
     actions: {
       ...(isActiveJobStatus(job.status) ? { cancel: "mimo_cancel" as const } : { result: "mimo_result" as const })
@@ -54,6 +55,7 @@ export function renderJobResult(job: JobRecord): JobResult {
     sessionId: job.sessionId ?? null,
     changedFiles: job.changedFiles,
     verification: job.verification,
+    callback: job.callback,
     error: job.error,
     errorCode: job.errorCode,
     reportPaths: job.reportPaths,

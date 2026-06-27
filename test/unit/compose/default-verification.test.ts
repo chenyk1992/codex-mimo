@@ -2,10 +2,30 @@ import { describe, expect, it } from "vitest";
 import { getComposeWorkflow } from "../../../src/compose/workflow.js";
 import { runComposeWorkflow } from "../../../src/compose/runner.js";
 
+const completedHook = {
+  createHookCallbackController: async () => ({
+    invocationId: "compose-test",
+    token: "token",
+    endpoint: "http://127.0.0.1:1/mimo-hook",
+    configDir: "hook-dir",
+    callbackFile: "callback.json",
+    env: {},
+    waitForCallback: async () => ({
+      invocationId: "compose-test",
+      event: "session.post" as const,
+      outcome: "completed" as const,
+      sessionId: "ses_test",
+      receivedAt: "2026-06-24T00:00:00.000Z"
+    }),
+    close: async () => undefined
+  })
+};
+
 const baseDeps = (overrides?: {
   runVerification?: () => Promise<{ command: string; exitCode: number; stdout: string; stderr: string; passed: boolean; durationMs: number }[]>;
   captureDiff?: () => Promise<{ changedFiles: string[]; diffStat: string; diff: string }>;
 }) => ({
+  ...completedHook,
   runMimo: async () => ({
     stdout: '{"type":"message","text":"done"}\n',
     stderr: "",

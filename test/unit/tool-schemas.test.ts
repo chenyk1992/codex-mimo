@@ -13,7 +13,7 @@ import {
   ResumeJobInput,
   ReviewInput
 } from "../../src/codex/tool-schemas.js";
-import { COMPOSE_WORKFLOW_NAMES, composeWorkflowUsage } from "../../src/compose/workflow-names.js";
+import { COMPOSE_WORKFLOW_NAMES, composeWorkflowUsage } from "../../src/compose/workflow.js";
 
 describe("tool schemas", () => {
   it("accepts all supported compose workflows", () => {

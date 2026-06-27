@@ -37,26 +37,49 @@ describe("job runtime lifecycle", () => {
       sessionId: "sess_1",
       changedFiles: ["src/a.ts"],
       verification: [],
-      reportPaths: { json: "report.json" }
+      reportPaths: { json: "report.json" },
+      callback: {
+        invocationId: "compose-dev-1",
+        outcome: "completed",
+        sessionId: "sess_1",
+        receivedAt: "2026-06-23T00:00:00.000Z"
+      }
     });
 
     expect(readJob(cwd, complete.id)).toMatchObject({
       status: "completed",
       phase: "done",
       summary: "done",
-      sessionId: "sess_1"
+      sessionId: "sess_1",
+      callback: {
+        invocationId: "compose-dev-1",
+        outcome: "completed",
+        sessionId: "sess_1"
+      }
     });
 
     const failed = store.create({ kind: "compose", task: "fail", request: {} });
     failRuntimeJob(cwd, failed.id, {
       errorCode: "nonzero_exit",
-      error: "MiMo failed"
+      error: "MiMo failed",
+      callback: {
+        invocationId: "compose-dev-2",
+        outcome: "error",
+        sessionId: "sess_2",
+        receivedAt: "2026-06-23T00:00:01.000Z",
+        error: "hook error"
+      }
     });
 
     expect(readJob(cwd, failed.id)).toMatchObject({
       status: "failed",
       phase: "failed",
-      errorCode: "nonzero_exit"
+      errorCode: "nonzero_exit",
+      callback: {
+        invocationId: "compose-dev-2",
+        outcome: "error",
+        error: "hook error"
+      }
     });
   });
 

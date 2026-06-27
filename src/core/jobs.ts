@@ -29,6 +29,14 @@ export interface JobReportPaths {
   diff?: string;
 }
 
+export interface JobCallbackSummary {
+  invocationId: string;
+  outcome: "completed" | "error" | "cancelled" | "missing";
+  sessionId?: string | null;
+  receivedAt?: string;
+  error?: string;
+}
+
 export interface JobRecord {
   id: string;
   kind: JobKind;
@@ -48,6 +56,7 @@ export interface JobRecord {
   summary?: string;
   changedFiles: string[];
   verification: JobVerification[];
+  callback?: JobCallbackSummary;
   reportPaths?: JobReportPaths;
   logFile: string;
   eventsFile: string;
@@ -76,6 +85,7 @@ export interface JobStatusResult {
   sessionId: string | null;
   summary: string;
   changedFiles: string[];
+  callback?: JobCallbackSummary;
   progress: string[];
   actions: {
     result?: "mimo_result";
@@ -90,6 +100,7 @@ export interface JobResult {
   sessionId: string | null;
   changedFiles: string[];
   verification: JobVerification[];
+  callback?: JobCallbackSummary;
   error?: string;
   errorCode?: string;
   reportPaths?: JobReportPaths;

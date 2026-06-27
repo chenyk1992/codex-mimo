@@ -135,4 +135,56 @@ describe("Codex compact compose report", () => {
       session: "ses_real"
     });
   });
+
+  it("includes compact callback summary when callback is present", () => {
+    const result = compactComposeReportForCodex({
+      id: "run1",
+      createdAt: "2026-06-24T00:00:00.000Z",
+      workflow: "dev",
+      cwd: "/tmp/project",
+      task: "Build",
+      mimoArgs: ["run"],
+      requestedSkills: ["compose:dev"],
+      status: "passed",
+      callback: {
+        invocationId: "compose-dev-1",
+        event: "session.post",
+        outcome: "completed",
+        sessionId: "ses_callback",
+        receivedAt: "2026-06-24T00:00:01.000Z"
+      },
+      events: [],
+      changedFiles: [],
+      diffStat: "",
+      verification: [],
+      reportPaths: { json: "run.json", markdown: "run.md", eventsJsonl: "run.jsonl" }
+    });
+
+    expect(result.callback).toEqual({
+      outcome: "completed",
+      sessionId: "ses_callback",
+      receivedAt: "2026-06-24T00:00:01.000Z"
+    });
+  });
+
+  it("includes missing callback outcome when callback timed out", () => {
+    const result = compactComposeReportForCodex({
+      id: "run1",
+      createdAt: "2026-06-24T00:00:00.000Z",
+      workflow: "dev",
+      cwd: "/tmp/project",
+      task: "Build",
+      mimoArgs: ["run"],
+      requestedSkills: ["compose:dev"],
+      status: "failed",
+      callbackTimedOut: true,
+      events: [],
+      changedFiles: [],
+      diffStat: "",
+      verification: [],
+      reportPaths: { json: "run.json", markdown: "run.md", eventsJsonl: "run.jsonl" }
+    });
+
+    expect(result.callback).toEqual({ outcome: "missing" });
+  });
 });

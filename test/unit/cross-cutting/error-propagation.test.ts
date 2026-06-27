@@ -11,6 +11,25 @@ function tempWorkspace(): string {
   return cwd;
 }
 
+const completedHook = {
+  createHookCallbackController: async () => ({
+    invocationId: "compose-test",
+    token: "token",
+    endpoint: "http://127.0.0.1:1/mimo-hook",
+    configDir: "hook-dir",
+    callbackFile: "callback.json",
+    env: {},
+    waitForCallback: async () => ({
+      invocationId: "compose-test",
+      event: "session.post" as const,
+      outcome: "completed" as const,
+      sessionId: "ses_test",
+      receivedAt: "2026-06-24T00:00:00.000Z"
+    }),
+    close: async () => undefined
+  })
+};
+
 afterEach(() => {
   for (const d of tempDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
 });
@@ -41,6 +60,7 @@ describe("error propagation", () => {
     const result = await runComposeWorkflow(
       { cwd, workflow: "dev", task: "Test timeout", reportDir: path.join(cwd, "reports") },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: "",
           stderr: "",
@@ -63,6 +83,7 @@ describe("error propagation", () => {
     const result = await runComposeWorkflow(
       { cwd, workflow: "dev", task: "Test disk full", reportDir: path.join(cwd, "reports") },
       {
+        ...completedHook,
         runMimo: async () => ({
           stdout: '{"type":"message","text":"done"}\n',
           stderr: "",

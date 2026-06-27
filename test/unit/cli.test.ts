@@ -6,23 +6,47 @@ vi.mock("execa", () => ({
   execa: vi.fn().mockResolvedValue({ stdout: "1.0.0" })
 }));
 
+vi.mock("../../src/mimo/mimo-runner.js", () => ({
+  runAndCapture: vi.fn()
+}));
+
 vi.mock("../../src/git/diff.js", () => ({
-  captureDiff: vi.fn().mockResolvedValue({
-    stat: " file.ts | 2 +-",
+  captureGitDiff: vi.fn().mockResolvedValue({
+    diffStat: " file.ts | 2 +-",
     diff: "diff --git a/file.ts\n+new line",
-    changedFiles: ["file.ts"],
-    hasChanges: true
+    changedFiles: ["file.ts"]
   })
 }));
 
 import { execa } from "execa";
-import { runPlan, runImplement, runReview, runFixCi } from "../../src/cli/commands.js";
+import { runAndCapture } from "../../src/mimo/mimo-runner.js";
+import {
+  composeStatusExitCode,
+  formatMimoRunResult,
+  runPlan,
+  runImplement,
+  runReview,
+  runFixCi,
+  runResume
+} from "../../src/cli/commands.js";
 
 const mockedExeca = vi.mocked(execa);
+const mockedRunAndCapture = vi.mocked(runAndCapture);
+const defaultRunResult = {
+  sessionId: "ses_test",
+  summary: "ok",
+  changedFiles: [],
+  commands: [],
+  errors: [],
+  exitCode: 0,
+  raw: []
+};
 
 beforeEach(() => {
   mockedExeca.mockClear();
   mockedExeca.mockResolvedValue({ stdout: "" } as any);
+  mockedRunAndCapture.mockReset();
+  mockedRunAndCapture.mockResolvedValue(defaultRunResult);
 });
 
 describe("CLI command building", () => {
@@ -274,86 +298,133 @@ describe("compose-worker command", () => {
 });
 
 describe("runPlan command", () => {
-  it("calls execa with agent=plan and stdin=ignore", async () => {
-    await runPlan("/project", "Add auth", []);
-    expect(mockedExeca).toHaveBeenCalledOnce();
-    const [cmd, args, opts] = mockedExeca.mock.calls[0];
-    expect(cmd).toBe("mimo");
-    expect(args).toContain("--agent");
-    expect(args).toContain("plan");
-    expect(opts).toMatchObject({ stdin: "ignore" });
+  it("returns runAndCapture result with agent=plan", async () => {
+    const result = await runPlan("/project", "Add auth", []);
+    expect(result).toBe(defaultRunResult);
+    expect(mockedRunAndCapture).toHaveBeenCalledWith({
+      cwd: "/project",
+      agent: "plan",
+      message: planPrompt("Add auth"),
+      files: []
+    });
   });
 
   it("passes file flags when files provided", async () => {
     await runPlan("/project", "task", ["spec.md"]);
-    const [, args] = mockedExeca.mock.calls[0];
-    expect(args).toContain("--file");
-    expect(args).toContain("spec.md");
+    expect(mockedRunAndCapture.mock.calls[0][0].files).toEqual(["spec.md"]);
   });
 });
 
 describe("runImplement command", () => {
-  it("calls execa with agent=build", async () => {
+  it("calls runAndCapture with agent=build", async () => {
     await runImplement("/project", "Fix bug", []);
-    const [, args] = mockedExeca.mock.calls[0];
-    expect(args).toContain("--agent");
-    expect(args).toContain("build");
-  });
-
-  it("uses stdin=ignore", async () => {
-    await runImplement("/project", "task", []);
-    const [, , opts] = mockedExeca.mock.calls[0];
-    expect(opts).toMatchObject({ stdin: "ignore" });
+    expect(mockedRunAndCapture.mock.calls[0][0]).toMatchObject({
+      cwd: "/project",
+      agent: "build",
+      message: implementPrompt("Fix bug"),
+      files: []
+    });
   });
 });
 
 describe("runReview command", () => {
   it("captures diff and uses agent=plan", async () => {
     await runReview("/project", "HEAD", []);
-    const [, args] = mockedExeca.mock.calls[0];
-    expect(args).toContain("--agent");
-    expect(args).toContain("plan");
+    expect(mockedRunAndCapture.mock.calls[0][0]).toMatchObject({
+      cwd: "/project",
+      agent: "plan"
+    });
   });
 
   it("includes diff content in the prompt", async () => {
     await runReview("/project", "HEAD", []);
-    const [, args] = mockedExeca.mock.calls[0];
-    const message = args.find((a: string) => typeof a === "string" && a.includes("diff --git"));
-    expect(message).toBeDefined();
+    expect(mockedRunAndCapture.mock.calls[0][0].message).toContain("diff --git");
   });
 });
 
 describe("runFixCi command", () => {
   it("uses agent=build with file attachment", async () => {
     await runFixCi("/project", "ci.log", undefined, []);
-    const [, args] = mockedExeca.mock.calls[0];
-    expect(args).toContain("--agent");
-    expect(args).toContain("build");
-    expect(args).toContain("--file");
-    expect(args).toContain("ci.log");
+    expect(mockedRunAndCapture.mock.calls[0][0]).toMatchObject({
+      cwd: "/project",
+      agent: "build",
+      files: ["ci.log"]
+    });
   });
 
   it("includes extra files alongside the primary file", async () => {
     await runFixCi("/project", "ci.log", undefined, ["extra.log"]);
-    const [, args] = mockedExeca.mock.calls[0];
-    const fileIndices = args.reduce((acc: number[], v: string, i: number) =>
-      v === "--file" ? [...acc, i] : acc, []);
-    expect(fileIndices).toHaveLength(2);
-    expect(args[fileIndices[0] + 1]).toBe("ci.log");
-    expect(args[fileIndices[1] + 1]).toBe("extra.log");
+    expect(mockedRunAndCapture.mock.calls[0][0].files).toEqual(["ci.log", "extra.log"]);
   });
 
   it("uses default task when none provided", async () => {
     await runFixCi("/project", "ci.log", undefined, []);
-    const [, args] = mockedExeca.mock.calls[0];
-    const message = args.find((a: string) => typeof a === "string" && a.includes("Fix the CI failures"));
-    expect(message).toBeDefined();
+    expect(mockedRunAndCapture.mock.calls[0][0].message).toContain("Fix the CI failures");
   });
 
   it("uses custom task when provided", async () => {
     await runFixCi("/project", "ci.log", "Fix tests", []);
-    const [, args] = mockedExeca.mock.calls[0];
-    const message = args.find((a: string) => typeof a === "string" && a.includes("Fix tests"));
-    expect(message).toBeDefined();
+    expect(mockedRunAndCapture.mock.calls[0][0].message).toContain("Fix tests");
+  });
+});
+
+describe("runResume command", () => {
+  it("uses agent=build with the requested session", async () => {
+    await runResume("/project", "ses_resume", "Continue feature", []);
+    expect(mockedRunAndCapture.mock.calls[0][0]).toMatchObject({
+      cwd: "/project",
+      agent: "build",
+      session: "ses_resume",
+      files: []
+    });
+    expect(mockedRunAndCapture.mock.calls[0][0].message).toContain("Continue feature");
+  });
+
+  it("uses a default continuation task when none provided", async () => {
+    await runResume("/project", "ses_resume", undefined, []);
+    expect(mockedRunAndCapture.mock.calls[0][0].message).toContain("Continue the previous task.");
+  });
+});
+
+describe("composeStatusExitCode", () => {
+  it("returns nonzero for failed and timeout compose results", () => {
+    expect(composeStatusExitCode("failed")).toBe(1);
+    expect(composeStatusExitCode("timeout")).toBe(1);
+  });
+
+  it("returns zero for successful or review-needed compose results", () => {
+    expect(composeStatusExitCode("passed")).toBe(0);
+    expect(composeStatusExitCode("needs_review")).toBe(0);
+  });
+});
+
+describe("formatMimoRunResult", () => {
+  it("prints compact callback-aware text", () => {
+    const text = formatMimoRunResult("implement", {
+      sessionId: "ses_123",
+      summary: "Changed the API path.",
+      changedFiles: ["src/api.ts"],
+      commands: [{ command: "npm test", exitCode: 0 }],
+      errors: ["minor warning"],
+      exitCode: 1,
+      raw: [],
+      callback: {
+        invocationId: "inv_1",
+        outcome: "completed",
+        sessionId: "ses_123",
+        receivedAt: "2026-06-27T00:00:00.000Z"
+      }
+    });
+
+    expect(text).toContain("Command: implement");
+    expect(text).toContain("Status: failed");
+    expect(text).toContain("Session: ses_123");
+    expect(text).toContain("Summary: Changed the API path.");
+    expect(text).toContain("Changed files:");
+    expect(text).toContain("  - src/api.ts");
+    expect(text).toContain("Commands:");
+    expect(text).toContain("  - npm test exit=0");
+    expect(text).toContain("Errors:");
+    expect(text).toContain("  - minor warning");
   });
 });

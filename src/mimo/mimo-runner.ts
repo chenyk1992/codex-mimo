@@ -1,6 +1,7 @@
 import { execa } from "execa";
-import { buildMimoRunArgs, type MimoRunOptions } from "./run-json.js";
+import { buildMimoRunArgs, type MimoRunOptions, resolveMimoCommand } from "./run-json.js";
 import { preparePromptTransport } from "./prompt-transport.js";
+import { createHookCallbackController, type MimoHookCallbackSummary } from "./hook-callback.js";
 
 export interface MimoRunResult {
   sessionId: string | null;
@@ -10,6 +11,8 @@ export interface MimoRunResult {
   errors: string[];
   exitCode: number;
   raw: unknown[];
+  callback?: MimoHookCallbackSummary | null;
+  callbackTimedOut?: boolean;
 }
 
 export async function runAndCapture(options: MimoRunOptions & { timeoutMs?: number }): Promise<MimoRunResult> {
@@ -19,31 +22,74 @@ export async function runAndCapture(options: MimoRunOptions & { timeoutMs?: numb
     message: transported.message,
     files: [...transported.files, ...(options.files ?? [])]
   });
-  const result = await execa("mimo", args, {
+  const hook = await createHookCallbackController({
     cwd: options.cwd,
-    stdin: "ignore",
-    stderr: "pipe",
-    timeout: options.timeoutMs,
-    reject: false
+    kind: "mimo-run",
+    callbackWaitMs: options.timeoutMs
+      ? Math.min(10_000, Math.max(1_000, options.timeoutMs))
+      : undefined
   });
 
-  const lines = result.stdout.split("\n").filter((l) => l.trim());
-  const messages: unknown[] = [];
-  for (const line of lines) {
-    try { messages.push(JSON.parse(line)); } catch { /* skip non-JSON */ }
-  }
+  try {
+    let result: Awaited<ReturnType<typeof execa>>;
+    try {
+      result = await execa(resolveMimoCommand(), args, {
+        cwd: options.cwd,
+        stdin: "ignore",
+        stderr: "pipe",
+        timeout: options.timeoutMs,
+        reject: false,
+        env: hook.env
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        sessionId: null,
+        summary: "MiMoCode failed to start.",
+        changedFiles: [],
+        commands: [],
+        errors: [message],
+        exitCode: 1,
+        raw: [],
+        callback: null,
+        callbackTimedOut: true
+      };
+    }
 
-  const parsed = parseMimoOutput(messages);
-  
-  // Include stderr in errors if command failed
-  if (result.exitCode !== 0 && result.stderr) {
-    parsed.errors.push(result.stderr);
-  }
+    const stdout = typeof result.stdout === "string" ? result.stdout : String(result.stdout ?? "");
+    const stderr = typeof result.stderr === "string" ? result.stderr : String(result.stderr ?? "");
+    const timedOut = Boolean((result as { timedOut?: boolean }).timedOut);
+    const processExitCode = timedOut ? 124 : result.exitCode ?? 1;
+    const callback = timedOut ? null : await hook.waitForCallback();
+    const lines = stdout.split("\n").filter((line) => line.trim());
+    const messages: unknown[] = [];
+    for (const line of lines) {
+      try { messages.push(JSON.parse(line)); } catch { /* skip non-JSON */ }
+    }
 
-  return {
-    ...parsed,
-    exitCode: result.exitCode ?? 1
-  };
+    const parsed = parseMimoOutput(messages, callback);
+    
+    // Include stderr in errors if command failed
+    if (processExitCode !== 0 && stderr) {
+      parsed.errors.push(stderr);
+    }
+
+    if (timedOut) {
+      parsed.errors.push("MiMoCode exceeded the configured process timeout.");
+    } else if (callback === null) {
+      parsed.errors.push("MiMoCode hook callback timed out before session.post was received.");
+    }
+
+    return {
+      ...parsed,
+      callbackTimedOut: callback === null,
+      exitCode: processExitCode === 0
+        ? (callback === null ? 1 : parsed.exitCode)
+        : processExitCode
+    };
+  } finally {
+    await hook.close();
+  }
 }
 
 function extractFilePath(obj: Record<string, unknown> | undefined): string | null {
@@ -55,19 +101,20 @@ function extractFilePath(obj: Record<string, unknown> | undefined): string | nul
   return null;
 }
 
-export function parseMimoOutput(messages: unknown[]): MimoRunResult {
-  let sessionId: string | null = null;
+export function parseMimoOutput(messages: unknown[], callback: MimoHookCallbackSummary | null = null): MimoRunResult {
+  let sessionId: string | null = callback?.sessionId ?? null;
   const textParts: string[] = [];
   const changedFiles = new Set<string>();
   const commands: Array<{ command: string; exitCode: number | null }> = [];
   const errors: string[] = [];
+  let exitCode = 0;
 
   for (const msg of messages) {
     const m = msg as Record<string, unknown>;
 
     // Support both sessionID and sessionId
-    if (typeof m.sessionID === "string") sessionId = m.sessionID;
-    if (typeof m.sessionId === "string") sessionId = m.sessionId;
+    if (!callback && typeof m.sessionID === "string") sessionId = m.sessionID;
+    if (!callback && typeof m.sessionId === "string") sessionId = m.sessionId;
 
     if (m.type === "text") {
       const part = m.part as Record<string, unknown> | undefined;
@@ -106,13 +153,26 @@ export function parseMimoOutput(messages: unknown[]): MimoRunResult {
     }
   }
 
+  if (callback?.outcome === "cancelled") {
+    exitCode = 1;
+    errors.push(`MiMoCode cancelled: ${callback.error ?? "cancelled by hook"}`);
+  }
+
+  if (callback?.outcome === "error") {
+    exitCode = 1;
+    errors.push(`MiMoCode error: ${callback.error ?? "hook reported an error"}`);
+  }
+
+  const callbackFinalText = callback?.finalText?.trim();
+
   return {
     sessionId,
-    summary: textParts.join("\n").trim() || "Completed.",
+    summary: callbackFinalText || textParts.join("\n").trim() || "Completed.",
     changedFiles: [...changedFiles],
     commands,
     errors,
-    exitCode: 0,
-    raw: messages
+    exitCode,
+    raw: messages,
+    callback
   };
 }

@@ -53,6 +53,28 @@ describe("job rendering", () => {
     expect(result.progress).toEqual(["Running npm test."]);
   });
 
+  it("renders callback on job status and result", () => {
+    const record = job({
+      status: "completed",
+      phase: "done",
+      callback: {
+        invocationId: "compose-dev-1",
+        outcome: "completed",
+        sessionId: "sess_123",
+        receivedAt: "2026-06-23T00:00:03.000Z"
+      }
+    });
+
+    expect(renderJobStatus(record).callback).toMatchObject({
+      outcome: "completed",
+      sessionId: "sess_123"
+    });
+    expect(renderJobResult(record).callback).toMatchObject({
+      invocationId: "compose-dev-1",
+      outcome: "completed"
+    });
+  });
+
   it("renders result with resume hint when a session exists", () => {
     const result = renderJobResult(job({
       status: "completed",

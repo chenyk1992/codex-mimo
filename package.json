@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
+    "test:smoke:mimo-hooks": "vitest run test/smoke/local-mimo-hooks.test.ts",
     "test:watch": "vitest",
     "lint": "tsc -p tsconfig.json --noEmit"
   },

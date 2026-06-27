@@ -66,6 +66,36 @@ describe("mimo_implement", () => {
     ).rejects.toThrow("process killed");
   });
 
+  it("throws and records a failed job when direct MiMo run returns nonzero exit code", async () => {
+    const cwd = tempWorkspace();
+    mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    mocks.runAndCapture.mockResolvedValue({
+      sessionId: "ses_impl_failed",
+      summary: "Completed.",
+      changedFiles: [],
+      commands: [],
+      errors: ["MiMoCode cancelled: blocked by hook"],
+      exitCode: 1,
+      raw: [],
+      callback: {
+        invocationId: "inv-impl-failed",
+        event: "session.post",
+        receivedAt: "2026-06-27T00:00:00.000Z",
+        sessionId: "ses_impl_failed",
+        outcome: "cancelled",
+        error: "blocked by hook"
+      }
+    });
+
+    await expect(
+      mimoImplement({ cwd, task: "Add feature", allowWrite: true })
+    ).rejects.toThrow("MiMoCode implement failed: MiMoCode cancelled: blocked by hook");
+
+    const status = await mimoStatus({ cwd });
+    expect(status.status).toBe("failed");
+    expect(status.summary).toBe("MiMoCode implement failed: MiMoCode cancelled: blocked by hook");
+  });
+
   it("returns empty changedFiles when worktree is clean", async () => {
     const cwd = tempWorkspace();
     mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });

@@ -59,7 +59,33 @@ describe("mimo_resume", () => {
     ).rejects.toThrow("session not found");
   });
 
-  it("passes task and session directly to runAndCapture", async () => {
+  it("throws when direct MiMo run returns a nonzero exit code", async () => {
+    const cwd = tempWorkspace();
+    mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+    mocks.runAndCapture.mockResolvedValue({
+      sessionId: "ses_resume_failed",
+      summary: "Completed.",
+      changedFiles: [],
+      commands: [],
+      errors: ["MiMoCode error: hook failed"],
+      exitCode: 1,
+      raw: [],
+      callback: {
+        invocationId: "inv-resume-failed",
+        event: "session.post",
+        receivedAt: "2026-06-27T00:00:00.000Z",
+        sessionId: "ses_resume_failed",
+        outcome: "error",
+        error: "hook failed"
+      }
+    });
+
+    await expect(
+      mimoResume({ cwd, session: "ses_resume_failed", task: "Continue" })
+    ).rejects.toThrow("MiMoCode resume failed: MiMoCode error: hook failed");
+  });
+
+  it("wraps task in Objective prompt and passes session to runAndCapture", async () => {
     const cwd = tempWorkspace();
     mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
     mocks.runAndCapture.mockResolvedValue({
@@ -73,7 +99,7 @@ describe("mimo_resume", () => {
     });
     await mimoResume({ cwd, session: "ses_r3", task: "Fix the bug" });
     const call = mocks.runAndCapture.mock.calls[0][0];
-    expect(call.message).toBe("Fix the bug");
+    expect(call.message).toContain("Objective:\nFix the bug");
     expect(call.session).toBe("ses_r3");
   });
 });

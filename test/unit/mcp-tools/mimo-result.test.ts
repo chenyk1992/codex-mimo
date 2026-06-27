@@ -48,6 +48,30 @@ describe("mimo_result", () => {
     expect(result.summary).toBe("Second done");
   });
 
+  it("returns callback metadata when recorded", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "compose", workflow: "dev", task: "Run dev", request: {} });
+    updateJob(cwd, job.id, {
+      status: "failed",
+      phase: "failed",
+      summary: "Callback failed.",
+      callback: {
+        invocationId: "compose-dev-1",
+        outcome: "error",
+        sessionId: "ses_1",
+        receivedAt: "2026-06-23T00:00:00.000Z",
+        error: "hook error"
+      }
+    });
+
+    const result = await mimoResult({ cwd, jobId: job.id });
+    expect(result.callback).toMatchObject({
+      invocationId: "compose-dev-1",
+      outcome: "error",
+      error: "hook error"
+    });
+  });
+
   it("throws when no finished jobs exist", async () => {
     const cwd = tempWorkspace();
     await expect(mimoResult({ cwd })).rejects.toThrow("No finished jobs");
