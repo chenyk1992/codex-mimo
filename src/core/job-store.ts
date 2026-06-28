@@ -22,6 +22,7 @@ export interface JobPaths {
   jobFile: string;
   logFile: string;
   eventsFile: string;
+  signalsFile: string;
 }
 
 export interface CreateJobInput {
@@ -52,7 +53,8 @@ export function resolveJobPaths(cwd: string, jobId: string): JobPaths {
   return {
     jobFile: path.join(jobDir, `${jobId}.json`),
     logFile: path.join(jobDir, `${jobId}.log`),
-    eventsFile: path.join(jobDir, `${jobId}.events.jsonl`)
+    eventsFile: path.join(jobDir, `${jobId}.events.jsonl`),
+    signalsFile: path.join(jobDir, `${jobId}.signals.jsonl`)
   };
 }
 
@@ -85,7 +87,8 @@ export function createJobStore(cwd: string, options: JobStoreOptions = {}): {
         changedFiles: [],
         verification: [],
         logFile: paths.logFile,
-        eventsFile: paths.eventsFile
+        eventsFile: paths.eventsFile,
+        signalsFile: paths.signalsFile
       };
 
       writeJobRecord(cwd, record);
@@ -132,7 +135,10 @@ function readJobFile(cwd: string, jobId: string, options: ReadJobOptions = {}): 
     }
     throw new Error(`Malformed job file for job id: ${jobId}`);
   }
-  return parsed;
+  return {
+    ...parsed,
+    signalsFile: parsed.signalsFile ?? paths.signalsFile
+  };
 }
 
 export function updateJob(
@@ -246,6 +252,7 @@ function pruneState(cwd: string, state: JobState, maxJobs: number): JobState {
     fs.rmSync(paths.jobFile, { force: true });
     fs.rmSync(paths.logFile, { force: true });
     fs.rmSync(paths.eventsFile, { force: true });
+    fs.rmSync(paths.signalsFile, { force: true });
   }
   return { jobs: kept.map((job) => job.id) };
 }

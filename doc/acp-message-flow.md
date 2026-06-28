@@ -1,33 +1,43 @@
-# ACP 消息流
+# ACP Message Flow Reference
 
-## 概述
+This document describes the ACP protocol shape that `codex-mimo` could use if a future implementation talks to MiMoCode through `mimo acp`.
 
-ACP（代理通信协议）是客户端与代理之间通过 stdio 传输的 JSON-RPC 协议。
+## Current Status
 
-## 生命周期
+The active implementation in this repository does not call `mimo acp`, and the current source tree does not contain `src/mimo/acp-*` files. Direct tools, foreground Compose, and background Compose call `mimo run --format json` and consume JSONL output plus `session.post` hook callbacks.
 
+Treat this ACP document as a protocol reference for a future or experimental ACP path, not as the currently exercised runtime path.
+
+## Overview
+
+ACP is a JSON-RPC protocol transported over stdio. An ACP implementation would start the MiMoCode ACP process, initialize the protocol, create a session, send prompts, and answer file or terminal requests through a local policy layer.
+
+The current `mimo run --format json` path is the production path for direct commands and Compose execution in this repository. ACP remains a structured lifecycle model for agent-style sessions and terminal/file mediation if that path is reintroduced.
+
+## Lifecycle
+
+```text
+codex-mimo                         MiMoCode ACP process
+  |                                      |
+  |--- initialize --------------------->|
+  |<-- protocolVersion + capabilities --|
+  |                                      |
+  |--- session/new -------------------->|
+  |<-- sessionId -----------------------|
+  |                                      |
+  |--- session/prompt ----------------->|
+  |<-- session/update chunks -----------|
+  |<-- tool or permission requests -----|
+  |--- fs/read_text_file response ----->|
+  |--- fs/write_text_file response ---->|
+  |--- terminal/create response ------->|
+  |<-- session/prompt stop -------------|
+  |                                      |
 ```
-客户端                          代理 (MiMoCode)
-  |                                |
-  |--- initialize ---------------->|
-  |<-- protocolVersion + caps -----|
-  |                                |
-  |--- session/new --------------->|
-  |<-- sessionId ------------------|
-  |                                |
-  |--- session/prompt ------------>|
-  |<-- session/update chunks ------|
-  |<-- tool calls -----------------|
-  |--- fs/read_text_file response->|
-  |--- fs/write_text_file response>|
-  |--- terminal/create response --->|
-  |<-- session/prompt stop --------|
-  |                                |
-```
 
-## 核心方法
+## Core JSON-RPC Methods
 
-### initialize
+### `initialize`
 
 ```json
 {
@@ -49,7 +59,7 @@ ACP（代理通信协议）是客户端与代理之间通过 stdio 传输的 JSO
 }
 ```
 
-### session/new
+### `session/new`
 
 ```json
 {
@@ -63,7 +73,7 @@ ACP（代理通信协议）是客户端与代理之间通过 stdio 传输的 JSO
 }
 ```
 
-### session/prompt
+### `session/prompt`
 
 ```json
 {
@@ -72,25 +82,27 @@ ACP（代理通信协议）是客户端与代理之间通过 stdio 传输的 JSO
   "method": "session/prompt",
   "params": {
     "sessionId": "sess_abc123",
-    "prompt": [{ "type": "text", "text": "修复失败的测试。" }]
+    "prompt": [{ "type": "text", "text": "Fix the failing login test." }]
   }
 }
 ```
 
-## 客户端处理器
+## Potential Client-Side Request Handling
 
-| ACP 方法 | 桥接行为 |
-|------------|-----------------|
-| `session/request_permission` | 评估策略，自动允许安全操作 |
-| `fs/read_text_file` | 规范化路径，验证，返回内容 |
-| `fs/write_text_file` | 规范化路径，验证写入权限，执行写入 |
-| `terminal/create` | 规范化工作目录，验证命令，启动进程 |
-| `terminal/output` | 返回 stdout/stderr 和退出状态 |
-| `terminal/wait_for_exit` | 等待完成（带超时） |
-| `terminal/kill` | 停止进程 |
-| `terminal/release` | 如果正在运行则停止，释放资源 |
+| ACP method | Expected bridge behavior if ACP is reintroduced |
+| --- | --- |
+| `session/request_permission` | Evaluate the local policy and return allow, ask, or deny |
+| `fs/read_text_file` | Normalize the path, enforce read policy, and return file content |
+| `fs/write_text_file` | Normalize the path, enforce write policy, and write the requested content |
+| `terminal/create` | Normalize the working directory, enforce command policy, and start a managed process |
+| `terminal/output` | Return stdout, stderr, and exit state for a managed process |
+| `terminal/wait_for_exit` | Wait for process completion with a timeout |
+| `terminal/kill` | Stop a managed process |
+| `terminal/release` | Stop a running process if needed and release local resources |
 
-## 事件类型
+## Potential Normalized Event Shape
+
+ACP updates should be normalized before they are logged or rendered:
 
 ```typescript
 type CodexMimoEvent =
@@ -101,3 +113,7 @@ type CodexMimoEvent =
   | { type: "terminal"; id: string; output: string; exitCode?: number }
   | { type: "usage"; used: number; size: number };
 ```
+
+## Policy Boundary
+
+If ACP is reintroduced, it should not bypass the bridge policy. File reads, file writes, and terminal commands should be checked by the conservative policy model documented in `doc/policy-guide.md`.

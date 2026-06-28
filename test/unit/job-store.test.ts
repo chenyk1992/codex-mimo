@@ -47,6 +47,7 @@ describe("job store", () => {
 
     expect(job.id.startsWith("compose-")).toBe(true);
     expect(fs.existsSync(paths.jobFile)).toBe(true);
+    expect(job.signalsFile).toBe(paths.signalsFile);
     expect(readJob(cwd, job.id)?.task).toBe(task);
     expect(listJobs(cwd).map((entry) => entry.id)).toEqual([job.id]);
   });
@@ -162,6 +163,7 @@ describe("job store", () => {
     const firstPaths = resolveJobPaths(cwd, first.id);
     fs.writeFileSync(firstPaths.logFile, "first log", "utf-8");
     fs.writeFileSync(firstPaths.eventsFile, "{}\n", "utf-8");
+    fs.writeFileSync(firstPaths.signalsFile, "{}\n", "utf-8");
     updateJob(cwd, first.id, { status: "completed", phase: "done" }, { maxJobs: 2 });
     updateJob(cwd, second.id, { status: "completed", phase: "done" }, { maxJobs: 2 });
     const third = store.create({ kind: "compose", workflow: "dev", task: "Third", request: {} });
@@ -170,6 +172,7 @@ describe("job store", () => {
     expect(fs.existsSync(firstPaths.jobFile)).toBe(false);
     expect(fs.existsSync(firstPaths.logFile)).toBe(false);
     expect(fs.existsSync(firstPaths.eventsFile)).toBe(false);
+    expect(fs.existsSync(firstPaths.signalsFile)).toBe(false);
   });
 });
 

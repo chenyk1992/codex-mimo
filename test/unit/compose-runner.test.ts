@@ -595,6 +595,72 @@ describe("compose runner", () => {
     expect(result.error).toContain("Read-only workflow plan modified files: package.json, smoke.test.js");
   });
 
+  it("marks read-only workflows as failed when MiMoCode advances HEAD", async () => {
+    let headCalls = 0;
+    const deps: any = {
+      createHookCallbackController: async () => ({
+        invocationId: "compose-plan-head",
+        token: "token",
+        endpoint: "http://127.0.0.1:1/mimo-hook",
+        configDir: "hook-dir",
+        callbackFile: "callback.json",
+        env: {},
+        waitForCallback: async () => null,
+        close: async () => undefined
+      }),
+      runMimo: async () => ({
+        stdout: '{"type":"message","text":"I implemented and committed the plan."}\n',
+        stderr: "",
+        exitCode: 0
+      }),
+      captureDiff: async () => ({
+        changedFiles: [],
+        diffStat: "",
+        diff: ""
+      }),
+      captureStatus: async () => ({ short: "", dirty: false }),
+      captureHead: async () => {
+        headCalls += 1;
+        return headCalls === 1
+          ? { oid: "2662087", short: "2662087", subject: "chore: seed vibe demo" }
+          : { oid: "1672c89", short: "1672c89", subject: "feat: add discount code support" };
+      },
+      captureCommitChanges: async () => ({
+        commits: [
+          "7770acb test: add discount code test cases",
+          "1672c89 feat: add discount code support"
+        ],
+        changedFiles: ["src/pricing.js", "test/pricing.test.js"]
+      }),
+      runVerification: async () => [],
+      writeReport: () => undefined,
+      now: () => new Date("2026-06-28T09:20:12.720Z")
+    };
+
+    const result = await runComposeWorkflow(
+      {
+        cwd: "E:/project/app",
+        workflow: "plan",
+        task: "Write a plan without committing",
+        reportDir: "E:/project/app/.codex-mimo/reports"
+      },
+      deps
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.changedFiles).toEqual(["src/pricing.js", "test/pricing.test.js"]);
+    expect((result as any).gitHeadBefore).toMatchObject({ short: "2662087" });
+    expect((result as any).gitHeadAfter).toMatchObject({ short: "1672c89" });
+    expect((result as any).gitCommits).toEqual([
+      "7770acb test: add discount code test cases",
+      "1672c89 feat: add discount code support"
+    ]);
+    expect(result.callbackTimedOut).toBe(true);
+    expect(result.error).toContain("Read-only workflow plan changed HEAD from 2662087 to 1672c89");
+    expect(result.error).toContain("src/pricing.js, test/pricing.test.js");
+    expect(result.error).toContain("MiMoCode exited before codex-mimo received session.post");
+  });
+
   it("includes newly created untracked files in changedFiles for write-allowed workflows", async () => {
     let statusCalls = 0;
     const result = await runComposeWorkflow(

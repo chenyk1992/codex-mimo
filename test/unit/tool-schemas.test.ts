@@ -5,6 +5,9 @@ import {
   FixCiInput,
   ImplementInput,
   JobCancelInput,
+  JobEventsInput,
+  JobWakeInput,
+  JobWaitInput,
   JobListInput,
   JobResultInput,
   JobStatusInput,
@@ -52,6 +55,19 @@ describe("tool schemas", () => {
     expect(JobResultInput.parse({ cwd: "E:/project/app" }).cwd).toBe("E:/project/app");
     expect(JobCancelInput.parse({ cwd: "E:/project/app", jobId: "compose-1" }).jobId).toBe("compose-1");
     expect(JobListInput.parse({ cwd: "E:/project/app", all: true }).all).toBe(true);
+    expect(JobEventsInput.parse({ cwd: "E:/project/app", sinceCursor: 2, minLevel: "warn" })).toMatchObject({
+      sinceCursor: 2,
+      minLevel: "warn"
+    });
+    expect(JobWaitInput.parse({ cwd: "E:/project/app", timeoutMs: 30_000, pollMs: 250 })).toMatchObject({
+      timeoutMs: 30_000,
+      pollMs: 250
+    });
+    expect(JobWakeInput.parse({ cwd: "E:/project/app", sinceCursor: 3, minLevel: "info" })).toMatchObject({
+      sinceCursor: 3,
+      minLevel: "info"
+    });
+    expect(JobWakeInput.parse({ cwd: "E:/project/app" }).minLevel).toBe("info");
   });
 
   it("accepts resume by job input", () => {

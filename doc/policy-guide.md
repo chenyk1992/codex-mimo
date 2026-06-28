@@ -1,63 +1,87 @@
-# 策略指南
+# Policy Guide
 
-## 默认策略
+`src/core/policy.ts` contains a conservative file and command policy engine. It is a reusable core module with unit coverage; the current CLI/MCP path does not include a `core/config.ts` loader or an active `codex-mimo.config.json` merge step.
 
-桥接层强制执行保守的默认策略：
+Use this guide to understand the policy decisions available to callers that wire the module into a MiMoCode mediation path.
 
-### 文件访问
+## Default Policy
 
-| 模式 | 读取 | 写入 |
-|---------|------|-------|
-| `${workspaceRoot}/**` | 允许 | 询问 |
-| `**/.env`、`**/.env.*` | 拒绝 | 拒绝 |
-| `**/id_rsa`、`**/id_ed25519` | 拒绝 | 拒绝 |
-| `**/.npmrc`、`**/.pypirc` | 拒绝 | 拒绝 |
-| 工作区外 | 拒绝 | 拒绝 |
+Create the default policy with:
 
-### 终端命令
+```typescript
+import { defaultPolicy } from "./src/core/policy.js";
 
-| 模式 | 决策 |
-|---------|----------|
-| `git status*`、`git diff*`、`git log*` | 允许 |
-| `npm test*`、`npm run test*`、`npm run lint*`、`npm run typecheck*` | 允许 |
-| `pnpm test*`、`pnpm lint*`、`pnpm typecheck*` | 允许 |
-| `npm install*`、`pnpm install*` | 询问 |
-| `npm run build*`、`pnpm build*` | 询问 |
-| `rm *`、`del *`、`Remove-Item *` | 拒绝 |
-| `git push*`、`git reset*`、`git checkout --*` | 拒绝 |
-| `curl *`、`wget *`、`ssh *`、`scp *` | 拒绝 |
-
-### 网络
-
-默认：拒绝。除非工作流明确启用，否则不允许网络访问。
-
-## 自定义策略
-
-在项目根目录提供 `codex-mimo.config.json` 来覆盖默认值：
-
-```jsonc
-{
-  "workspaceRoot": ".",
-  "fileAccess": {
-    "read": ["${workspaceRoot}/**"],
-    "write": ["${workspaceRoot}/src/**"],
-    "deny": ["**/.env*"]
-  },
-  "terminal": {
-    "allow": ["npm test*"],
-    "ask": ["npm install*"],
-    "deny": ["git push*"]
-  }
-}
+const policy = defaultPolicy(workspaceRoot);
 ```
 
-## 审计日志
+### File Access
 
-每次调用都会将 JSONL 审计日志写入 `.codex-mimo/audit.jsonl`：
+| Target | Read | Write |
+| --- | --- | --- |
+| Inside `workspaceRoot` | allow | ask |
+| Outside `workspaceRoot` | deny | deny |
+| `**/.env`, `**/.env.*` | deny | deny |
+| `**/id_rsa`, `**/id_ed25519` | deny | deny |
+| `**/.npmrc`, `**/.pypirc` | deny | deny |
 
-```json
-{"type":"session_start","workflow":"implement","cwd":"E:/project/app","agent":"build"}
-{"type":"permission","operation":"terminal","command":"npm test","outcome":"allow"}
-{"type":"file_write","path":"E:/project/app/src/login.ts","bytes":940}
-{"type":"session_end","stopReason":"end_turn","changedFiles":["src/login.ts"]}
+`allowedReadGlobs` and `allowedWriteGlobs` can further narrow access. When those lists are present, a path must match the corresponding allow list after passing workspace containment and deny checks.
+
+CI mode or non-interactive mode converts `ask` decisions to `deny`.
+
+### Terminal Commands
+
+| Pattern | Decision |
+| --- | --- |
+| `git status*`, `git diff*`, `git log*` | allow |
+| `npm test*`, `npm run test*`, `npm run lint*`, `npm run typecheck*` | allow |
+| `pnpm test*`, `pnpm lint*`, `pnpm typecheck*` | allow |
+| `npm install*`, `pnpm install*` | ask |
+| `npm run build*`, `pnpm build*` | ask |
+| `rm *`, `del *`, `Remove-Item *` | deny |
+| `git push*`, `git reset*`, `git checkout --*` | deny |
+| `curl *`, `wget *`, `ssh *`, `scp *` | deny |
+| Anything else | ask |
+
+Command matching uses minimatch-style glob matching against the raw command line string.
+
+## CI And Non-Interactive Mode
+
+The policy object supports both `ciMode` and `nonInteractive`:
+
+```typescript
+const policy = {
+  ...defaultPolicy(workspaceRoot),
+  ciMode: true
+};
 ```
+
+In either mode, every `ask` result becomes `deny`, so unattended runs cannot block on approval.
+
+## Audit Logger
+
+`src/core/audit.ts` provides a standalone JSONL audit logger with rotation. Instantiate it directly:
+
+```typescript
+import { AuditLogger } from "./src/core/audit.js";
+
+const audit = new AuditLogger({
+  logDir: ".codex-mimo",
+  maxFileSize: 10 * 1024 * 1024,
+  maxFiles: 5
+});
+
+audit.log({ type: "session_start", workflow: "implement" });
+```
+
+The logger writes `audit.jsonl` and rotates to timestamped `audit.*.jsonl` files when the size limit is exceeded.
+
+The current direct `mimo run --format json` execution path does not automatically mediate every MiMoCode file or terminal operation through this policy/audit layer. Direct runs rely on MiMoCode invocation settings, prompt rules, hook callbacks, and post-run checks.
+
+## Practical Guidance
+
+- Keep policy allow lists narrow when wiring this module into a mediated execution path.
+- Deny secret files even when they live inside the workspace.
+- Keep package installation as `ask` unless a caller has explicit approval handling.
+- Keep destructive git and filesystem operations denied by default.
+- Use Compose verification commands for normal tests instead of broad command permissions.
+- Do not document `codex-mimo.config.json` as active behavior unless a config loader is reintroduced.

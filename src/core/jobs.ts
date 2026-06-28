@@ -29,6 +29,19 @@ export interface JobReportPaths {
   diff?: string;
 }
 
+export interface JobSignalsHint {
+  tool: "mimo_events";
+  waitTool: "mimo_wait";
+  jobId: string;
+  sinceCursor: number;
+}
+
+export interface JobWakeHint {
+  tool: "mimo_wake";
+  jobId: string;
+  sinceCursor: number;
+}
+
 export interface JobCallbackSummary {
   invocationId: string;
   outcome: "completed" | "error" | "cancelled" | "missing";
@@ -60,6 +73,7 @@ export interface JobRecord {
   reportPaths?: JobReportPaths;
   logFile: string;
   eventsFile: string;
+  signalsFile: string;
   error?: string;
   errorCode?: string;
 }
@@ -74,6 +88,8 @@ export interface JobLaunchResult {
     result: "mimo_result";
     cancel: "mimo_cancel";
   };
+  signals: JobSignalsHint;
+  wake: JobWakeHint;
 }
 
 export interface JobStatusResult {
@@ -87,6 +103,8 @@ export interface JobStatusResult {
   changedFiles: string[];
   callback?: JobCallbackSummary;
   progress: string[];
+  signals: JobSignalsHint;
+  wake?: JobWakeHint;
   actions: {
     result?: "mimo_result";
     cancel?: "mimo_cancel";
@@ -104,6 +122,7 @@ export interface JobResult {
   error?: string;
   errorCode?: string;
   reportPaths?: JobReportPaths;
+  signals: JobSignalsHint;
   resumeHint?: {
     tool: "mimo_resume_job";
     jobId: string;

@@ -66,6 +66,41 @@ describe("compose report", () => {
     expect(markdown).toContain("M src/a.ts");
   });
 
+  it("renders git head movement and created commits", () => {
+    const markdown = renderMarkdownReport({
+      id: "run_head",
+      createdAt: "2026-06-28T09:20:12.720Z",
+      workflow: "plan",
+      cwd: "E:/project/app",
+      task: "Plan only",
+      mimoArgs: ["run", "--agent", "compose"],
+      requestedSkills: ["compose:plan"],
+      status: "failed",
+      events: [],
+      changedFiles: ["src/pricing.js", "test/pricing.test.js"],
+      diffStat: "",
+      verification: [],
+      gitHeadBefore: { oid: "2662087", short: "2662087", subject: "chore: seed vibe demo" },
+      gitHeadAfter: { oid: "1672c89", short: "1672c89", subject: "feat: add discount code support" },
+      gitCommits: [
+        "7770acb test: add discount code test cases",
+        "1672c89 feat: add discount code support"
+      ],
+      reportPaths: {
+        json: "report.json",
+        markdown: "report.md",
+        eventsJsonl: "events.jsonl"
+      }
+    } as any);
+
+    expect(markdown).toContain("## Git HEAD");
+    expect(markdown).toContain("Before: `2662087 chore: seed vibe demo`");
+    expect(markdown).toContain("After: `1672c89 feat: add discount code support`");
+    expect(markdown).toContain("## Git Commits Created");
+    expect(markdown).toContain("7770acb test: add discount code test cases");
+    expect(markdown).toContain("1672c89 feat: add discount code support");
+  });
+
   it("renders diff path when present", () => {
     const markdown = renderMarkdownReport({
       id: "run_3",

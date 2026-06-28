@@ -29,7 +29,7 @@ Do NOT use MiMoCode when:
 - The task requires interactive back-and-forth with the user
 - Codex must inspect a small, specific file directly to answer a question
 
-## Available Tools (12)
+## Available Tools (15)
 
 ### `mimo_healthcheck`
 
@@ -127,6 +127,54 @@ Input: { "cwd": "<project-root>", "jobId": "<optional-job-id>" }
 Output: { "jobId": "...", "status": "running|completed|failed|cancelled", "phase": "...", "elapsed": "..." }
 ```
 
+### `mimo_events`
+
+Read compact high-signal events for a background job. Use this for non-blocking incremental reads.
+
+```
+Input: {
+  "cwd": "<project-root>",
+  "jobId": "<optional-job-id>",
+  "sinceCursor": 0,
+  "limit": 20,
+  "minLevel": "debug|info|warn|error"
+}
+Output: { "jobId": "...", "nextCursor": 2, "signals": [{ "kind": "phase_changed|milestone|completed|failed|cancelled|timeout", "summary": "..." }] }
+```
+
+### `mimo_wait`
+
+Wait for new compact high-signal events without Codex-side polling. Prefer this for long background jobs.
+
+```
+Input: {
+  "cwd": "<project-root>",
+  "jobId": "<optional-job-id>",
+  "sinceCursor": 0,
+  "limit": 20,
+  "minLevel": "debug|info|warn|error",
+  "timeoutMs": 1800000,
+  "pollMs": 1000
+}
+Output: { "jobId": "...", "nextCursor": 2, "timedOut": false, "signals": [{ "kind": "phase_changed|milestone|completed|failed|cancelled|timeout", "summary": "..." }] }
+```
+
+### `mimo_wake`
+
+Build a Codex heartbeat prompt and heartbeat creation draft for an active background job. Use this when Codex should not keep one long `mimo_wait` tool call open. For terminal jobs, the tool omits the heartbeat draft and returns a `mimo_result` hint instead.
+
+```
+Input: {
+  "cwd": "<project-root>",
+  "jobId": "<optional-job-id>",
+  "sinceCursor": 0,
+  "minLevel": "debug|info|warn|error",
+  "timeoutMs": 1800000
+}
+Output active: { "kind": "codex_heartbeat", "jobId": "...", "watch": { "tool": "mimo_wait", "arguments": {...} }, "heartbeat": { "tool": "automation_update", "arguments": {...} }, "prompt": "..." }
+Output terminal: { "kind": "codex_heartbeat", "jobId": "...", "result": { "tool": "mimo_result", "arguments": {...} }, "prompt": "..." }
+```
+
 ### `mimo_result`
 
 Return the compact final result for a finished MiMoCode job.
@@ -194,7 +242,7 @@ Input: {
 Output: { "status": "passed|failed|needs_review|timeout", "changedFiles": [...], "reportPaths": {...} }
 ```
 
-**Background jobs:** Set `background: true` for long-running tasks. Returns `jobId` immediately. Use `mimo_status`, `mimo_result`, `mimo_cancel` to manage.
+**Background jobs:** Set `background: true` for long-running tasks. Returns `jobId` immediately. Use `mimo_wait` for long waits, `mimo_wake` to create a Codex heartbeat prompt, `mimo_events` for non-blocking progress reads, `mimo_status` for current state snapshots, `mimo_result` for final output, and `mimo_cancel` to stop active work.
 
 **Verification:** Commands are auto-detected from project type (`python -m pytest` for Python, `cargo test` for Rust, `go test ./...` for Go, `npm test` for Node). Override with `verification` array.
 
@@ -260,7 +308,7 @@ Use this loop for software projects where Codex owns the overall plan and MiMoCo
 - Prefer explicit verification commands in `mimo_compose.verification` so the returned evidence is short and decisive.
 - For long or tool-time-limited runs, set `mimo_compose.timeoutMs` lower than the caller timeout so `codex-mimo` can stop MiMoCode and write a failure report instead of leaving a stray child process.
 - If `status` is `needs_review`, Codex must inspect the report and relevant diff before accepting the work.
-- For tasks > 5 minutes, use `background: true` and poll with `mimo_status` / `mimo_result`.
+- For tasks > 5 minutes, use `background: true`. If Codex can keep one MCP call open, wait with `mimo_wait` using `sinceCursor`; if not, call `mimo_wake` and create a Codex heartbeat only when the response includes `heartbeat.arguments`. If `mimo_wake` returns `result`, call `mimo_result` instead of creating a heartbeat. Call `mimo_result` only after an attention or terminal signal, or when the user asks for the final state. Use `mimo_events` only when a non-blocking read is needed.
 - Default `timeoutMs` is 30 minutes (1,800,000ms). Increase for very large tasks.
 
 ## Recommended Workflow

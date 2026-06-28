@@ -67,6 +67,24 @@ export const JobStatusInput = z.object({
   jobId: z.string().optional()
 });
 
+export const JobEventsInput = z.object({
+  cwd: z.string(),
+  jobId: z.string().optional(),
+  sinceCursor: z.number().int().nonnegative().default(0),
+  limit: z.number().int().positive().max(100).default(20),
+  minLevel: z.enum(["debug", "info", "warn", "error"]).default("debug")
+});
+
+export const JobWaitInput = JobEventsInput.extend({
+  timeoutMs: z.number().int().positive().default(1_800_000),
+  pollMs: z.number().int().positive().max(60_000).default(1_000)
+});
+
+export const JobWakeInput = JobEventsInput.omit({ limit: true, minLevel: true }).extend({
+  minLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
+  timeoutMs: z.number().int().positive().default(1_800_000)
+});
+
 export const JobResultInput = z.object({
   cwd: z.string(),
   jobId: z.string().optional()

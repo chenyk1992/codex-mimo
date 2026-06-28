@@ -180,6 +180,9 @@ export function buildComposePrompt(input: BuildComposePromptInput): string {
     lines.push("- Stop exploring and start writing the plan as soon as you have enough context to identify files and interfaces.");
     lines.push("- Intermediate analysis (code reviews, file surveys) must feed into the plan, not replace it.");
     lines.push("- If you cannot complete the full plan, output a partial plan with clear gaps listed.");
+    lines.push("- Return the plan in your final response only. Do not save plan files, project docs, reports, or notes to disk.");
+    lines.push("- Do not invoke compose:execute, compose:subagent, compose:tdd, compose:verify, compose:report, or any implementation handoff.");
+    lines.push("- Do not run implementation steps or commit, even if the compose:plan skill suggests frequent commits or execution handoff.");
   }
 
   if (workflow.name === "brainstorm") {

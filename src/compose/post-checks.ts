@@ -23,7 +23,7 @@ const SEMANTIC_FAILURE_PATTERNS = [
   /don't see (?:the )?(?:actual )?task description/i,
   /haven't provided (?:an? |the )?(?:actual )?task/i,
   /(?:have not|haven't|did not|didn't) (?:provide|receive|see).*(?:task|objective|description|goal)/i,
-  /(?:missing|without|no).*(?:task|objective|description|goal)/i,
+  /(?:missing|without|no)\s+(?:an?\s+|the\s+|actual\s+|specific\s+|concrete\s+)*(?:task|objective|description|goal)\b/i,
   /only (?:wrote|provided).*objective/i,
   /provided only.*objective/i,
   /no (?:task|objective) provided/i,

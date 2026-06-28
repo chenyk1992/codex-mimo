@@ -2,139 +2,166 @@
 
 ## Project
 
-Codex-MiMo bridge — lets Codex invoke MiMoCode as a specialist coding agent via CLI or MCP.
+Codex-MiMo bridge: lets Codex invoke MiMoCode as a specialist coding agent through a local CLI and Codex MCP tools.
+
+The current implementation uses `mimo run --format json` as the active integration path. Historical ACP notes are kept as protocol reference only; there is no active `src/mimo/acp-*` implementation in this tree.
 
 ## Commands
 
 ```bash
-npm run build        # tsc — required before running CLI or MCP server
-npm test             # vitest run — all unit tests
-npm run lint         # tsc --noEmit — typecheck only
+npm run build              # tsc -p tsconfig.json; required before running CLI or MCP server
+npm test                   # vitest run; all tests
+npm run lint               # tsc -p tsconfig.json --noEmit
+npm run validate:plugin    # validates plugin manifest, MCP config, skill frontmatter, built MCP entrypoint
 ```
 
-No single-test shortcut configured. Filter with: `npm test -- policy.test.ts`
+No dedicated single-test script is configured. Filter through Vitest:
+
+```bash
+npm test -- policy.test.ts
+```
 
 ## Architecture
 
-```
+```text
 src/
-  cli/main.ts           CLI entrypoint (bin: codex-mimo)
-  cli/commands.ts       plan / implement / review wrappers around mimo run
-  codex/mcp-server.ts   MCP server entrypoint (stdio, run via node dist/codex/mcp-server.js)
-  codex/tools.ts        MCP tool handlers (mimo_plan, mimo_implement, mimo_review, ...)
-  codex/tool-schemas.ts Zod schemas for all MCP tool inputs
-  codex/compact.ts      compact report formatter for Codex consumption
-  core/policy.ts        file/command policy engine (minimatch globs)
-  core/config.ts        loads codex-mimo.config.json, merges with defaults
-  core/prompt.ts        planPrompt / implementPrompt / reviewPrompt builders
-  core/paths.ts         path normalization and containment checks
-  core/audit.ts         JSONL audit logger with rotation
-  core/sessions.ts      session persistence (.codex-mimo/sessions.json)
-  core/terminal.ts      subprocess manager for ACP terminal requests
-  core/jobs.ts          shared job types, status/phase enums, compact response types
-  core/job-store.ts     read/write/list/prune job state under .codex-mimo/jobs
-  core/job-log.ts       append timestamped log lines and JSONL event lines
-  core/job-phase.ts     infer job phase from normalized MiMo events
-  core/job-render.ts    render status, result, launch, cancellation, list responses
-  core/job-process.ts   spawn detached workers and terminate process trees
-  core/job-runtime.ts   high-level lifecycle API (start, append, complete, fail)
-  compose/workflow.ts   compose workflow prompt builder + workflow registry
-  compose/workflow-names.ts  canonical workflow name list (11 workflows)
-  compose/runner.ts     compose workflow execution engine
-  compose/events.ts     JSONL event parser for mimo output
-  compose/report.ts     compose report writer (markdown + JSON)
-  compose/verify.ts     verification command runner
-  compose/streaming-runner.ts  streaming MiMo CLI runner with normalized events
-  compose/job-worker.ts worker entrypoint for background Compose jobs
-  git/diff.ts           git diff capture
-  git/status.ts         git status capture
-  mimo/acp-client.ts    JSON-RPC client (line-framed, request/response correlation)
-  mimo/acp-bridge.ts    full ACP lifecycle: init → session/new → prompt, policy enforcement
-  mimo/acp-process.ts   AcpProcess wrapper (execa spawn + write/stop)
-  mimo/acp-types.ts     TypeScript types for ACP JSON-RPC messages
-  mimo/acp-updates.ts   convert ACP session updates to normalized events
-  mimo/run-json.ts      builds args for `mimo run --format json`
-  mimo/mimo-runner.ts   runAndCapture: execa `mimo run` with JSONL parsing
-  mimo/prompt-transport.ts  large/non-ASCII prompt → temp file transport
+  cli/main.ts              CLI entrypoint (bin: codex-mimo)
+  cli/commands.ts          plan / implement / review / fix-ci / resume wrappers around mimo run
+
+  codex/mcp-server.ts      MCP server entrypoint; registers mimo_* tools and self-starts on module load
+  codex/tools.ts           MCP tool handlers and foreground/background job orchestration
+  codex/tool-schemas.ts    Zod schemas for all MCP tool inputs
+  codex/compact.ts         compact Compose report formatter for Codex consumption
+  codex/wake.ts            heartbeat-ready wake hints for long-running jobs
+
+  compose/workflow.ts      canonical Compose workflow registry and prompt builder
+  compose/runner.ts        foreground Compose execution engine
+  compose/job-worker.ts    background Compose worker entrypoint
+  compose/events.ts        JSONL event parser and normalizer for MiMoCode output
+  compose/report.ts        Markdown/JSON/JSONL report writer
+  compose/verify.ts        verification command detection and runner
+  compose/streaming-runner.ts  streaming MiMo CLI runner and process-tree termination
+  compose/post-checks.ts   semantic failure and read-only workflow violation checks
+
+  core/policy.ts           standalone file/command policy engine (minimatch globs)
+  core/prompt.ts           planPrompt / implementPrompt / reviewPrompt builders
+  core/paths.ts            path normalization and containment checks
+  core/audit.ts            standalone JSONL audit logger with rotation
+  core/sessions.ts         session persistence (.codex-mimo/sessions.json)
+  core/terminal.ts         subprocess manager utility
+  core/jobs.ts             shared job types, status/phase enums, response contracts
+  core/job-store.ts        read/write/list/prune job state under .codex-mimo/jobs
+  core/job-log.ts          append timestamped log lines and JSONL event lines
+  core/job-phase.ts        infer job phase from normalized MiMo events
+  core/job-render.ts       render job launch/status/result responses
+  core/job-process.ts      spawn detached workers and terminate process trees
+  core/job-runtime.ts      high-level lifecycle API (start, append, complete, fail, cancel)
+  core/job-signals.ts      cursor-addressed high-signal job events
+
+  git/diff.ts              git status/diff capture
+
+  mimo/run-json.ts         builds args for `mimo run --format json`
+  mimo/mimo-runner.ts      runAndCapture: execa `mimo run` with JSONL parsing and hook callback
+  mimo/prompt-transport.ts large/non-ASCII prompt -> UTF-8 temp file transport
+  mimo/hook-callback.ts    temporary MiMoCode session.post hook config + local HTTP callback server
 ```
 
-Two integration paths:
-- **MVP**: CLI calls `mimo run --format json` via execa (mimo-runner.ts)
-- **ACP**: AcpBridge launches `mimo acp`, speaks JSON-RPC over stdio (acp-*.ts)
+## Active Integration Paths
+
+- **Direct tools / CLI commands** call `mimo run --format json` through `runAndCapture()` in `src/mimo/mimo-runner.ts`.
+- **Foreground Compose** calls `runMimoCliStreaming()` from `src/compose/runner.ts`, writes reports, and returns a compact result for MCP.
+- **Background Compose** creates a persisted job under `.codex-mimo/jobs`, spawns `codex-mimo compose-worker`, streams JSONL into logs/events/signals, then writes the Compose report.
+- **ACP** is not active in the current source tree. `doc/acp-message-flow.md` is a reference for a possible future JSON-RPC path.
 
 ## Key Quirks
 
-- **ESM-only**: `"type": "module"` in package.json. All imports must use `.js` extensions even for `.ts` source files (NodeNext resolution).
-- **execa v9**: Use `type Subprocess` (not `ExecaChildProcess` which doesn't exist in v9).
-- **stdin: "ignore"**: CLI commands that spawn `mimo run` MUST set `stdin: "ignore"` in execa options. Without this, mimo waits for stdin and the process never exits.
-- **mimo run --format json** outputs JSONL (newline-delimited JSON), not a single JSON object.
-- **MCP server self-starts**: `mcp-server.ts` calls `startMcpServer()` at module top level — it's both a library export and a runnable entrypoint.
-- **Prompt format matters**: MiMoCode enters interactive clarification mode unless prompts start with `Objective:` followed by the task. See `core/prompt.ts` — all three prompt builders use this pattern. Never prepend preamble before the objective.
-- **Private types in public return signatures**: TypeScript requires exported function return types to be nameable. If a function returns an interface, that interface must be exported even if no external consumer uses it. Demoting `CompactComposeReport` to private caused a build error.
-- **Large prompt transport**: Prompts >8KB or containing non-ASCII are written to `.codex-mimo/inputs/` as temp files. The message becomes a `@file` reference. See `mimo/prompt-transport.ts`.
+- **ESM-only:** `"type": "module"` in `package.json`. Source imports must use `.js` extensions even when importing `.ts` files under NodeNext resolution.
+- **MCP server self-starts:** `src/codex/mcp-server.ts` calls `startMcpServer()` at module top level. It is both a library export and a runnable entrypoint.
+- **`stdin: "ignore"` for direct runs:** `runAndCapture()` must keep `stdin: "ignore"` when spawning `mimo run`; otherwise MiMoCode can wait on inherited stdin and never exit.
+- **JSONL, not one JSON object:** `mimo run --format json` emits newline-delimited JSON. Direct runs parse lines in `mimo-runner.ts`; Compose runs parse through `compose/events.ts`.
+- **Prompt format matters:** prompts start with `Objective:` and then explicit "execute now" instructions. Do not prepend a preamble before the objective.
+- **Large/non-ASCII prompt transport:** prompts longer than 8 KB or containing non-ASCII are written to `.codex-mimo/inputs/*.md`, and the actual MiMo message points MiMoCode at that UTF-8 file.
+- **Hook callback is part of success detection:** direct and Compose runs create temporary config under `.codex-mimo/runtime-hooks/<invocationId>/` and wait for a `session.post` callback on a local HTTP server. Missing/error/cancelled callbacks can turn an otherwise zero exit into failure.
+- **Private types in public return signatures:** TypeScript declaration output requires exported return types to be nameable. Keep public interfaces such as `CompactComposeReport` exported when exported functions return them.
+- **Verification command runner is intentionally simple:** `compose/verify.ts` splits commands on whitespace and runs them with `execa(file, args)`, not through a shell.
 
 ## Compose Workflows
 
-The `mimo_compose` MCP tool runs orchestrated workflows. 11 workflow names are registered in `compose/workflow-names.ts`:
+The `mimo_compose` MCP tool and `codex-mimo compose` CLI command use the 11 workflow names registered in `src/compose/workflow.ts`:
 
-| Workflow | Purpose |
-|----------|---------|
-| brainstorm | Explore intent and requirements before implementation |
-| plan | Generate implementation plan from spec |
-| dev | Full development cycle (brainstorm → plan → implement → verify) |
-| fix | Bug fix workflow |
-| fix-ci | Fix CI failures |
-| execute-plan | Execute a written plan with review checkpoints |
-| review | Code review |
-| parallel | Run independent tasks concurrently |
-| worktree | Isolated workspace for feature work |
-| merge | Integration and merge guidance |
-| new-skill | Create new MiMoCode skills |
+| Workflow | Writes | Requires | Purpose |
+| --- | --- | --- | --- |
+| `brainstorm` | no | task | Clarify fuzzy requirements |
+| `plan` | no | task | Generate an implementation plan from a clear requirement |
+| `dev` | yes | task | Feature development loop |
+| `fix` | yes | task | Bug fixing loop |
+| `fix-ci` | yes | file | CI failure repair from a log |
+| `execute-plan` | yes | file | Execute an approved plan |
+| `review` | no | none | Review current diff |
+| `parallel` | yes | task | Parallel exploration loop |
+| `worktree` | yes | task | Isolated worktree-oriented workflow |
+| `merge` | yes | task | Finish or merge development work |
+| `new-skill` | yes | task | Create or update a Compose skill |
 
-Each workflow maps to one or more compose skills (defined in `skills/mimocode/SKILL.md`). The compose runner builds prompts via `buildComposePrompt()` in `compose/workflow.ts`.
+The workflow prompt is built by `buildComposePrompt()`. Read-only workflows are checked after the run with git status/diff snapshots; unexpected modifications fail the report.
 
 ## Job Runtime
 
-Long-running Compose workflows can run as background jobs. The job runtime persists state under `.codex-mimo/jobs/` with per-job `.json`, `.log`, and `.events.jsonl` files.
+Long-running Compose workflows can run as background jobs. Job state is persisted under `.codex-mimo/jobs/`:
 
-**MCP tools:**
-- `mimo_compose` with `background: true` → returns `jobId` immediately
-- `mimo_status` → job status, phase, elapsed time, recent progress
-- `mimo_result` → compact final result with report paths and resume hint
-- `mimo_cancel` → marks job cancelled, attempts process-tree termination
-- `mimo_jobs` → list recent jobs for a workspace
-- `mimo_resume_job` → creates child job from parent's MiMo session
+- `<jobId>.json` - job record
+- `<jobId>.log` - compact progress log
+- `<jobId>.events.jsonl` - raw normalized MiMo event lines
+- `<jobId>.signals.jsonl` - cursor-addressed high-signal events
+- `state.json` - most-recent job index
 
-**CLI:** `codex-mimo compose-worker --job-id <id> [--cwd <path>]` runs a background Compose job from a stored request.
+**MCP job tools:**
 
-**Key flow:** tools.ts creates a job record → spawns detached worker via job-process.ts → worker runs streaming MiMo CLI → runtime appends events and infers phase → on completion, writes Compose report and updates job with report paths.
+- `mimo_compose` with `background: true` returns a `jobId` immediately.
+- `mimo_status` returns the current job snapshot and recent progress lines.
+- `mimo_events` returns non-blocking cursor-addressed signals.
+- `mimo_wait` blocks inside the MCP server until new signals arrive, the job ends, or timeout expires.
+- `mimo_wake` builds a heartbeat-ready prompt plus `heartbeat.arguments` for active jobs, or a `mimo_result` hint for terminal jobs.
+- `mimo_result` returns compact final output, report paths, and resume hints when a session ID exists.
+- `mimo_cancel` marks a job cancelled and attempts process-tree termination.
+- `mimo_jobs` lists recent jobs.
+- `mimo_resume_job` creates a child job from a previous job's MiMo session.
 
-## Policy
+**CLI worker:** `codex-mimo compose-worker --job-id <id> [--cwd <path>]` runs a stored background Compose request. Normal users usually start it indirectly through `mimo_compose(background: true)`.
 
-Default policy is conservative: writes outside workspace denied, secret files (.env, keys) denied, destructive commands (rm, git push, git reset) denied. Override via `codex-mimo.config.json` in project root. See `doc/policy-guide.md`.
+## Policy And Audit
 
-CI mode (`--ci` flag or `ci.enabled: true` in config) converts all "ask" decisions to "deny".
+`src/core/policy.ts` exposes a conservative policy engine:
+
+- reads outside the workspace are denied;
+- secret files such as `.env`, private keys, `.npmrc`, and `.pypirc` are denied;
+- workspace writes default to `ask`;
+- CI/non-interactive mode converts `ask` to `deny`;
+- destructive commands such as `rm`, `git push`, and `git reset` are denied.
+
+There is no current `core/config.ts` loader and no active `codex-mimo.config.json` runtime merge in this source tree. Treat policy and audit modules as reusable local primitives unless a caller explicitly wires them in.
 
 ## Testing
 
-- Tests live in `test/unit/`, use vitest with `describe`/`it`/`expect`/`vi`.
-- Imports from source use `.js` extensions: `import { foo } from "../../src/core/policy.js"`
-- ACP client tests mock the write function and inject responses via `client.onData()`.
-- No integration tests yet — the bridge requires MiMoCode CLI installed and authenticated.
-- Test subdirectories mirror source structure: `acp/`, `compose/`, `core/`, `cross-cutting/`, `mcp-tools/`
-- Fixtures live in `test/fixtures/` with `acp/` and `mimo-run/` subdirectories
+- Tests live under `test/` and use Vitest with `describe` / `it` / `expect` / `vi`.
+- Source imports in tests use `.js` extensions, for example `import { defaultPolicy } from "../../src/core/policy.js"`.
+- MCP tool tests live in `test/unit/mcp-tools/`.
+- Compose/job/runtime tests live in `test/unit/compose*.test.ts`, `test/unit/job*.test.ts`, and `test/unit/core/`.
+- Smoke tests that require a local MiMoCode install live in `test/smoke/`.
+- There are no active ACP implementation tests in the current tree.
 
 ## Plugin Structure
 
-- `.codex-plugin/plugin.json` — Codex plugin manifest
-- `.mcp.json` — MCP server config (stdio, points to `dist/codex/mcp-server.js`)
-- `skills/mimocode/SKILL.md` — skill doc for when/how Codex should call MiMoCode
-- `templates/` — MiMoCode project config templates
+- `.codex-plugin/plugin.json` - Codex plugin manifest
+- `.mcp.json` - MCP server config (stdio, points to `dist/codex/mcp-server.js`)
+- `skills/mimocode/SKILL.md` - skill doc for when/how Codex should call MiMoCode
+- `templates/` - MiMoCode project config templates
+- `scripts/validate-plugin.mjs` - local plugin validator
 
 ## Docs
 
-- `doc/policy-guide.md` — policy rules and customization
-- `doc/acp-message-flow.md` — ACP protocol lifecycle
-- `doc/operations-guide.md` — enable/disable/rollback/troubleshooting
-- `doc/compose-workflows.md` — compose workflow documentation
-- `doc/codex-mimo-acp-integration-plan.md` — full implementation plan (authoritative)
+- `README.md` - user-facing setup, CLI, MCP tools, and workflow overview
+- `doc/policy-guide.md` - current policy engine behavior and limitations
+- `doc/operations-guide.md` - enable/disable, long jobs, heartbeat path, troubleshooting
+- `doc/compose-workflows.md` - Compose workflow registry and job contract
+- `doc/acp-message-flow.md` - reference-only ACP protocol sketch, not current runtime

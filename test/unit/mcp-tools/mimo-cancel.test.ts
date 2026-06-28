@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createJobStore, updateJob, readJob } from "../../../src/core/job-store.js";
 import { mimoCancel } from "../../../src/codex/tools.js";
+import { readJobSignals } from "../../../src/core/job-signals.js";
 
 const tempDirs: string[] = [];
 function tempWorkspace(): string {
@@ -28,6 +29,12 @@ describe("mimo_cancel", () => {
     expect(killProcess).toHaveBeenCalledWith(456);
     const updated = readJob(cwd, job.id);
     expect(updated!.status).toBe("cancelled");
+    expect(readJobSignals(updated!.signalsFile).signals.at(-1)).toMatchObject({
+      kind: "cancelled",
+      status: "cancelled",
+      phase: "cancelled",
+      summary: `Cancelled ${job.id}.`
+    });
   });
 
   it("throws when jobId does not exist", async () => {
