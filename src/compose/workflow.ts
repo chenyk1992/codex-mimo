@@ -165,7 +165,8 @@ export function buildComposePrompt(input: BuildComposePromptInput): string {
   lines.push("- Keep changes minimal and focused.");
   lines.push("- Do not commit, push, reset, or delete files.");
   lines.push("- Record actions taken, verification evidence, and remaining risks.");
-  lines.push("- On Windows: use PowerShell-compatible commands. Avoid `2>/dev/null`, `||`, `wc -l`, `grep`. Use `Get-Content | Measure-Object`, `Select-String`, `Test-Path` instead.");
+  lines.push("- On Windows: use PowerShell-compatible commands. Avoid `2>/dev/null`, `||`, `wc -l`, `grep`. Use `Get-Content -Encoding UTF8 | Measure-Object`, `Select-String`, and `Test-Path` instead.");
+  lines.push("- On Windows Python commands: prefer UTF-8 mode (`PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`; in PowerShell set `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'`) so `Path.read_text()` does not default to cp936.");
 
   if (workflow.name === "plan") {
     lines.push("");

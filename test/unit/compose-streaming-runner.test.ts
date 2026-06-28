@@ -72,6 +72,43 @@ describe("streaming MiMo CLI runner", () => {
     expect(result.stderr).toBe("failed\n");
   });
 
+  it("decodes stdout and stderr as UTF-8 for Windows-safe JSONL output", async () => {
+    const sample = "基于 Windows 本地执行器 — 🎬";
+    const stdout = Readable.from([
+      Buffer.from(`${JSON.stringify({ type: "message", text: sample })}\n`, "utf-8")
+    ]);
+    const stderr = Readable.from([
+      Buffer.from(`诊断输出 ${sample}\n`, "utf-8")
+    ]);
+    const stdoutEncoding = vi.spyOn(stdout, "setEncoding");
+    const stderrEncoding = vi.spyOn(stderr, "setEncoding");
+    const seen: string[] = [];
+
+    const result = await runMimoCliStreaming("E:/project/app", ["run"], {
+      spawnProcess: () => {
+        const child = new EventEmitter() as EventEmitter & {
+          stdout: Readable;
+          stderr: Readable;
+          pid: number;
+          kill: () => boolean;
+        };
+        child.pid = 457;
+        child.stdout = stdout;
+        child.stderr = stderr;
+        child.kill = () => true;
+        queueMicrotask(() => child.emit("close", 0));
+        return child;
+      },
+      onLine: (line) => seen.push(line)
+    });
+
+    expect(stdoutEncoding).toHaveBeenCalledWith("utf-8");
+    expect(stderrEncoding).toHaveBeenCalledWith("utf-8");
+    expect(seen).toEqual([JSON.stringify({ type: "message", text: sample })]);
+    expect(result.stdout).toContain(sample);
+    expect(result.stderr).toContain(sample);
+  });
+
   it("passes custom environment to the spawned process", async () => {
     let seenEnv: NodeJS.ProcessEnv | undefined;
 
@@ -86,7 +123,11 @@ describe("streaming MiMo CLI runner", () => {
     });
 
     expect(result.exitCode).toBe(0);
-    expect(seenEnv).toEqual({ CODEX_MIMO_INVOCATION_ID: "inv-stream" });
+    expect(seenEnv).toMatchObject({
+      CODEX_MIMO_INVOCATION_ID: "inv-stream",
+      PYTHONUTF8: "1",
+      PYTHONIOENCODING: "utf-8"
+    });
   });
 
   it("terminates the process tree on timeout", async () => {

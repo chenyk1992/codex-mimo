@@ -1,4 +1,5 @@
 import { execa } from "execa";
+import { withUtf8ProcessEnv } from "../core/encoding.js";
 import { buildMimoRunArgs, type MimoRunOptions, resolveMimoCommand } from "./run-json.js";
 import { preparePromptTransport } from "./prompt-transport.js";
 import { createHookCallbackController, type MimoHookCallbackSummary } from "./hook-callback.js";
@@ -39,7 +40,7 @@ export async function runAndCapture(options: MimoRunOptions & { timeoutMs?: numb
         stderr: "pipe",
         timeout: options.timeoutMs,
         reject: false,
-        env: hook.env
+        env: withUtf8ProcessEnv(hook.env)
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

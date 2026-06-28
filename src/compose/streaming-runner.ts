@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import readline from "node:readline";
 import type { Readable } from "node:stream";
+import { withUtf8ProcessEnv } from "../core/encoding.js";
 import { resolveMimoCommand } from "../mimo/run-json.js";
 
 export type TerminationReason = "process_timeout" | "host_abort" | "user_cancelled";
@@ -38,7 +39,7 @@ function defaultSpawn(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Str
   return spawn(resolveMimoCommand(), args, {
     cwd,
     detached: process.platform !== "win32",
-    env: { ...process.env, ...env },
+    env: withUtf8ProcessEnv(env),
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
     shell: process.platform === "win32"
@@ -111,7 +112,8 @@ export async function runMimoCliStreaming(
   args: string[],
   options: StreamingRunOptions = {}
 ): Promise<StreamingRunResult> {
-  const child = (options.spawnProcess ?? defaultSpawn)(cwd, args, options.env);
+  const childEnv = withUtf8ProcessEnv(options.env);
+  const child = (options.spawnProcess ?? defaultSpawn)(cwd, args, childEnv);
   const stdoutParts: string[] = [];
   const stderrParts: string[] = [];
   let terminationReason: TerminationReason | undefined;
@@ -154,6 +156,7 @@ export async function runMimoCliStreaming(
       return;
     }
 
+    child.stdout.setEncoding("utf-8");
     const reader = readline.createInterface({ input: child.stdout });
     reader.on("line", (line) => {
       stdoutParts.push(`${line}\n`);

@@ -23,7 +23,11 @@ export function preparePromptTransport(
   fs.writeFileSync(file, message, "utf-8");
 
   return {
-    message: `Objective is stored in UTF-8 prompt file: @${file}\nRead that file as the full task input before acting.`,
+    message: [
+      `Objective is stored in UTF-8 prompt file: @${file}`,
+      "Read that file as the full task input before acting.",
+      `On Windows PowerShell, use \`Get-Content -Encoding UTF8 "${file}"\` rather than omitting the encoding flag.`
+    ].join("\n"),
     files: [file],
     cleanupFiles: []
   };

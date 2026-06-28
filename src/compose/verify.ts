@@ -1,6 +1,7 @@
 import { execa } from "execa";
 import fs from "node:fs";
 import path from "node:path";
+import { withUtf8ProcessEnv } from "../core/encoding.js";
 
 export interface VerificationResult {
   command: string;
@@ -42,7 +43,8 @@ export async function runVerificationCommands(
       const [file, ...args] = parts;
       const result = await execa(file, args, {
         cwd,
-        reject: false
+        reject: false,
+        env: withUtf8ProcessEnv()
       });
       results.push({
         command,
