@@ -1,6 +1,8 @@
 # Codex MiMoCode Bridge
 
-A bridge that lets Codex invoke MiMoCode as a specialist coding agent for planning, implementation, and review.
+`codex-mimo` lets Codex invoke MiMoCode as a specialist coding agent for planning, implementation, review, CI repair, and long-running Compose workflows.
+
+The active runtime path is `mimo run --format json`. Direct commands parse MiMoCode JSONL output through `src/mimo/mimo-runner.ts`; Compose commands use a streaming runner and write reports under `.codex-mimo/`.
 
 ## Prerequisites
 
@@ -16,397 +18,215 @@ mimo auth list
 ```bash
 npm install
 npm run build
+npm run validate:plugin
 ```
 
-## CLI Usage (MVP)
+`validate:plugin` checks the plugin manifest, MCP config, skill frontmatter, and built MCP entrypoint. It does not require Python or PyYAML.
+
+## CLI Usage
 
 ```bash
+codex-mimo healthcheck
 codex-mimo plan "Add login rate limiting"
 codex-mimo implement "Fix failing user-session test"
 codex-mimo review
-codex-mimo healthcheck
+codex-mimo fix-ci --file ci.log
+codex-mimo resume --session ses_abc123 "Continue the remaining tests"
+codex-mimo sessions
+codex-mimo compose --workflow dev "Implement login throttling"
+codex-mimo compose --workflow execute-plan --file doc/api-refactor-plan.md
 ```
 
-## Compose Workflow Launcher
+The CLI `compose` command runs in the foreground and writes reports under `.codex-mimo/`. Background jobs, `mimo_wait`, and `mimo_wake` are Codex MCP tool workflows rather than standalone CLI commands.
 
-Use `codex-mimo compose` when you want MiMoCode to run a skill-driven workflow:
+## Compose Workflows
+
+Use `codex-mimo compose` or the `mimo_compose` MCP tool when you want MiMoCode to run a skill-driven workflow:
 
 ```bash
+codex-mimo compose --workflow brainstorm "Explore login throttling requirements"
+codex-mimo compose --workflow plan "Plan login throttling"
 codex-mimo compose --workflow dev "Implement login throttling"
+codex-mimo compose --workflow fix "Fix intermittent session loss"
 codex-mimo compose --workflow fix-ci --file ci.log
-codex-mimo compose --workflow execute-plan --file doc/codex-mimo-acp-integration-plan.md
+codex-mimo compose --workflow execute-plan --file doc/api-refactor-plan.md
 codex-mimo compose --workflow review --since HEAD
 codex-mimo compose --workflow plan --timeout-ms 110000 "Create a validation plan"
 ```
+
+Supported workflows are registered in `src/compose/workflow.ts`: `brainstorm`, `dev`, `fix`, `fix-ci`, `plan`, `execute-plan`, `review`, `parallel`, `worktree`, `merge`, and `new-skill`.
 
 Reports are written to:
 
 ```text
 .codex-mimo/reports/
 .codex-mimo/events/
+.codex-mimo/diffs/
 ```
 
-Each report includes MiMoCode JSON events, changed files, diff stat, verification command results, and review text.
-
-When a caller has its own timeout, pass `--timeout-ms` lower than the outer timeout so `codex-mimo` can stop MiMoCode and write a report instead of leaving a child process running.
+Each report includes MiMoCode events, changed files, diff stat, verification results, callback status, review text when present, and report file paths. If the caller has its own timeout, set `--timeout-ms` or MCP `timeoutMs` lower than that outer timeout so `codex-mimo` can stop MiMoCode and write a report.
 
 ## Codex Plugin Installation
 
-The project is packaged as a Codex plugin. To install:
+The project is packaged as a Codex plugin. To install or refresh a local plugin copy:
 
-1. Build the project: `npm run build`
-2. The plugin is at the project root with:
-   - `.codex-plugin/plugin.json` - plugin manifest
-   - `.mcp.json` - MCP server configuration
-   - `skills/mimocode/SKILL.md` - skill describing when/how to use MiMoCode
+1. Build and validate the project:
 
-The MCP server exposes these tools to Codex:
+   ```bash
+   npm run build
+   npm run validate:plugin
+   ```
+
+2. Confirm the plugin files are present:
+   - `.codex-plugin/plugin.json`
+   - `.mcp.json`
+   - `skills/mimocode/SKILL.md`
+   - `dist/codex/mcp-server.js`
+
+3. Restart Codex or start a new Codex thread after refreshing an installed plugin cache so the host reloads skill and MCP tool metadata.
+
+If an installed plugin cache fails with `ERR_MODULE_NOT_FOUND`, the cache is missing runtime dependencies. Reinstall dependencies in the plugin root or use a bundled plugin build; `dist/` alone is not enough for the current NodeNext build.
+
+## MCP Tools
+
+The MCP server is started by `node dist/codex/mcp-server.js` through `.mcp.json` and exposes:
 
 | Tool | Description |
-|------|-------------|
+| --- | --- |
 | `mimo_healthcheck` | Check MiMoCode installation and auth state |
-| `mimo_plan` | Create implementation plans without editing files |
-| `mimo_implement` | Implement code changes with surgical precision |
-| `mimo_review` | Review current diff for bugs and regressions |
-| `mimo_fix_ci` | Fix CI failures using a log file |
-| `mimo_resume` | Resume a previous MiMoCode session |
-| `mimo_compose` | Run a MiMoCode Compose workflow and return a structured report |
+| `mimo_plan` | Create an implementation plan without editing files |
+| `mimo_implement` | Implement focused code changes; requires `allowWrite: true` |
+| `mimo_review` | Review the current diff for bugs and regressions |
+| `mimo_fix_ci` | Fix CI failures using an attached log file |
+| `mimo_resume` | Resume a previous MiMoCode session directly |
+| `mimo_compose` | Run a Compose workflow, foreground or background |
+| `mimo_status` | Read a current job snapshot |
+| `mimo_events` | Read cursor-addressed high-signal job events without blocking |
+| `mimo_wait` | Wait inside the MCP server for new high-signal job events |
+| `mimo_wake` | Build a Codex heartbeat prompt for a background job |
+| `mimo_result` | Return compact final output for a finished job |
+| `mimo_cancel` | Cancel an active background job |
+| `mimo_jobs` | List recent jobs for a workspace |
+| `mimo_resume_job` | Create a follow-up job from a previous job session |
 
-If the installed plugin cache fails with `ERR_MODULE_NOT_FOUND`, the cache is missing runtime dependencies. Reinstall dependencies in the plugin root or use a bundled plugin build; `dist/` alone is not enough for the current NodeNext build.
+Direct tools run synchronously. Use `mimo_compose` with `background: true` for long-running work.
 
-### Long-Running Jobs
+## Long-Running Jobs
 
-For long Compose workflows, pass `background: true` to receive a `jobId` immediately. Use `mimo_status` for progress, `mimo_result` for final output, and `mimo_cancel` to stop active work. Full artifacts are persisted under `.codex-mimo/`.
+For long Compose workflows, pass `background: true` to `mimo_compose` and receive a `jobId` immediately:
+
+```json
+{
+  "cwd": "/path/to/repo",
+  "workflow": "dev",
+  "task": "Implement login throttling",
+  "background": true,
+  "wait": false,
+  "timeoutMs": 1800000
+}
+```
+
+Job artifacts are stored under `.codex-mimo/jobs/`:
+
+```text
+<jobId>.json
+<jobId>.log
+<jobId>.events.jsonl
+<jobId>.signals.jsonl
+state.json
+```
+
+Use `mimo_wait` when Codex can keep one MCP call open. It polls inside the MCP server and returns compact cursor-addressed signals. Store `nextCursor` and pass it as `sinceCursor` on the next wait.
+
+Use `mimo_wake` when Codex should not hold a long tool call open. For active jobs, it returns a heartbeat-ready prompt plus `heartbeat.arguments`; for terminal jobs, it returns a `mimo_result` hint instead.
+
+Use `mimo_status` for snapshots, `mimo_events` for non-blocking incremental reads, `mimo_result` after terminal signals, and `mimo_cancel` to stop active work.
+
+## Runtime Notes
+
+- `mimo run --format json` emits JSONL, not a single JSON object.
+- Direct runs keep `stdin: "ignore"` so MiMoCode does not wait on inherited stdin.
+- Prompts start with `Objective:`. This avoids MiMoCode treating the call as an empty interactive session.
+- Prompts longer than 8 KB or containing non-ASCII are written to `.codex-mimo/inputs/*.md` and passed as `@file` context.
+- Runs create temporary MiMoCode hook config under `.codex-mimo/runtime-hooks/<invocationId>/` and wait for a `session.post` callback. Missing/error/cancelled callbacks are reflected in result status.
+- The active source tree does not implement ACP. See `doc/acp-message-flow.md` only as a protocol reference.
 
 ## Safety Model
 
-- Writes outside workspace: **denied**
-- Secret file reads (.env, keys): **denied**
-- Destructive commands (rm, git push, git reset): **denied**
-- Test/lint/typecheck commands: **allowed**
-- Package install commands: **ask**
+`src/core/policy.ts` provides a conservative policy engine:
 
-See `doc/policy-guide.md` for the full policy specification.
+- Reads outside the workspace: denied
+- Secret files such as `.env`, `.env.*`, private keys, `.npmrc`, and `.pypirc`: denied
+- Workspace writes: ask by default
+- CI/non-interactive mode: ask decisions become deny
+- Destructive commands such as `rm`, `git push`, and `git reset`: denied
+
+Current CLI/MCP execution primarily relies on MiMoCode invocation prompts, post-run checks, and MiMoCode's own permission behavior. There is no active `codex-mimo.config.json` loader in this source tree.
 
 ## Architecture
 
-```
-Codex -> MCP Server -> CLI Commands -> mimo run/ACP -> MiMoCode
-                                    ^
-                              Policy Layer
-                              Audit Log
+```text
+Codex
+  -> MCP server (src/codex/mcp-server.ts)
+  -> MCP tool handlers (src/codex/tools.ts)
+  -> direct mimo run or Compose runner
+  -> mimo run --format json
+  -> JSONL events + session.post hook callback
+  -> compact result or persisted job/report artifacts
 ```
 
 ## Project Structure
 
-```
+```text
 src/
-  cli/          CLI entry point and commands
-  core/         Policy, paths, audit, terminal management
-  mimo/         ACP client, bridge, process supervisor
-  codex/        MCP server and tool definitions
-templates/      MiMoCode configuration templates
-skills/         Codex skill definitions
-doc/            Documentation
+  cli/       CLI entrypoint and command wrappers
+  codex/     MCP server, tool schemas, compact responses, wake hints
+  compose/   workflow registry, foreground runner, background worker, reports, events
+  core/      policy, audit, prompt, job runtime/store/signals, sessions, terminal helpers
+  git/       git status and diff capture
+  mimo/      MiMo run args, JSONL capture, prompt transport, hook callback
+test/        Vitest unit and smoke tests
+doc/         Operations, policy, Compose workflow, ACP reference docs
+skills/      Codex skill definitions
+templates/   MiMoCode configuration templates
+scripts/     plugin validator
 ```
 
-## Configuration
+## Usage Flow
 
-Copy `templates/mimocode.jsonc` to your project root and customize as needed.
+For a new feature:
 
----
+```text
+1. Use `mimo_compose` with workflow `brainstorm` when requirements are fuzzy.
+2. Use `mimo_plan` or workflow `plan` when you need an implementation plan.
+3. Use workflow `dev` for an end-to-end development loop, or `mimo_implement` for a focused direct change.
+4. Use `mimo_review` or workflow `review` to inspect the diff.
+5. Run the narrowest meaningful verification, such as `npm test` or `npm run lint`.
+```
 
-## Usage Manual: Vibe Coding with Codex + MiMoCode
-
-本手册以程序员接到新需求到编码测试的完整流程为示范，展示如何在 Codex 中使用 codex-mimo 进行 vibe coding。
-
-### 前置条件
-
-确保 MiMoCode 已安装并认证：
+For CI repair:
 
 ```bash
-mimo --version      # 确认版本 >= 0.1.3
-mimo auth list      # 确认已登录
-```
-
-在 Codex 中确认插件可用：
-
-```
-帮我检查 MiMoCode 是否可用
-```
-
-Codex 会调用 `mimo_healthcheck`，返回 `{ "ok": true, "version": "0.1.3" }` 即表示就绪。
-
----
-
-### 场景一：接到新需求 — 从分析到实现
-
-假设你接到一个需求：**"给用户登录接口添加速率限制，防止暴力破解"**
-
-#### 第 1 步：需求澄清（Brainstorm）
-
-如果需求比较模糊，先用 `brainstorm` 工作流澄清：
-
-```
-我需要给登录接口加速率限制，帮我分析一下需求和实现方向
-```
-
-Codex 会调用 `mimo_compose(workflow: "brainstorm", task: "...")`，MiMoCode 会：
-- 分析项目现有的认证模块结构
-- 提出关键问题（用什么算法？限制粒度？存储方式？）
-- 给出初步建议
-
-#### 第 2 步：生成实施计划（Plan）
-
-需求明确后，生成实施计划：
-
-```
-根据以下需求生成实施计划：
-- 登录接口每分钟最多 5 次尝试
-- 基于 IP 地址限流
-- 超限返回 429 状态码
-- 需要单元测试覆盖
-```
-
-Codex 会调用 `mimo_plan` 或 `mimo_compose(workflow: "plan")`，返回：
-- 涉及的文件列表
-- 实施步骤
-- 风险点
-- 验证命令
-
-计划会写入 `.codex-mimo/reports/` 目录。
-
-#### 第 3 步：执行实现（Implement / Dev）
-
-**方式 A：使用 Compose dev 工作流（推荐）**
-
-对于完整的功能开发，使用 `dev` 工作流，它会自动执行 brainstorm → plan → tdd → verify → review 全流程：
-
-```
-按照计划实现登录速率限制功能：
-- 使用 sliding window 算法
-- 基于 IP 地址限流
-- 超限返回 429
-- 包含单元测试
-```
-
-Codex 会调用 `mimo_compose(workflow: "dev", task: "...")`。
-
-**方式 B：使用 implement 直接实现（适合小改动）**
-
-如果改动范围小且明确，可以直接实现：
-
-```
-在 src/middleware/ 下添加 rate-limit.ts，实现登录速率限制中间件
-```
-
-Codex 会调用 `mimo_implement(task: "...", allowWrite: true)`。
-
-#### 第 4 步：查看结果
-
-实现完成后，Codex 会展示：
-- **变更文件列表** — MiMoCode 修改了哪些文件
-- **验证结果** — 测试是否通过
-- **摘要** — 做了什么、还剩什么风险
-
-如果状态是 `needs_review`，说明需要人工审查。
-
-#### 第 5 步：代码审查（Review）
-
-对变更进行审查：
-
-```
-帮我 review 一下刚才的改动
-```
-
-Codex 会调用 `mimo_review` 或 `mimo_compose(workflow: "review")`，返回：
-- 正确性问题
-- 安全隐患
-- 缺失的测试覆盖
-- 建议改进
-
-#### 第 6 步：提交前验证
-
-在 Codex 中运行验证：
-
-```
-运行测试和类型检查，确认改动没有引入问题
-```
-
-Codex 会执行 `npm test` 和 `npm run lint`（或项目对应的验证命令）。
-
----
-
-### 场景二：修复 Bug
-
-#### 简单 Bug
-
-```
-src/auth/login.ts 第 42 行的密码比较没有做 timing-safe 处理，有时间攻击风险，帮我修复
-```
-
-Codex 调用 `mimo_implement` 直接修复。
-
-#### 复杂 Bug（需要调试）
-
-```
-用户报告登录后偶尔会话丢失，帮我排查 src/session/ 下的会话管理逻辑
-```
-
-使用 `fix` 工作流：
-
-```
-帮我排查并修复会话丢失的问题，现象是登录后偶尔 401
-```
-
-Codex 调用 `mimo_compose(workflow: "fix", task: "...")`，MiMoCode 会按 debug → tdd → verify → feedback 流程执行。
-
----
-
-### 场景三：CI 失败修复
-
-CI 挂了？把日志喂给 MiMoCode：
-
-```
-CI 挂了，日志在 ci.log，帮我修复
-```
-
-Codex 调用 `mimo_fix_ci(file: "ci.log")` 或 `mimo_compose(workflow: "fix-ci", file: "ci.log")`。
-
-也可以直接在 Codex 中操作：
-
-```
-把 CI 失败日志保存到 ci.log，然后用 MiMoCode 修复
-```
-
----
-
-### 场景四：长任务 — 后台执行
-
-预计超过 5 分钟的任务，使用后台模式：
-
-```
-帮我重构 src/api/ 下所有控制器，统一错误处理方式，这个改动比较大，后台跑吧
-```
-
-Codex 调用 `mimo_compose(workflow: "dev", task: "...", background: true)`，立即返回 `jobId`。
-
-查看进度：
-
-```
-MiMoCode 任务进度怎么样了
-```
-
-Codex 调用 `mimo_status(jobId: "...")`，返回当前阶段、耗时、最近日志。
-
-获取结果：
-
-```
-MiMoCode 任务完成了吗，给我结果
-```
-
-Codex 调用 `mimo_result(jobId: "...")`，返回最终状态、变更文件、报告路径。
-
-取消任务：
-
-```
-取消那个重构任务
-```
-
-Codex 调用 `mimo_cancel(jobId: "...")`。
-
----
-
-### 场景五：继续未完成的工作
-
-如果之前的 MiMoCode 任务超时或中断了，可以恢复：
-
-```
-上次的实现没跑完，帮我继续，session ID 是 ses_xxx
-```
-
-Codex 调用 `mimo_resume(session: "ses_xxx", task: "继续上次的任务")`。
-
-也可以从 job 维度恢复：
-
-```
-继续之前的 job 2026-06-27T10-00-00-compose-dev，把剩余的测试补完
-```
-
-Codex 调用 `mimo_resume_job(jobId: "...", task: "补完剩余测试")`。
-
----
-
-### 场景六：执行已有的实施计划
-
-如果已经有一份写好的计划文档：
-
-```
-按照 doc/api-refactor-plan.md 里的计划执行重构
-```
-
-Codex 调用 `mimo_compose(workflow: "execute-plan", file: "doc/api-refactor-plan.md")`。
-
----
-
-### 完整 Vibe Coding 流程总结
-
-```
-接到需求
-  │
-  ├─ 需求清晰？ ──否──→ mimo_compose(workflow: "brainstorm")
-  │                          │
-  │                          ↓
-  │                     澄清需求
-  │
-  ├─ 需要计划？ ──是──→ mimo_plan / mimo_compose(workflow: "plan")
-  │                          │
-  │                          ↓
-  │                     生成实施计划
-  │
-  ↓
-实现
-  │
-  ├─ 完整功能 ──→ mimo_compose(workflow: "dev")
-  ├─ 小改动   ──→ mimo_implement(allowWrite: true)
-  ├─ Bug 修复 ──→ mimo_compose(workflow: "fix")
-  ├─ CI 修复  ──→ mimo_fix_ci(file: "ci.log")
-  │
-  ↓
-验证
-  │
-  ├─ 运行测试 ──→ npm test / 项目验证命令
-  ├─ 代码审查 ──→ mimo_review / mimo_compose(workflow: "review")
-  │
-  ↓
-完成
-  │
-  └─ Codex 汇总结果，报告给用户
-```
-
-### CLI 等效命令
-
-以上所有操作也可以通过命令行直接执行：
-
-```bash
-# 需求分析
-codex-mimo compose --workflow brainstorm "分析登录速率限制需求"
-
-# 生成计划
-codex-mimo plan "实现登录速率限制，每分钟 5 次，基于 IP"
-
-# 完整开发
-codex-mimo compose --workflow dev "实现登录速率限制功能"
-
-# 直接实现
-codex-mimo implement "在 src/middleware/ 添加速率限制中间件"
-
-# 代码审查
-codex-mimo review
-
-# CI 修复
 codex-mimo fix-ci --file ci.log
-
-# 后台执行
-codex-mimo compose --workflow dev --timeout-ms 600000 "重构 API 控制器"
+codex-mimo compose --workflow fix-ci --file ci.log
 ```
+
+For resuming work:
+
+```bash
+codex-mimo sessions
+codex-mimo resume --session ses_abc123 "Continue from the previous run"
+```
+
+For background MCP work, use `mimo_resume_job` when a previous job has a session ID, or use the `directResumeHint` returned by `mimo_result` with `mimo_resume`.
+
+## Development
+
+```bash
+npm run build
+npm run lint
+npm test
+npm run validate:plugin
+```
+
+Source is ESM-only. Keep `.js` extensions in TypeScript imports.

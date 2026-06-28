@@ -3,7 +3,7 @@ import path from "node:path";
 import type { NormalizedMimoEvent } from "./events.js";
 import type { ComposeWorkflowName } from "./workflow.js";
 import type { VerificationResult } from "./verify.js";
-import type { GitStatusSnapshot } from "../git/diff.js";
+import type { GitHeadSnapshot, GitStatusSnapshot } from "../git/diff.js";
 import type { MimoHookCallbackSummary } from "../mimo/hook-callback.js";
 import type { TerminationReason } from "./streaming-runner.js";
 
@@ -26,6 +26,9 @@ export interface ComposeReport {
   callbackTimedOut?: boolean;
   gitStatusBefore?: GitStatusSnapshot;
   gitStatusAfter?: GitStatusSnapshot;
+  gitHeadBefore?: GitHeadSnapshot;
+  gitHeadAfter?: GitHeadSnapshot;
+  gitCommits?: string[];
   verification: VerificationResult[];
   reviewText?: string;
   planText?: string;
@@ -92,6 +95,25 @@ export function renderMarkdownReport(report: ComposeReport): string {
       "```text",
       report.gitStatusAfter.short || "(clean)",
       "```",
+      ""
+    );
+  }
+
+  if (report.gitHeadBefore || report.gitHeadAfter) {
+    lines.push(
+      "## Git HEAD",
+      "",
+      `Before: \`${formatGitHead(report.gitHeadBefore)}\``,
+      `After: \`${formatGitHead(report.gitHeadAfter)}\``,
+      ""
+    );
+  }
+
+  if (report.gitCommits && report.gitCommits.length > 0) {
+    lines.push(
+      "## Git Commits Created",
+      "",
+      report.gitCommits.map((commit) => `- \`${commit}\``).join("\n"),
       ""
     );
   }
@@ -190,6 +212,11 @@ export function renderMarkdownReport(report: ComposeReport): string {
   );
 
   return lines.join("\n");
+}
+
+function formatGitHead(head?: GitHeadSnapshot): string {
+  if (!head) return "unknown";
+  return [head.short, head.subject].filter(Boolean).join(" ");
 }
 
 export function writeComposeReport(report: ComposeReport): void {

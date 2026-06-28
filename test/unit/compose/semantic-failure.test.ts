@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { detectSemanticFailure } from "../../../src/compose/post-checks.js";
 import { runComposeWorkflow } from "../../../src/compose/runner.js";
 
 const completedHook = {
@@ -24,6 +25,10 @@ function makeMimoStdout(text: string): string {
   return JSON.stringify({ type: "message", text }) + "\n";
 }
 
+function makeMimoMessages(texts: string[]): string {
+  return texts.map((text) => JSON.stringify({ type: "message", text })).join("\n") + "\n";
+}
+
 const baseDeps = (stdout: string) => ({
   ...completedHook,
   runMimo: async () => ({
@@ -46,6 +51,25 @@ const baseDeps = (stdout: string) => ({
 });
 
 describe("semantic failure detection", () => {
+  it("does not treat clear requirements with no ambiguity and creating tasks as missing task", () => {
+    const stdout = makeMimoMessages([
+      "Using compose:brainstorm to explore requirements before implementation.",
+      "Exploring project context to understand the existing codebase.",
+      "Project understood: a simple pricing module with `calculateOrderTotal`. Requirements are clear — no ambiguity. Creating tasks and proceeding directly to planning.",
+      "Requirements are fully specified with no ambiguity. Skipping design questions and moving to compose:plan."
+    ]);
+
+    expect(detectSemanticFailure(stdout)).toBeUndefined();
+  });
+
+  it("still detects messages that say the actual task is missing", () => {
+    const stdout = makeMimoMessages([
+      "I don't see the actual task description. Please share your task."
+    ]);
+
+    expect(detectSemanticFailure(stdout)).toBe("MiMoCode did not receive or accept the task objective.");
+  });
+
   it("detects 'What would you like me to help?' as failure", async () => {
     const result = await runComposeWorkflow(
       {

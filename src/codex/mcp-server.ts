@@ -10,6 +10,9 @@ import {
   mimoResume,
   mimoReview,
   mimoStatus,
+  mimoEvents,
+  mimoWait,
+  mimoWake,
   mimoResult,
   mimoCancel,
   mimoJobs,
@@ -26,6 +29,9 @@ export const MIMO_TOOL_NAMES = [
   "mimo_resume",
   "mimo_compose",
   "mimo_status",
+  "mimo_events",
+  "mimo_wait",
+  "mimo_wake",
   "mimo_result",
   "mimo_cancel",
   "mimo_jobs",
@@ -162,6 +168,56 @@ export function createMcpServer(): McpServer {
     },
     async (args) => {
       const result = await mimoStatus(args);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    }
+  );
+
+  server.tool(
+    "mimo_events",
+    "Return incremental high-signal events for a MiMoCode job.",
+    {
+      cwd: z.string().describe("Project root directory"),
+      jobId: z.string().optional().describe("Job ID (defaults to most recent)"),
+      sinceCursor: z.number().int().nonnegative().default(0).describe("Only return signals after this cursor"),
+      limit: z.number().int().positive().max(100).default(20).describe("Maximum number of signals to return"),
+      minLevel: z.enum(["debug", "info", "warn", "error"]).default("debug").describe("Minimum signal level")
+    },
+    async (args) => {
+      const result = await mimoEvents(args);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    }
+  );
+
+  server.tool(
+    "mimo_wait",
+    "Wait for new high-signal events from a MiMoCode job without Codex-side polling.",
+    {
+      cwd: z.string().describe("Project root directory"),
+      jobId: z.string().optional().describe("Job ID (defaults to most recent)"),
+      sinceCursor: z.number().int().nonnegative().default(0).describe("Only return signals after this cursor"),
+      limit: z.number().int().positive().max(100).default(20).describe("Maximum number of signals to return"),
+      minLevel: z.enum(["debug", "info", "warn", "error"]).default("debug").describe("Minimum signal level"),
+      timeoutMs: z.number().int().positive().default(1_800_000).describe("Maximum time to wait for new signals"),
+      pollMs: z.number().int().positive().max(60_000).default(1_000).describe("Internal signal check interval")
+    },
+    async (args) => {
+      const result = await mimoWait(args);
+      return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    }
+  );
+
+  server.tool(
+    "mimo_wake",
+    "Build a Codex heartbeat wake prompt for a MiMoCode background job.",
+    {
+      cwd: z.string().describe("Project root directory"),
+      jobId: z.string().optional().describe("Job ID (defaults to most recent)"),
+      sinceCursor: z.number().int().nonnegative().default(0).describe("Only return signals after this cursor"),
+      minLevel: z.enum(["debug", "info", "warn", "error"]).default("debug").describe("Minimum signal level"),
+      timeoutMs: z.number().int().positive().default(1_800_000).describe("Maximum time each heartbeat should wait for new signals")
+    },
+    async (args) => {
+      const result = await mimoWake(args);
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
     }
   );

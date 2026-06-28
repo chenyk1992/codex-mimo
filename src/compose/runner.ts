@@ -1,7 +1,16 @@
 import path from "node:path";
 import fs from "node:fs";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
-import { captureGitDiff, type GitDiffSnapshot, captureGitStatus, type GitStatusSnapshot } from "../git/diff.js";
+import {
+  captureGitCommitChanges,
+  captureGitDiff,
+  type GitCommitChangeSnapshot,
+  type GitDiffSnapshot,
+  captureGitHead,
+  type GitHeadSnapshot,
+  captureGitStatus,
+  type GitStatusSnapshot
+} from "../git/diff.js";
 import { extractSessionIdFromEvents, parseMimoJsonLines } from "./events.js";
 import { writeComposeReport, type ComposeReport } from "./report.js";
 import { runMimoCliStreaming } from "./streaming-runner.js";
@@ -51,6 +60,8 @@ interface ComposeRunnerDeps {
   runMimo?: (cwd: string, args: string[], options?: { timeoutMs?: number; signal?: AbortSignal; env?: NodeJS.ProcessEnv }) => Promise<ComposeProcessResult>;
   captureDiff?: (cwd: string, base?: string) => Promise<GitDiffSnapshot>;
   captureStatus?: (cwd: string) => Promise<GitStatusSnapshot>;
+  captureHead?: (cwd: string) => Promise<GitHeadSnapshot>;
+  captureCommitChanges?: (cwd: string, before?: GitHeadSnapshot, after?: GitHeadSnapshot) => Promise<GitCommitChangeSnapshot>;
   runVerification?: (cwd: string, commands: string[]) => Promise<VerificationResult[]>;
   writeReport?: (report: ComposeReport) => void;
   createHookCallbackController?: typeof createHookCallbackController;
@@ -95,12 +106,19 @@ export async function runComposeWorkflow(
   const diffsDir = path.join(input.cwd, ".codex-mimo", "diffs");
   const writeReport = deps.writeReport ?? writeComposeReport;
   const captureStatus = deps.captureStatus ?? captureGitStatus;
+  const captureHead = deps.captureHead ?? captureGitHead;
 
   let gitStatusBefore: GitStatusSnapshot | undefined;
   try {
     gitStatusBefore = await captureStatus(input.cwd);
   } catch {
     // Git status capture is best-effort
+  }
+  let gitHeadBefore: GitHeadSnapshot | undefined;
+  try {
+    gitHeadBefore = await captureHead(input.cwd);
+  } catch {
+    // Git HEAD capture is best-effort
   }
 
   if (input.dryRun) {
@@ -117,7 +135,8 @@ export async function runComposeWorkflow(
       eventsDir,
       diffsDir,
       status: "needs_review",
-      gitStatusBefore
+      gitStatusBefore,
+      gitHeadBefore
     });
     writeReport(report);
     return report;
@@ -125,6 +144,7 @@ export async function runComposeWorkflow(
 
   const runMimo = deps.runMimo ?? defaultRunMimo;
   const captureDiff = deps.captureDiff ?? captureGitDiff;
+  const captureCommitChanges = deps.captureCommitChanges ?? captureGitCommitChanges;
   const runVerification = deps.runVerification ?? runVerificationCommands;
 
   let mimoResult: ComposeProcessResult;
@@ -156,6 +176,7 @@ export async function runComposeWorkflow(
       diffsDir,
       status: "failed",
       gitStatusBefore,
+      gitHeadBefore,
       callback,
       callbackTimedOut,
       error: `MiMoCode execution failed: ${errorMessage}`
@@ -185,6 +206,7 @@ export async function runComposeWorkflow(
       diffsDir,
       status: "failed",
       gitStatusBefore,
+      gitHeadBefore,
       callback,
       callbackTimedOut,
       error: callbackError ?? `Git diff capture failed: ${errorMessage}`
@@ -199,6 +221,18 @@ export async function runComposeWorkflow(
   } catch {
     // Git status capture is best-effort
   }
+  let gitHeadAfter: GitHeadSnapshot | undefined;
+  try {
+    gitHeadAfter = await captureHead(input.cwd);
+  } catch {
+    // Git HEAD capture is best-effort
+  }
+  let gitCommitChanges: GitCommitChangeSnapshot = { commits: [], changedFiles: [] };
+  try {
+    gitCommitChanges = await captureCommitChanges(input.cwd, gitHeadBefore, gitHeadAfter);
+  } catch {
+    // Commit range capture is best-effort once HEAD movement is known.
+  }
 
   const readOnlyViolationFiles = detectReadOnlyViolationFiles(
     workflow.writesAllowed,
@@ -206,8 +240,11 @@ export async function runComposeWorkflow(
     gitStatusBefore,
     gitStatusAfter
   );
-  if (readOnlyViolationFiles.length > 0) {
-    const violationDiff = buildReadOnlyReportDiff(diff, readOnlyViolationFiles);
+  const readOnlyChangedFiles = workflow.writesAllowed
+    ? []
+    : mergeUnique(readOnlyViolationFiles, gitCommitChanges.changedFiles);
+  if (!workflow.writesAllowed && (readOnlyChangedFiles.length > 0 || gitHeadChanged(gitHeadBefore, gitHeadAfter))) {
+    const violationDiff = buildReadOnlyReportDiff(diff, readOnlyChangedFiles);
     const report = buildComposeReportFromRun({
       id,
       createdAt,
@@ -223,20 +260,25 @@ export async function runComposeWorkflow(
       status: "failed",
       gitStatusBefore,
       gitStatusAfter,
+      gitHeadBefore,
+      gitHeadAfter,
+      gitCommits: gitCommitChanges.commits,
       callback,
       callbackTimedOut,
-      error: callbackError ?? `Read-only workflow ${workflow.name} modified files: ${readOnlyViolationFiles.join(", ")}`
+      error: readOnlyViolationError(workflow.name, readOnlyChangedFiles, gitHeadBefore, gitHeadAfter, callbackError)
     });
     writeReport(report);
     return report;
   }
 
   let reportDiff = workflow.writesAllowed ? diff : buildReadOnlyReportDiff(diff, readOnlyViolationFiles);
+  if (workflow.writesAllowed && gitCommitChanges.changedFiles.length > 0) {
+    reportDiff = { ...reportDiff, changedFiles: mergeUnique(reportDiff.changedFiles, gitCommitChanges.changedFiles) };
+  }
   if (workflow.writesAllowed && gitStatusBefore && gitStatusAfter) {
     const statusNewFiles = detectNewFilesFromStatus(gitStatusBefore, gitStatusAfter);
     if (statusNewFiles.length > 0) {
-      const merged = [...new Set([...reportDiff.changedFiles, ...statusNewFiles])];
-      reportDiff = { ...reportDiff, changedFiles: merged };
+      reportDiff = { ...reportDiff, changedFiles: mergeUnique(reportDiff.changedFiles, statusNewFiles) };
     }
   }
   const verificationCommands = normalizeVerificationCommands(input.verification, workflow.defaultVerification, input.cwd);
@@ -260,6 +302,9 @@ export async function runComposeWorkflow(
       status: "failed",
       gitStatusBefore,
       gitStatusAfter,
+      gitHeadBefore,
+      gitHeadAfter,
+      gitCommits: gitCommitChanges.commits,
       callback,
       callbackTimedOut,
       error: callbackError ?? `Verification execution failed: ${errorMessage}`
@@ -285,6 +330,9 @@ export async function runComposeWorkflow(
       status: "failed",
       gitStatusBefore,
       gitStatusAfter,
+      gitHeadBefore,
+      gitHeadAfter,
+      gitCommits: gitCommitChanges.commits,
       callback,
       callbackTimedOut,
       error: callbackError ?? semanticFailure
@@ -310,6 +358,9 @@ export async function runComposeWorkflow(
     terminationReason: mimoResult.terminationReason,
     gitStatusBefore,
     gitStatusAfter,
+    gitHeadBefore,
+    gitHeadAfter,
+    gitCommits: gitCommitChanges.commits,
     callback,
     callbackTimedOut,
     error: status === "timeout" ? timeoutError(mimoResult.terminationReason) : callbackError
@@ -368,6 +419,38 @@ function callbackFailureMessage(callback: MimoHookCallbackSummary | null, callba
   return undefined;
 }
 
+function readOnlyViolationError(
+  workflowName: string,
+  files: string[],
+  before?: GitHeadSnapshot,
+  after?: GitHeadSnapshot,
+  callbackError?: string
+): string {
+  const parts: string[] = [];
+  if (gitHeadChanged(before, after)) {
+    parts.push(`Read-only workflow ${workflowName} changed HEAD from ${formatHeadShort(before)} to ${formatHeadShort(after)}.`);
+  }
+  if (files.length > 0) {
+    parts.push(`Read-only workflow ${workflowName} modified files: ${files.join(", ")}`);
+  }
+  if (callbackError) {
+    parts.push(callbackError);
+  }
+  return parts.join(" Also: ");
+}
+
+function gitHeadChanged(before?: GitHeadSnapshot, after?: GitHeadSnapshot): boolean {
+  return Boolean(before && after && before.oid !== after.oid);
+}
+
+function formatHeadShort(head?: GitHeadSnapshot): string {
+  return head?.short || "unknown";
+}
+
+function mergeUnique(...groups: string[][]): string[] {
+  return [...new Set(groups.flat())];
+}
+
 export function timeoutError(reason?: TerminationReason): string {
   if (reason === "host_abort") return "MiMoCode was interrupted by the host tool call before completion.";
   if (reason === "user_cancelled") return "MiMoCode was cancelled by the user.";
@@ -394,6 +477,9 @@ export function buildComposeReportFromRun(input: {
   callbackTimedOut?: boolean;
   gitStatusBefore?: GitStatusSnapshot;
   gitStatusAfter?: GitStatusSnapshot;
+  gitHeadBefore?: GitHeadSnapshot;
+  gitHeadAfter?: GitHeadSnapshot;
+  gitCommits?: string[];
   error?: string;
 }): ComposeReport {
   const events = parseMimoJsonLines(input.eventsStdout);
@@ -424,6 +510,9 @@ export function buildComposeReportFromRun(input: {
     callbackTimedOut: input.callbackTimedOut,
     gitStatusBefore: input.gitStatusBefore,
     gitStatusAfter: input.gitStatusAfter,
+    gitHeadBefore: input.gitHeadBefore,
+    gitHeadAfter: input.gitHeadAfter,
+    gitCommits: input.gitCommits,
     verification: input.verification,
     reviewText: extractReviewText(events),
     planText: extractPlanText(events),

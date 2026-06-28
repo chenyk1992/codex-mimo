@@ -24,6 +24,7 @@ vi.mock("../../src/compose/runner.js", () => ({
 import { mimoCompose, mimoReview, mimoStatus, mimoResult } from "../../src/codex/tools.js";
 import { MIMO_TOOL_NAMES } from "../../src/codex/mcp-server.js";
 import { readJob, updateJob } from "../../src/core/job-store.js";
+import { readJobSignals } from "../../src/core/job-signals.js";
 
 function buildComposeReport(overrides: Record<string, unknown> = {}) {
   return {
@@ -161,11 +162,21 @@ describe("codex tool handlers", () => {
     const job = JSON.parse(fs.readFileSync(path.join(cwd, ".codex-mimo", "jobs", jobs[0]), "utf-8"));
     expect(job.status).toBe("failed");
     expect(job.errorCode).toBe("worker_exit");
+    expect(readJobSignals(job.signalsFile).signals.at(-1)).toMatchObject({
+      kind: "failed",
+      level: "error",
+      status: "failed",
+      phase: "failed",
+      summary: "Worker process exited unexpectedly (code=1, signal=null)."
+    });
   });
 
   it("registers all job runtime MCP tools", () => {
     const toolNames = [...MIMO_TOOL_NAMES];
     expect(toolNames).toContain("mimo_status");
+    expect(toolNames).toContain("mimo_events");
+    expect(toolNames).toContain("mimo_wait");
+    expect(toolNames).toContain("mimo_wake");
     expect(toolNames).toContain("mimo_result");
     expect(toolNames).toContain("mimo_cancel");
     expect(toolNames).toContain("mimo_jobs");

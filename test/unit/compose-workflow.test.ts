@@ -98,4 +98,16 @@ describe("compose prompt semantics", () => {
 
     expect(prompt).toContain("This workflow is read-only. Do not modify files.");
   });
+
+  it("tells compose:plan not to save, execute, or commit the plan", () => {
+    const prompt = buildComposePrompt({
+      workflow: getComposeWorkflow("plan"),
+      task: "Plan discount codes."
+    });
+
+    expect(prompt).toContain("Return the plan in your final response only");
+    expect(prompt).toContain("Do not save plan files");
+    expect(prompt).toContain("Do not invoke compose:execute");
+    expect(prompt).toContain("Do not run implementation steps or commit");
+  });
 });

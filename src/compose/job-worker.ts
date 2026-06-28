@@ -1,5 +1,14 @@
 import { buildMimoRunArgs } from "../mimo/run-json.js";
-import { captureGitDiff, type GitDiffSnapshot, captureGitStatus, type GitStatusSnapshot } from "../git/diff.js";
+import {
+  captureGitCommitChanges,
+  captureGitDiff,
+  type GitCommitChangeSnapshot,
+  type GitDiffSnapshot,
+  captureGitHead,
+  type GitHeadSnapshot,
+  captureGitStatus,
+  type GitStatusSnapshot
+} from "../git/diff.js";
 import { parseMimoJsonLines } from "./events.js";
 import { normalizeVerificationCommands, runVerificationCommands, type VerificationResult } from "./verify.js";
 import { buildComposePrompt, getComposeWorkflow, type ComposeWorkflowName } from "./workflow.js";
@@ -42,6 +51,8 @@ interface ComposeWorkerDeps {
   runMimoStreaming?: typeof runMimoCliStreaming;
   captureDiff?: (cwd: string, base?: string) => Promise<GitDiffSnapshot>;
   captureStatus?: (cwd: string) => Promise<GitStatusSnapshot>;
+  captureHead?: (cwd: string) => Promise<GitHeadSnapshot>;
+  captureCommitChanges?: (cwd: string, before?: GitHeadSnapshot, after?: GitHeadSnapshot) => Promise<GitCommitChangeSnapshot>;
   runVerification?: (cwd: string, commands: string[]) => Promise<VerificationResult[]>;
   createHookCallbackController?: typeof createHookCallbackController;
   now?: () => Date;
@@ -89,15 +100,24 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
   const diffsDir = `${input.cwd}/.codex-mimo/diffs`;
   const captureStatus = deps.captureStatus ?? captureGitStatus;
   const captureDiff = deps.captureDiff ?? captureGitDiff;
+  const captureHead = deps.captureHead ?? captureGitHead;
+  const captureCommitChanges = deps.captureCommitChanges ?? captureGitCommitChanges;
   const runVerification = deps.runVerification ?? runVerificationCommands;
+
+  startRuntimeJob(cwd, jobId);
+
   let gitStatusBefore: GitStatusSnapshot | undefined;
   try {
     gitStatusBefore = await captureStatus(input.cwd);
   } catch {
     // Git status capture is best-effort.
   }
-
-  startRuntimeJob(cwd, jobId);
+  let gitHeadBefore: GitHeadSnapshot | undefined;
+  try {
+    gitHeadBefore = await captureHead(input.cwd);
+  } catch {
+    // Git HEAD capture is best-effort.
+  }
 
   let runResult: StreamingRunResult;
   let hook: HookCallbackController | null = null;
@@ -135,6 +155,8 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
 
   let diff: GitDiffSnapshot = { changedFiles: [], diffStat: "", diff: "" };
   let gitStatusAfter: GitStatusSnapshot | undefined;
+  let gitHeadAfter: GitHeadSnapshot | undefined;
+  let gitCommitChanges: GitCommitChangeSnapshot = { commits: [], changedFiles: [] };
   let verification: VerificationResult[] = [];
   const callbackError = jobCallbackFailureMessage(callbackSummary);
   const callbackErrorCode = jobCallbackFailureCode(callbackSummary);
@@ -160,6 +182,18 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
   }
 
   try {
+    gitHeadAfter = await captureHead(input.cwd);
+  } catch {
+    // Git HEAD capture is best-effort.
+  }
+
+  try {
+    gitCommitChanges = await captureCommitChanges(input.cwd, gitHeadBefore, gitHeadAfter);
+  } catch {
+    // Commit range capture is best-effort once HEAD movement is known.
+  }
+
+  try {
     verification = await runVerification(input.cwd, normalizeVerificationCommands(input.verification, workflow.defaultVerification, input.cwd));
   } catch (error) {
     failWithReport({
@@ -175,15 +209,21 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
     gitStatusBefore,
     gitStatusAfter
   );
-  let reportDiff = workflow.writesAllowed ? diff : buildReadOnlyReportDiff(diff, readOnlyViolationFiles);
+  const readOnlyChangedFiles = workflow.writesAllowed
+    ? []
+    : mergeUnique(readOnlyViolationFiles, gitCommitChanges.changedFiles);
+  let reportDiff = workflow.writesAllowed ? diff : buildReadOnlyReportDiff(diff, readOnlyChangedFiles);
+  if (workflow.writesAllowed && gitCommitChanges.changedFiles.length > 0) {
+    reportDiff = { ...reportDiff, changedFiles: mergeUnique(reportDiff.changedFiles, gitCommitChanges.changedFiles) };
+  }
   if (workflow.writesAllowed && gitStatusBefore && gitStatusAfter) {
     const statusNewFiles = detectNewFilesFromStatus(gitStatusBefore, gitStatusAfter);
     if (statusNewFiles.length > 0) {
-      reportDiff = { ...reportDiff, changedFiles: [...new Set([...reportDiff.changedFiles, ...statusNewFiles])] };
+      reportDiff = { ...reportDiff, changedFiles: mergeUnique(reportDiff.changedFiles, statusNewFiles) };
     }
   }
 
-  if (readOnlyViolationFiles.length > 0) {
+  if (!workflow.writesAllowed && (readOnlyChangedFiles.length > 0 || gitHeadChanged(gitHeadBefore, gitHeadAfter))) {
     const report = buildComposeReportFromRun({
       id: jobId,
       createdAt,
@@ -199,15 +239,19 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
       status: "failed",
       gitStatusBefore,
       gitStatusAfter,
+      gitHeadBefore,
+      gitHeadAfter,
+      gitCommits: gitCommitChanges.commits,
       callback: fromJobCallbackSummary(callbackSummary),
       callbackTimedOut: callbackSummary?.outcome === "missing",
-      error: callbackError ?? `Read-only workflow ${workflow.name} modified files: ${readOnlyViolationFiles.join(", ")}`
+      error: readOnlyViolationError(workflow.name, readOnlyChangedFiles, gitHeadBefore, gitHeadAfter, callbackError)
     });
     writeComposeReport(report);
     failRuntimeJob(cwd, jobId, {
       errorCode: callbackErrorCode ?? "read_only_violation",
       error: report.error ?? "Compose post-processing failed.",
       sessionId: report.sessionId ?? input.session ?? null,
+      changedFiles: report.changedFiles,
       reportPaths: jobReportPaths(report),
       callback: callbackSummary
     });
@@ -231,6 +275,9 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
       status: "failed",
       gitStatusBefore,
       gitStatusAfter,
+      gitHeadBefore,
+      gitHeadAfter,
+      gitCommits: gitCommitChanges.commits,
       callback: fromJobCallbackSummary(callbackSummary),
       callbackTimedOut: callbackSummary?.outcome === "missing",
       error: callbackError ?? semanticFailure
@@ -268,6 +315,9 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
     status,
     gitStatusBefore,
     gitStatusAfter,
+    gitHeadBefore,
+    gitHeadAfter,
+    gitCommits: gitCommitChanges.commits,
     callback: fromJobCallbackSummary(callbackSummary),
     callbackTimedOut: callbackSummary?.outcome === "missing",
     error: (status === "timeout" ? timeoutError(runResult.terminationReason) : undefined)
@@ -312,6 +362,9 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
       status: "failed",
       gitStatusBefore,
       gitStatusAfter,
+      gitHeadBefore,
+      gitHeadAfter,
+      gitCommits: gitCommitChanges.commits,
       callback: fromJobCallbackSummary(callbackSummary),
       callbackTimedOut: callbackSummary?.outcome === "missing",
       error: failure.error
@@ -321,6 +374,7 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
       errorCode: failure.errorCode,
       error: report.error ?? failure.error,
       sessionId: report.sessionId ?? input.session ?? null,
+      changedFiles: report.changedFiles,
       reportPaths: jobReportPaths(report),
       callback: callbackSummary
     });
@@ -392,4 +446,34 @@ function missingCallbackError(): string {
   return "MiMoCode exited before codex-mimo received session.post.";
 }
 
+function readOnlyViolationError(
+  workflowName: string,
+  files: string[],
+  before?: GitHeadSnapshot,
+  after?: GitHeadSnapshot,
+  callbackError?: string
+): string {
+  const parts: string[] = [];
+  if (gitHeadChanged(before, after)) {
+    parts.push(`Read-only workflow ${workflowName} changed HEAD from ${formatHeadShort(before)} to ${formatHeadShort(after)}.`);
+  }
+  if (files.length > 0) {
+    parts.push(`Read-only workflow ${workflowName} modified files: ${files.join(", ")}`);
+  }
+  if (callbackError) {
+    parts.push(callbackError);
+  }
+  return parts.join(" Also: ");
+}
 
+function gitHeadChanged(before?: GitHeadSnapshot, after?: GitHeadSnapshot): boolean {
+  return Boolean(before && after && before.oid !== after.oid);
+}
+
+function formatHeadShort(head?: GitHeadSnapshot): string {
+  return head?.short || "unknown";
+}
+
+function mergeUnique(...groups: string[][]): string[] {
+  return [...new Set(groups.flat())];
+}

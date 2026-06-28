@@ -8,6 +8,9 @@ import {
   HealthcheckInput,
   ImplementInput,
   JobCancelInput,
+  JobEventsInput,
+  JobWakeInput,
+  JobWaitInput,
   JobListInput,
   JobResultInput,
   JobStatusInput,
@@ -23,12 +26,15 @@ import { compactComposeReportForCodex } from "./compact.js";
 import type { CompactComposeReport } from "./compact.js";
 import { createJobStore, listJobs, readJob, updateJob } from "../core/job-store.js";
 import { spawnJobWorker, terminateJobProcess } from "../core/job-process.js";
-import { isActiveJobStatus } from "../core/jobs.js";
+import { isActiveJobStatus, type JobRecord } from "../core/jobs.js";
 import { renderJobLaunch, renderJobResult, renderJobStatus } from "../core/job-render.js";
 import { readRecentJobLogLines } from "../core/job-log.js";
+import { readJobSignals } from "../core/job-signals.js";
+import { cancelRuntimeJob, failRuntimeJob } from "../core/job-runtime.js";
 import { SessionStore } from "../core/sessions.js";
 import { resolveMimoCommand } from "../mimo/run-json.js";
 import { detectDirectSemanticFailure } from "../compose/post-checks.js";
+import { buildCodexWakeHint } from "./wake.js";
 
 export async function mimoHealthcheck(input: unknown) {
   const parsed = HealthcheckInput.parse(input);
@@ -264,17 +270,7 @@ export async function mimoCompose(
     const spawnFn = deps.spawnJobWorker ?? spawnJobWorker;
     const pid = spawnFn(parsed.cwd, "compose", job.id, {
       onExit: (code, signal) => {
-        const current = readJob(parsed.cwd, job.id);
-        if (current && isActiveJobStatus(current.status)) {
-          updateJob(parsed.cwd, job.id, {
-            status: "failed",
-            phase: "failed",
-            pid: null,
-            completedAt: new Date().toISOString(),
-            errorCode: "worker_exit",
-            error: `Worker process exited unexpectedly (code=${code}, signal=${signal}).`
-          });
-        }
+        failJobOnUnexpectedWorkerExit(parsed.cwd, job.id, code, signal);
       }
     });
     const queued = updateJob(parsed.cwd, job.id, { pid });
@@ -348,6 +344,84 @@ export async function mimoStatus(input: unknown) {
   });
 }
 
+export async function mimoEvents(input: unknown) {
+  const parsed = JobEventsInput.parse(input);
+  const job = resolveJobForSignals(parsed.cwd, parsed.jobId);
+  return renderJobSignals(job, readJobSignals(job.signalsFile, {
+    sinceCursor: parsed.sinceCursor,
+    limit: parsed.limit,
+    minLevel: parsed.minLevel
+  }));
+}
+
+export async function mimoWait(input: unknown) {
+  const parsed = JobWaitInput.parse(input);
+  const selected = resolveJobForSignals(parsed.cwd, parsed.jobId);
+  const startedAt = Date.now();
+  const deadline = startedAt + parsed.timeoutMs;
+  let job = selected;
+  let result = readJobSignals(job.signalsFile, {
+    sinceCursor: parsed.sinceCursor,
+    limit: parsed.limit,
+    minLevel: parsed.minLevel
+  });
+
+  while (result.signals.length === 0 && isActiveJobStatus(job.status) && Date.now() < deadline) {
+    await sleep(Math.min(parsed.pollMs, Math.max(1, deadline - Date.now())));
+    job = readJob(parsed.cwd, selected.id) ?? job;
+    result = readJobSignals(job.signalsFile, {
+      sinceCursor: parsed.sinceCursor,
+      limit: parsed.limit,
+      minLevel: parsed.minLevel
+    });
+  }
+
+  return {
+    ...renderJobSignals(job, result),
+    timedOut: result.signals.length === 0 && isActiveJobStatus(job.status),
+    waitedMs: Date.now() - startedAt
+  };
+}
+
+export async function mimoWake(input: unknown) {
+  const parsed = JobWakeInput.parse(input);
+  const job = resolveJobForSignals(parsed.cwd, parsed.jobId);
+  return buildCodexWakeHint(job, {
+    sinceCursor: parsed.sinceCursor,
+    minLevel: parsed.minLevel,
+    timeoutMs: parsed.timeoutMs
+  });
+}
+
+function resolveJobForSignals(cwd: string, jobId?: string): JobRecord {
+  const jobs = listJobs(cwd);
+  const job = jobId ? readJob(cwd, jobId) : jobs[0];
+  if (!job) {
+    throw new Error(jobId ? `No job found for ${jobId}.` : "No jobs recorded for this workspace.");
+  }
+  return job;
+}
+
+function renderJobSignals(job: JobRecord, result: ReturnType<typeof readJobSignals>) {
+  return {
+    jobId: job.id,
+    kind: job.kind,
+    status: job.status,
+    phase: job.phase,
+    nextCursor: result.nextCursor,
+    signals: result.signals,
+    actions: {
+      status: "mimo_status" as const,
+      result: "mimo_result" as const,
+      ...(isActiveJobStatus(job.status) ? { cancel: "mimo_cancel" as const } : {})
+    }
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function mimoResult(input: unknown) {
   const parsed = JobResultInput.parse(input);
   const jobs = listJobs(parsed.cwd).filter((job) => job.status !== "queued" && job.status !== "running");
@@ -385,15 +459,7 @@ export async function mimoCancel(
   const job = readJob(parsed.cwd, parsed.jobId);
   if (!job) throw new Error(`No job found for ${parsed.jobId}.`);
   terminateJobProcess(job.pid, { killProcess: deps.killProcess });
-  const cancelled = updateJob(parsed.cwd, job.id, {
-    status: "cancelled",
-    phase: "cancelled",
-    pid: null,
-    completedAt: new Date().toISOString(),
-    summary: `Cancelled ${job.id}.`,
-    errorCode: "cancelled",
-    error: "Cancelled by user."
-  });
+  const cancelled = cancelRuntimeJob(parsed.cwd, job.id);
   return renderJobResult(cancelled);
 }
 
@@ -426,17 +492,7 @@ export async function mimoResumeJob(
     const spawnFn = deps.spawnJobWorker ?? spawnJobWorker;
     const pid = spawnFn(parsed.cwd, "compose", child.id, {
       onExit: (code, signal) => {
-        const current = readJob(parsed.cwd, child.id);
-        if (current && isActiveJobStatus(current.status)) {
-          updateJob(parsed.cwd, child.id, {
-            status: "failed",
-            phase: "failed",
-            pid: null,
-            completedAt: new Date().toISOString(),
-            errorCode: "worker_exit",
-            error: `Worker process exited unexpectedly (code=${code}, signal=${signal}).`
-          });
-        }
+        failJobOnUnexpectedWorkerExit(parsed.cwd, child.id, code, signal);
       }
     });
     return renderJobLaunch(updateJob(parsed.cwd, child.id, { pid }));
@@ -467,6 +523,15 @@ async function captureWorktreeFiles(cwd: string): Promise<Set<string> | undefine
   } catch {
     return undefined;
   }
+}
+
+function failJobOnUnexpectedWorkerExit(cwd: string, jobId: string, code: number | null, signal: string | null): void {
+  const current = readJob(cwd, jobId);
+  if (!current || !isActiveJobStatus(current.status)) return;
+  failRuntimeJob(cwd, jobId, {
+    errorCode: "worker_exit",
+    error: `Worker process exited unexpectedly (code=${code}, signal=${signal}).`
+  });
 }
 
 function diffAddedFiles(before: Set<string> | undefined, after: Set<string> | undefined): string[] {

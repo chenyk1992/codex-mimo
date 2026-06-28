@@ -23,6 +23,7 @@ function job(patch: Partial<JobRecord> = {}): JobRecord {
     summary: "Running npm test.",
     logFile: "job.log",
     eventsFile: "job.events.jsonl",
+    signalsFile: "job.signals.jsonl",
     ...patch
   };
 }
@@ -38,6 +39,17 @@ describe("job rendering", () => {
         status: "mimo_status",
         result: "mimo_result",
         cancel: "mimo_cancel"
+      },
+      signals: {
+        tool: "mimo_events",
+        waitTool: "mimo_wait",
+        jobId: "compose-1",
+        sinceCursor: 0
+      },
+      wake: {
+        tool: "mimo_wake",
+        jobId: "compose-1",
+        sinceCursor: 0
       }
     });
   });
@@ -51,6 +63,8 @@ describe("job rendering", () => {
     expect(result.elapsedMs).toBe(10000);
     expect(result.actions.cancel).toBe("mimo_cancel");
     expect(result.progress).toEqual(["Running npm test."]);
+    expect(result.signals).toEqual({ tool: "mimo_events", waitTool: "mimo_wait", jobId: "compose-1", sinceCursor: 0 });
+    expect(result.wake).toEqual({ tool: "mimo_wake", jobId: "compose-1", sinceCursor: 0 });
   });
 
   it("renders callback on job status and result", () => {
@@ -108,5 +122,33 @@ describe("job rendering", () => {
     }));
 
     expect(result.directResumeHint).toBeUndefined();
+  });
+
+  it("renders compact verification results without stdout or stderr", () => {
+    const result = renderJobResult(job({
+      status: "completed",
+      phase: "done",
+      verification: [
+        {
+          command: "npm test",
+          exitCode: 0,
+          passed: true,
+          durationMs: 120,
+          stdout: "very long output",
+          stderr: ""
+        } as any
+      ]
+    }));
+
+    expect(result.verification).toEqual([
+      {
+        command: "npm test",
+        exitCode: 0,
+        passed: true,
+        durationMs: 120
+      }
+    ]);
+    expect(JSON.stringify(result)).not.toContain("very long output");
+    expect(result.signals).toEqual({ tool: "mimo_events", waitTool: "mimo_wait", jobId: "compose-1", sinceCursor: 0 });
   });
 });

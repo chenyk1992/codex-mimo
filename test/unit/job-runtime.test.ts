@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { appendRuntimeEvent, completeRuntimeJob, failRuntimeJob, startRuntimeJob } from "../../src/core/job-runtime.js";
 import { createJobStore, readJob, updateJob } from "../../src/core/job-store.js";
+import { readJobSignals } from "../../src/core/job-signals.js";
 
 function tempWorkspace(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-job-runtime-"));
@@ -20,12 +21,21 @@ describe("job runtime lifecycle", () => {
 
     startRuntimeJob(cwd, job.id, { pid: 321 });
     appendRuntimeEvent(cwd, job.id, "{\"type\":\"message\",\"text\":\"Inspecting files\"}");
+    appendRuntimeEvent(cwd, job.id, "{\"type\":\"message\",\"text\":\"Still inspecting\"}");
 
     const updated = readJob(cwd, job.id);
     expect(updated?.status).toBe("running");
     expect(updated?.phase).toBe("investigating");
-    expect(updated?.summary).toBe("Inspecting files");
+    expect(updated?.summary).toBe("Still inspecting");
     expect(fs.readFileSync(updated!.eventsFile, "utf-8")).toContain("Inspecting files");
+
+    const signals = readJobSignals(updated!.signalsFile).signals;
+    expect(signals.filter((signal) => signal.kind === "phase_changed").map((signal) => signal.phase)).toEqual([
+      "starting",
+      "investigating"
+    ]);
+    expect(signals.map((signal) => signal.summary)).toContain("Inspecting files");
+    expect(signals.map((signal) => signal.summary)).toContain("Still inspecting");
   });
 
   it("completes and fails jobs with final metadata", () => {
@@ -46,7 +56,8 @@ describe("job runtime lifecycle", () => {
       }
     });
 
-    expect(readJob(cwd, complete.id)).toMatchObject({
+    const completed = readJob(cwd, complete.id);
+    expect(completed).toMatchObject({
       status: "completed",
       phase: "done",
       summary: "done",
@@ -56,6 +67,12 @@ describe("job runtime lifecycle", () => {
         outcome: "completed",
         sessionId: "sess_1"
       }
+    });
+    expect(readJobSignals(completed!.signalsFile).signals.at(-1)).toMatchObject({
+      kind: "completed",
+      status: "completed",
+      phase: "done",
+      summary: "done"
     });
 
     const failed = store.create({ kind: "compose", task: "fail", request: {} });
@@ -71,7 +88,8 @@ describe("job runtime lifecycle", () => {
       }
     });
 
-    expect(readJob(cwd, failed.id)).toMatchObject({
+    const failedRecord = readJob(cwd, failed.id);
+    expect(failedRecord).toMatchObject({
       status: "failed",
       phase: "failed",
       errorCode: "nonzero_exit",
@@ -80,6 +98,13 @@ describe("job runtime lifecycle", () => {
         outcome: "error",
         error: "hook error"
       }
+    });
+    expect(readJobSignals(failedRecord!.signalsFile).signals.at(-1)).toMatchObject({
+      kind: "failed",
+      level: "error",
+      status: "failed",
+      phase: "failed",
+      summary: "MiMo failed"
     });
   });
 

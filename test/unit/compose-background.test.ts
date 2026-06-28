@@ -50,6 +50,8 @@ describe("compose job worker", () => {
       },
       captureDiff: async () => ({ changedFiles: [], diffStat: "", diff: "" }),
       captureStatus: async () => ({ short: "", dirty: false }),
+      captureHead: async () => ({ oid: "abc123", short: "abc123", subject: "test" }),
+      captureCommitChanges: async () => ({ commits: [], changedFiles: [] }),
       runVerification: async () => []
     });
 
@@ -292,6 +294,55 @@ describe("compose job worker", () => {
     expect(updated.status).toBe("failed");
     expect(updated.errorCode).toBe("read_only_violation");
     expect(updated.error).toContain("Read-only workflow plan modified files: README.md");
+  });
+
+  it("fails read-only workflows when background compose advances HEAD", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "compose",
+      workflow: "plan",
+      task: "Write a plan only",
+      request: { cwd, workflow: "plan", task: "Write a plan only" }
+    });
+    let headCalls = 0;
+    const deps: any = {
+      ...completedWorkerHook,
+      runMimoStreaming: async () => ({
+        stdout: "{\"type\":\"message\",\"text\":\"implemented and committed\"}\n",
+        stderr: "",
+        exitCode: 0,
+        pid: 777
+      }),
+      captureDiff: async () => ({ changedFiles: [], diffStat: "", diff: "" }),
+      captureStatus: async () => ({ short: "", dirty: false }),
+      captureHead: async () => {
+        headCalls += 1;
+        return headCalls === 1
+          ? { oid: "2662087", short: "2662087", subject: "chore: seed vibe demo" }
+          : { oid: "1672c89", short: "1672c89", subject: "feat: add discount code support" };
+      },
+      captureCommitChanges: async () => ({
+        commits: [
+          "7770acb test: add discount code test cases",
+          "1672c89 feat: add discount code support"
+        ],
+        changedFiles: ["src/pricing.js", "test/pricing.test.js"]
+      }),
+      runVerification: async () => []
+    };
+
+    await runComposeJobWorker(cwd, job.id, deps);
+
+    const updated = readJob(cwd, job.id);
+    expect(updated.status).toBe("failed");
+    expect(updated.errorCode).toBe("read_only_violation");
+    expect(updated.error).toContain("Read-only workflow plan changed HEAD from 2662087 to 1672c89");
+    expect(updated.changedFiles).toEqual(["src/pricing.js", "test/pricing.test.js"]);
+    const report = JSON.parse(fs.readFileSync(updated.reportPaths!.json!, "utf-8"));
+    expect(report.gitCommits).toEqual([
+      "7770acb test: add discount code test cases",
+      "1672c89 feat: add discount code support"
+    ]);
   });
 
   it("fails background compose on semantic clarification output", async () => {
