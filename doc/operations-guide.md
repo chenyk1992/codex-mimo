@@ -21,13 +21,21 @@ If the package bin is linked or installed, this is equivalent:
 codex-mimo healthcheck
 ```
 
-3. Validate plugin metadata:
+3. Run full bridge diagnostics when installing, refreshing, or debugging missing tools:
+
+```bash
+codex-mimo doctor
+```
+
+`doctor` checks MiMoCode availability, plugin files, `.mcp.json`, and whether the packaged MCP server can list the expected `mimo_*` tools. It does not run automatically during normal CLI commands, and it cannot prove that the current Codex thread has injected those tools or that Codex is loading the same plugin directory you probed.
+
+4. Validate plugin metadata:
 
 ```bash
 npm run validate:plugin
 ```
 
-4. Confirm the plugin files are present:
+5. Confirm the plugin files are present:
 
 ```text
 .codex-plugin/plugin.json
@@ -243,7 +251,7 @@ There is no active `codex-mimo.config.json` loader in the current source tree, s
 | --- | --- |
 | `mimo not found` | Install and authenticate the MiMoCode CLI, or set `CODEX_MIMO_COMMAND` / `MIMO_COMMAND`. |
 | `ERR_MODULE_NOT_FOUND` | Install runtime dependencies or use a bundled plugin build. |
-| MCP tools are not visible | Verify `.mcp.json`, build output, dependencies, plugin cache, and MCP server startup logs. |
+| MCP tools are not visible | Run `codex-mimo doctor` in the plugin directory Codex should load. If it passes there, restart Codex or start a new thread, and check for stale or different plugin cache directories. |
 | `mimo_implement requires allowWrite=true` | Pass `allowWrite: true` only when Codex is allowed to edit the workspace. |
 | Compose plan or review modified files | Treat it as a failed read-only workflow and inspect the report diff. |
 | Child process remains after timeout | Use `--timeout-ms` or `mimo_compose.timeoutMs` lower than the outer timeout; cancel active jobs with `mimo_cancel`. |

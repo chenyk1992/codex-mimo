@@ -1,6 +1,9 @@
 import { implementPrompt, planPrompt, reviewPrompt } from "../core/prompt.js";
 import { captureGitDiff } from "../git/diff.js";
 import { runAndCapture, type MimoRunResult } from "../mimo/mimo-runner.js";
+import { DOCTOR_HINT } from "./hints.js";
+
+export { DOCTOR_HINT } from "./hints.js";
 
 export function formatMimoRunResult(command: string, result: MimoRunResult): string {
   const lines = [
@@ -25,6 +28,10 @@ export function formatMimoRunResult(command: string, result: MimoRunResult): str
   if (result.errors.length > 0) {
     lines.push("Errors:");
     for (const error of result.errors) lines.push(`  - ${error}`);
+  }
+
+  if (result.exitCode !== 0) {
+    lines.push("", `Hint: ${DOCTOR_HINT}`);
   }
 
   return lines.join("\n");

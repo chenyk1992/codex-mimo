@@ -22,6 +22,7 @@ import { execa } from "execa";
 import { runAndCapture } from "../../src/mimo/mimo-runner.js";
 import {
   composeStatusExitCode,
+  DOCTOR_HINT,
   formatMimoRunResult,
   runPlan,
   runImplement,
@@ -426,5 +427,20 @@ describe("formatMimoRunResult", () => {
     expect(text).toContain("  - npm test exit=0");
     expect(text).toContain("Errors:");
     expect(text).toContain("  - minor warning");
+  });
+
+  it("adds a doctor hint when a direct CLI command fails", () => {
+    const text = formatMimoRunResult("plan", {
+      sessionId: null,
+      summary: "MiMoCode failed.",
+      changedFiles: [],
+      commands: [],
+      errors: ["tool injection unavailable"],
+      exitCode: 1,
+      raw: []
+    });
+
+    expect(text).toContain(DOCTOR_HINT);
+    expect(text).toContain("codex-mimo doctor");
   });
 });

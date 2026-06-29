@@ -27,6 +27,7 @@ npm run validate:plugin
 
 ```bash
 codex-mimo healthcheck
+codex-mimo doctor
 codex-mimo plan "Add login rate limiting"
 codex-mimo implement "Fix failing user-session test"
 codex-mimo review
@@ -36,6 +37,8 @@ codex-mimo sessions
 codex-mimo compose --workflow dev "Implement login throttling"
 codex-mimo compose --workflow execute-plan --file doc/api-refactor-plan.md
 ```
+
+`healthcheck` is a lightweight MiMoCode CLI check. `doctor` is an explicit diagnostics command for plugin and MCP tool visibility: it checks plugin files, `.mcp.json`, starts the packaged MCP server, and verifies that `tools/list` returns the expected `mimo_*` tools. It cannot prove that the current Codex thread has already injected those tools. If `doctor` passes for the same plugin directory Codex is loading but tools are still absent, restart Codex or start a new thread so the host reloads plugin metadata; also check for stale or different plugin cache directories.
 
 The CLI `compose` command runs in the foreground and writes reports under `.codex-mimo/`. Background jobs, `mimo_wait`, and `mimo_wake` are Codex MCP tool workflows rather than standalone CLI commands.
 
@@ -75,6 +78,7 @@ The project is packaged as a Codex plugin. To install or refresh a local plugin 
    ```bash
    npm run build
    npm run validate:plugin
+   codex-mimo doctor
    ```
 
 2. Confirm the plugin files are present:

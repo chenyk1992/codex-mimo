@@ -29,7 +29,9 @@ Do NOT use MiMoCode when:
 - The task requires interactive back-and-forth with the user
 - Codex must inspect a small, specific file directly to answer a question
 
-## Available Tools (15)
+## Expected MCP Tools (15)
+
+These are the MCP tools the plugin is expected to expose after Codex loads the plugin metadata. If the current Codex thread cannot call `mimo_plan`, `mimo_compose`, or the other `mimo_*` tools, run `codex-mimo doctor` from the plugin install or project checkout to verify the packaged MCP server can start and list tools. A passing `doctor` result only proves that the probed plugin directory is healthy; Codex may still be loading a stale or different plugin cache, or may need a host reload before tool injection updates.
 
 ### `mimo_healthcheck`
 

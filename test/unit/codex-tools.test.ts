@@ -22,7 +22,7 @@ vi.mock("../../src/compose/runner.js", () => ({
 }));
 
 import { mimoCompose, mimoReview, mimoStatus, mimoResult } from "../../src/codex/tools.js";
-import { MIMO_TOOL_NAMES } from "../../src/codex/mcp-server.js";
+import { MIMO_TOOL_NAMES } from "../../src/codex/tool-names.js";
 import { readJob, updateJob } from "../../src/core/job-store.js";
 import { readJobSignals } from "../../src/core/job-signals.js";
 

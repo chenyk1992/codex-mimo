@@ -6,6 +6,8 @@ import { composeWorkflowUsage } from "../compose/workflow.js";
 import { execa } from "execa";
 import { SessionStore } from "../core/sessions.js";
 import { resolveMimoCommand } from "../mimo/run-json.js";
+import { formatDoctorReport, runDoctor } from "./doctor.js";
+import { DOCTOR_HINT } from "./hints.js";
 
 const [, , command, ...rest] = process.argv;
 const cwd = process.cwd();
@@ -64,7 +66,7 @@ if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0))
 }
 
 if (!command) {
-  console.error("Usage: codex-mimo <plan|implement|review|fix-ci|compose|healthcheck|sessions|resume> [task]");
+  console.error("Usage: codex-mimo <plan|implement|review|fix-ci|compose|doctor|healthcheck|sessions|resume> [task]");
   process.exit(2);
 }
 
@@ -88,6 +90,14 @@ if (command === "healthcheck") {
     console.log(JSON.stringify({ ok: false, error: "mimo not found or not working" }));
     process.exit(1);
   }
+} else if (command === "doctor") {
+  const result = await runDoctor({ cwd: effectiveCwd });
+  if (jsonOutput) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.log(formatDoctorReport(result));
+  }
+  process.exit(result.ok ? 0 : 1);
 } else if (command === "plan") {
   if (!task) { console.error("Usage: codex-mimo plan <task>"); process.exit(2); }
   if (dryRun) {
@@ -163,6 +173,9 @@ if (command === "healthcheck") {
       }
     }
     console.log(`Report: ${result.reportPaths.markdown}`);
+    if (composeStatusExitCode(result.status) !== 0) {
+      console.log(`Hint: ${DOCTOR_HINT}`);
+    }
   }
   process.exit(composeStatusExitCode(result.status));
 } else if (command === "sessions") {
