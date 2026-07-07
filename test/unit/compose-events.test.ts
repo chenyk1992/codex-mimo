@@ -61,7 +61,7 @@ describe("compose event parsing", () => {
         tool: "read",
         state: {
           status: "completed",
-          input: { filePath: "src/compose/events.ts" }
+          input: { file_path: "src/compose/events.ts" }
         }
       }
     });
@@ -110,7 +110,7 @@ describe("compose event parsing", () => {
           type: "tool",
           tool: "read",
           sessionId: "ses_nested",
-          state: { status: "completed", input: { filePath: "README.md" } }
+          state: { status: "completed", input: { file_path: "README.md" } }
         }
       })
     ];

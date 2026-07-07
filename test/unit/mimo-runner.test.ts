@@ -29,14 +29,14 @@ describe("parseMimoOutput", () => {
         type: "tool_use",
         part: {
           tool: "write",
-          state: { metadata: { filepath: ".codex-mimo/plugin-smoke/README.md" } }
+          state: { input: { file_path: ".codex-mimo/plugin-smoke/README.md" } }
         }
       },
       {
         type: "tool_use",
         part: {
           tool: "edit",
-          state: { input: { filePath: "src/mimo/run-json.ts" } }
+          state: { input: { file_path: "src/mimo/run-json.ts" } }
         }
       }
     ]);

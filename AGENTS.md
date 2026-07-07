@@ -49,10 +49,11 @@ src/
 - **ESM-only.** `"type": "module"`. Imports must use `.js` extensions even when importing `.ts` files under NodeNext.
 - **MCP server self-starts.** `src/codex/mcp-server.ts` calls `startMcpServer()` at module top level — it is both a library export and a runnable entrypoint.
 - **`stdin: "ignore"` for direct runs.** `runAndCapture()` must keep `stdin: "ignore"` when spawning `mimo run`; otherwise MiMoCode can wait on inherited stdin and never exit.
-- **JSONL, not one JSON object.** `mimo run --format json` emits newline-delimited JSON. Direct runs parse in `mimo-runner.ts`; Compose runs parse through `compose/events.ts`.
+- **JSONL, not one JSON object.** `mimo run --format json` emits newline-delimited JSON of shape `{ type, timestamp, sessionID, ...data }`. Event `type` values seen in the wild: `step_start`, `tool_use`, `step_finish`, `text`, `reasoning`, `error`. Direct runs parse in `mimo-runner.ts`; Compose runs parse through `compose/events.ts`.
+- **Canonical field names from `tool_use` events.** `write`/`edit`/`read` carry the path at `part.state.input.file_path` (underscore). `bash` carries the command at `part.state.input.command` and the exit code at `part.state.metadata.exit`. `sessionID` is caps in raw events; our parser also accepts `sessionId`. `parseMimoOutput` checks `file_path` first, then `filepath` / `filePath` / `path` as fallbacks for compatibility.
 - **Prompt format matters.** `buildComposePrompt()` starts with `Objective: ...` then explicit instructions. Do not prepend a preamble before the objective.
 - **Large/non-ASCII prompt transport.** Messages over 8 KB or with non-ASCII go to `.codex-mimo/inputs/*.md`; the actual MiMo message points MiMoCode at that UTF-8 file (`src/mimo/prompt-transport.ts`).
-- **Hook callback is part of success detection.** Direct and Compose runs create `.codex-mimo/runtime-hooks/<invocationId>/` and wait for a `session.post` callback on a local HTTP server. Missing/error/cancelled callbacks can turn a zero exit into failure.
+- **Hook callback is real and is part of success detection.** MiMoCode loads hooks from `<cwd>/.mimocode/hooks/*.js` (or the `MIMOCODE_CONFIG_DIR` we inject) and fires `session.pre` and `session.post`. Our `createHookCallbackController()` starts a local HTTP server and POSTs the `session.post` payload back to it. Missing/error/cancelled callbacks can turn a zero exit into failure. Verified by `test/smoke/local-mimo-hooks.test.ts` (gated on `RUN_LOCAL_MIMO_HOOK_SMOKE=1`).
 - **Private types in public return signatures.** Declaration output requires exported return types to be nameable. Keep public interfaces like `CompactComposeReport` exported when exported functions return them.
 - **Verification runner is intentionally simple.** `compose/verify.ts` splits commands on whitespace and runs with `execa(file, args)`, not through a shell. Detection fallback uses `pyproject.toml` / `Cargo.toml` / `go.mod` / `package.json` to pick a default command.
 - **Windows / UTF-8.** `core/encoding.ts` wraps process env to UTF-8; PowerShell users reading `.codex-mimo/inputs/*.md` should use `Get-Content -Encoding UTF8`. Compose prompts explicitly steer MiMoCode away from `2>/dev/null`, `||`, `wc -l`, `grep`, and cp936-bound Python.
@@ -60,6 +61,10 @@ src/
 ## Compose Workflows
 
 The 11 workflows registered in `src/compose/workflow.ts` (`COMPOSE_WORKFLOW_NAMES`): `brainstorm`, `plan`, `dev`, `fix`, `fix-ci`, `execute-plan`, `review`, `parallel`, `worktree`, `merge`, `new-skill`. Each declares `writesAllowed`, `requiresTask`, `requiresFile`, and a `skillChain` used by `buildComposePrompt()`. Read-only workflows (`brainstorm`, `plan`, `review`) are checked after the run with git status/diff snapshots; unexpected modifications fail the report.
+
+The `compose` agent itself has no `prompt` field — its behaviour comes entirely from the skill library below. Our `buildComposePrompt()` is the single instruction the agent receives for a run.
+
+The upstream MiMo-Code compose skill bundle (`packages/opencode/src/skill/compose/.bundle/`) contains 14 skills: `ask`, `brainstorm`, `debug`, `execute`, `feedback`, `merge`, `parallel`, `plan`, `report`, `review`, `subagent`, `tdd`, `verify`, `worktree`. Our workflow `skillChain`s reference 12 of these (every one except `ask` and `report`, which no current workflow invokes directly). `new-skill` is **not** an upstream skill name; the workflow invokes `compose:execute` + `compose:verify` instead.
 
 ## Job Runtime
 

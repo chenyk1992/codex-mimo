@@ -28,7 +28,7 @@ describe("compose workflows", () => {
 });
 
 describe("compose workflow official skill coverage", () => {
-  it("covers all official MiMo Code Compose skills", () => {
+  it("covers the skills referenced from Compose workflows", () => {
     const usedSkills = new Set(listComposeWorkflows().flatMap((workflow) => workflow.skillChain));
 
     expect([...usedSkills].sort()).toEqual([
@@ -37,7 +37,6 @@ describe("compose workflow official skill coverage", () => {
       "compose:execute",
       "compose:feedback",
       "compose:merge",
-      "compose:new-skill",
       "compose:parallel",
       "compose:plan",
       "compose:review",
@@ -56,7 +55,7 @@ describe("compose workflow official skill coverage", () => {
     expect(getComposeWorkflow("brainstorm").skillChain).toEqual(["compose:brainstorm"]);
     expect(getComposeWorkflow("worktree").skillChain).toEqual(["compose:worktree"]);
     expect(getComposeWorkflow("merge").skillChain).toEqual(["compose:merge"]);
-    expect(getComposeWorkflow("new-skill").skillChain).toEqual(["compose:new-skill"]);
+    expect(getComposeWorkflow("new-skill").skillChain).toEqual(["compose:execute", "compose:verify"]);
   });
 });
 

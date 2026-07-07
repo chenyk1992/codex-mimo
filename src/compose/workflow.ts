@@ -128,8 +128,8 @@ const workflows: Record<ComposeWorkflowName, ComposeWorkflow> = {
   },
   "new-skill": {
     name: "new-skill",
-    description: "Create or update a Compose skill",
-    skillChain: ["compose:new-skill"],
+    description: "Draft and write a new Compose skill into the project's .claude/skills or .mimocode/skills directory",
+    skillChain: ["compose:execute", "compose:verify"],
     defaultVerification: [],
     writesAllowed: true,
     requiresTask: true,

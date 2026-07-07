@@ -95,8 +95,11 @@ export async function runAndCapture(options: MimoRunOptions & { timeoutMs?: numb
 
 function extractFilePath(obj: Record<string, unknown> | undefined): string | null {
   if (!obj) return null;
-  // Check common path field names
-  for (const key of ["filepath", "filePath", "path"]) {
+  // Upstream MiMoCode writes the canonical path under `input.file_path`
+  // (underscore) for write/edit/read tool_use events. Older / alternate
+  // casings are kept as fallbacks for compatibility with metadata.filepath
+  // and any non-standard emitters.
+  for (const key of ["file_path", "filepath", "filePath", "path"]) {
     if (typeof obj[key] === "string") return obj[key];
   }
   return null;
