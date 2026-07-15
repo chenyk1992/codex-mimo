@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   appendJobSignal,
   appendJobSignalAtCursor,
@@ -10,6 +11,7 @@ import {
   type NewJobSignal
 } from "./job-signals.js";
 import {
+  clearPendingJobTransition,
   finalizePendingJobTransition,
   readJob,
   resolveJobPaths,
@@ -22,7 +24,7 @@ import {
   type JobTransitionFields,
   type PendingJobTransition
 } from "./jobs.js";
-import { withFileLock } from "./file-lock.js";
+import { withProcessLock } from "./process-lock.js";
 import { enqueueDelivery as enqueueNotificationDelivery } from "../notify/outbox.js";
 
 const LEGAL: Record<JobStatus, readonly JobStatus[]> = {
@@ -45,10 +47,12 @@ export interface JobTransitionResult {
 }
 
 export interface JobTransitionDependencies {
-  afterIntentPersisted?: () => void;
+  afterIntentPersisted?: () => Promise<void> | void;
+  afterSignalAppended?: () => Promise<void> | void;
+  afterJobFinalized?: () => Promise<void> | void;
+  afterDeliveryEnqueued?: () => Promise<void> | void;
   appendSignal?: typeof appendJobSignalAtCursor;
   enqueueDelivery?: typeof enqueueNotificationDelivery;
-  beforeFinalCommit?: () => void;
 }
 
 type ProgressSignalKind = Exclude<JobSignalKind, AttentionSignalKind>;
@@ -57,17 +61,22 @@ export type JobProgress = Omit<NewJobSignal, "jobId" | "kind" | "status"> & {
   kind: ProgressSignalKind;
 };
 
-export function transitionJob(
+export async function transitionJob(
   cwd: string,
   jobId: string,
   transition: JobTransition,
   dependencies: JobTransitionDependencies = {}
-): JobTransitionResult {
-  return withFileLock(resolveJobStateLock(cwd, jobId), () => {
+): Promise<JobTransitionResult> {
+  return withProcessLock(resolveJobStateLock(cwd, jobId), async () => {
     let existing = requireJob(cwd, jobId);
     if (existing.pendingTransition) {
       const sameRequest = pendingMatchesRequest(existing.pendingTransition, transition);
-      const recovered = applyPendingTransition(cwd, existing, existing.pendingTransition, dependencies);
+      const recovered = await applyPendingTransition(
+        cwd,
+        existing,
+        existing.pendingTransition,
+        dependencies
+      );
       if (sameRequest) return recovered;
       existing = recovered.job;
     }
@@ -78,42 +87,46 @@ export function transitionJob(
 
     const pending = buildPendingTransition(existing, transition);
     const intentJob = savePendingJobTransition(cwd, jobId, pending);
-    dependencies.afterIntentPersisted?.();
+    await dependencies.afterIntentPersisted?.();
     return applyPendingTransition(cwd, intentJob, pending, dependencies);
   });
 }
 
-export function appendJobProgress(cwd: string, jobId: string, progress: JobProgress): JobSignal {
+export async function appendJobProgress(
+  cwd: string,
+  jobId: string,
+  progress: JobProgress
+): Promise<JobSignal> {
   if (isAttentionSignal(progress as Pick<JobSignal, "kind">)) {
     throw new Error(`Attention signal ${progress.kind} must be written by transitionJob`);
   }
-  return withFileLock(resolveJobStateLock(cwd, jobId), () => {
+  return withProcessLock(resolveJobStateLock(cwd, jobId), async () => {
     let job = requireJob(cwd, jobId);
     if (job.pendingTransition) {
-      job = applyPendingTransition(cwd, job, job.pendingTransition, {}).job;
+      job = (await applyPendingTransition(cwd, job, job.pendingTransition, {})).job;
     }
     return appendJobSignal(job.signalsFile, { ...progress, jobId });
   });
 }
 
-export function recoverPendingTransition(
+export async function recoverPendingTransition(
   cwd: string,
   jobId: string,
   dependencies: JobTransitionDependencies = {}
-): JobTransitionResult | undefined {
-  return withFileLock(resolveJobStateLock(cwd, jobId), () => {
+): Promise<JobTransitionResult | undefined> {
+  return withProcessLock(resolveJobStateLock(cwd, jobId), async () => {
     const job = requireJob(cwd, jobId);
     if (!job.pendingTransition) return undefined;
     return applyPendingTransition(cwd, job, job.pendingTransition, dependencies);
   });
 }
 
-function applyPendingTransition(
+async function applyPendingTransition(
   cwd: string,
   job: JobRecord,
   pending: PendingJobTransition,
   dependencies: JobTransitionDependencies
-): JobTransitionResult {
+): Promise<JobTransitionResult> {
   const appendSignal = dependencies.appendSignal ?? appendJobSignalAtCursor;
   const signal = appendSignal(job.signalsFile, pending.signalCursor, {
     jobId: job.id,
@@ -125,21 +138,30 @@ function applyPendingTransition(
     summary: pending.summary,
     ...(pending.reportPaths ? { reportPaths: pending.reportPaths } : {})
   });
+  await dependencies.afterSignalAppended?.();
 
-  let deliveryCreated = false;
-  if (job.notificationTarget && isAttentionSignal(signal)) {
-    const enqueueDelivery = dependencies.enqueueDelivery ?? enqueueNotificationDelivery;
-    deliveryCreated = enqueueDelivery(job.notificationOutboxFile, {
-      jobId: job.id,
-      signalCursor: signal.cursor,
-      target: job.notificationTarget,
-      createdAt: signal.createdAt
-    }).created;
+  let finalized = job;
+  if (pending.stage === "prepared") {
+    finalized = finalizePendingJobTransition(cwd, job.id, pending);
+    pending = finalized.pendingTransition!;
+    await dependencies.afterJobFinalized?.();
   }
 
-  dependencies.beforeFinalCommit?.();
-  const finalized = finalizePendingJobTransition(cwd, job.id, pending);
-  return { job: finalized, signal, deliveryCreated };
+  let deliveryCreated = false;
+  if (finalized.notificationTarget && isAttentionSignal(signal)) {
+    const enqueueDelivery = dependencies.enqueueDelivery ?? enqueueNotificationDelivery;
+    await enqueueDelivery(finalized.notificationOutboxFile, {
+      jobId: finalized.id,
+      signalCursor: signal.cursor,
+      target: finalized.notificationTarget,
+      createdAt: signal.createdAt
+    });
+    deliveryCreated = true;
+    await dependencies.afterDeliveryEnqueued?.();
+  }
+
+  const cleared = clearPendingJobTransition(cwd, finalized.id, pending);
+  return { job: cleared, signal, deliveryCreated };
 }
 
 function buildPendingTransition(
@@ -150,9 +172,11 @@ function buildPendingTransition(
   const running = transition.status === "running";
   return {
     version: 1,
+    stage: "prepared",
     fromStatus: job.status,
     signalCursor: readJobSignals(job.signalsFile).nextCursor + 1,
     signalCreatedAt: timestamp,
+    requestHash: transitionRequestHash(transition),
     status: transition.status,
     summary: transition.summary,
     phase: running ? transition.phase : undefined,
@@ -182,12 +206,29 @@ function pendingMatchesRequest(
   pending: PendingJobTransition,
   transition: JobTransition
 ): boolean {
-  return pending.status === transition.status && pending.summary === transition.summary;
+  return pending.requestHash === transitionRequestHash(transition);
 }
 
 function resolveJobStateLock(cwd: string, jobId: string): string {
   const paths = resolveJobPaths(cwd, jobId);
-  return `${paths.jobFile.slice(0, -".json".length)}.state.lock`;
+  return paths.jobFile;
+}
+
+function transitionRequestHash(transition: JobTransition): string {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalize(transition)), "utf8")
+    .digest("hex");
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalize(entry)])
+  );
 }
 
 function signalLevel(status: JobStatus): JobSignalLevel {

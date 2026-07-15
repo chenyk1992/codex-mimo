@@ -221,10 +221,36 @@ export function finalizePendingJobTransition(
   const updated: JobRecord = {
     ...existing,
     ...transitionRecordPatch(pendingTransition),
+    pendingTransition: {
+      ...pendingTransition,
+      stage: "finalized"
+    },
     updatedAt: nowIso()
   };
-  delete updated.pendingTransition;
   if (pendingTransition.phase === undefined) delete updated.phase;
+  return writeUpdatedJob(cwd, updated);
+}
+
+export function clearPendingJobTransition(
+  cwd: string,
+  jobId: string,
+  pendingTransition: PendingJobTransition
+): JobRecord {
+  const existing = readJob(cwd, jobId);
+  if (!existing) throw new Error(`Job not found: ${jobId}`);
+  const finalized = { ...pendingTransition, stage: "finalized" as const };
+  if (!existing.pendingTransition ||
+      !samePendingTransition(existing.pendingTransition, finalized)) {
+    throw new Error(`Pending transition changed before clear: ${jobId}`);
+  }
+  if (existing.status !== pendingTransition.status) {
+    throw new Error(
+      `Finalized transition expected ${pendingTransition.status}, found ${existing.status}`
+    );
+  }
+
+  const updated = { ...existing, updatedAt: nowIso() };
+  delete updated.pendingTransition;
   return writeUpdatedJob(cwd, updated);
 }
 
@@ -259,7 +285,9 @@ function isJobRecord(value: unknown, expectedJobId: string): value is JobRecord 
     typeof value.logFile === "string" &&
     typeof value.eventsFile === "string" &&
     typeof value.signalsFile === "string" &&
-    typeof value.notificationOutboxFile === "string"
+    typeof value.notificationOutboxFile === "string" &&
+    (value.pendingTransition === undefined ||
+      (isJobStatus(value.status) && isPendingJobTransition(value.pendingTransition, value.status)))
   );
 }
 
@@ -306,9 +334,13 @@ function writeJobRecord(cwd: string, record: JobRecord): void {
 
 function writeUpdatedJob(cwd: string, record: JobRecord): JobRecord {
   writeJobRecord(cwd, record);
-  const state = readState(cwd);
-  state.jobs = [record.id, ...state.jobs.filter((id) => id !== record.id)];
-  writeState(cwd, pruneState(cwd, state, DEFAULT_MAX_JOBS));
+  try {
+    const state = readState(cwd);
+    state.jobs = [record.id, ...state.jobs.filter((id) => id !== record.id)];
+    writeState(cwd, pruneState(cwd, state, DEFAULT_MAX_JOBS));
+  } catch {
+    // The per-job record is authoritative; the auxiliary index can be rebuilt later.
+  }
   return record;
 }
 
@@ -339,6 +371,146 @@ function transitionRecordPatch(
     ...(transition.error !== undefined ? { error: transition.error } : {}),
     ...(transition.errorCode !== undefined ? { errorCode: transition.errorCode } : {})
   };
+}
+
+const JOB_STATUSES = new Set([
+  "queued",
+  "running",
+  "needs_input",
+  "blocked",
+  "completed",
+  "failed",
+  "cancelled",
+  "timeout"
+]);
+
+const JOB_PHASES = new Set([
+  "starting",
+  "planning",
+  "investigating",
+  "editing",
+  "verifying",
+  "reviewing",
+  "finalizing"
+]);
+
+const LEGAL_TRANSITIONS: Record<string, readonly string[]> = {
+  queued: ["running", "failed", "cancelled"],
+  running: ["needs_input", "blocked", "completed", "failed", "cancelled", "timeout"],
+  needs_input: [],
+  blocked: [],
+  completed: [],
+  failed: [],
+  cancelled: [],
+  timeout: []
+};
+
+function isJobStatus(value: unknown): value is JobRecord["status"] {
+  return typeof value === "string" && JOB_STATUSES.has(value);
+}
+
+function isJobPhase(value: unknown): value is NonNullable<JobRecord["phase"]> {
+  return typeof value === "string" && JOB_PHASES.has(value);
+}
+
+function isPendingJobTransition(
+  value: unknown,
+  recordStatus: JobRecord["status"]
+): value is PendingJobTransition {
+  if (!isRecord(value) ||
+      value.version !== 1 ||
+      (value.stage !== "prepared" && value.stage !== "finalized") ||
+      !isJobStatus(value.fromStatus) ||
+      !isJobStatus(value.status) ||
+      !LEGAL_TRANSITIONS[value.fromStatus].includes(value.status) ||
+      typeof value.summary !== "string" ||
+      !Number.isInteger(value.signalCursor) ||
+      (value.signalCursor as number) <= 0 ||
+      !isTimestamp(value.signalCreatedAt) ||
+      typeof value.requestHash !== "string" ||
+      !/^[a-f0-9]{64}$/.test(value.requestHash) ||
+      (value.stage === "prepared" && recordStatus !== value.fromStatus) ||
+      (value.stage === "finalized" && recordStatus !== value.status) ||
+      !isNormalizedTransitionState(value) ||
+      !isOptionalTimestamp(value.startedAt) ||
+      !isOptionalTimestamp(value.completedAt) ||
+      !isOptionalNullableString(value.sessionId) ||
+      !isOptionalStringArray(value.changedFiles) ||
+      !isOptionalVerificationArray(value.verification) ||
+      !isOptionalExecutionCallback(value.executionCallback) ||
+      !isOptionalReportPaths(value.reportPaths) ||
+      !isOptionalString(value.error) ||
+      !isOptionalString(value.errorCode)) {
+    return false;
+  }
+
+  return value.status === "running"
+    ? isTimestamp(value.startedAt) && value.completedAt === undefined
+    : isTimestamp(value.completedAt) && value.startedAt === undefined;
+}
+
+function isNormalizedTransitionState(value: Record<string, unknown>): boolean {
+  if (value.status === "running") {
+    return (value.phase === undefined || isJobPhase(value.phase)) &&
+      (value.pid === null || isPositiveInteger(value.pid));
+  }
+  return value.phase === undefined && value.pid === null;
+}
+
+function isOptionalVerificationArray(value: unknown): boolean {
+  return value === undefined || (Array.isArray(value) && value.every((entry) =>
+    isRecord(entry) &&
+    typeof entry.command === "string" &&
+    (entry.exitCode === null || Number.isInteger(entry.exitCode)) &&
+    typeof entry.passed === "boolean" &&
+    (entry.durationMs === undefined ||
+      (typeof entry.durationMs === "number" && Number.isFinite(entry.durationMs) &&
+        entry.durationMs >= 0))
+  ));
+}
+
+function isOptionalExecutionCallback(value: unknown): boolean {
+  if (value === undefined) return true;
+  return isRecord(value) &&
+    typeof value.invocationId === "string" &&
+    (value.outcome === "completed" || value.outcome === "error" ||
+      value.outcome === "cancelled" || value.outcome === "missing") &&
+    isOptionalNullableString(value.sessionId) &&
+    isOptionalTimestamp(value.receivedAt) &&
+    isOptionalString(value.error);
+}
+
+function isOptionalReportPaths(value: unknown): boolean {
+  if (value === undefined) return true;
+  return isRecord(value) &&
+    isOptionalString(value.json) &&
+    isOptionalString(value.markdown) &&
+    isOptionalString(value.eventsJsonl) &&
+    isOptionalString(value.diff);
+}
+
+function isOptionalStringArray(value: unknown): boolean {
+  return value === undefined || (Array.isArray(value) && value.every((item) => typeof item === "string"));
+}
+
+function isOptionalNullableString(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === "string";
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function isTimestamp(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function isOptionalTimestamp(value: unknown): boolean {
+  return value === undefined || isTimestamp(value);
+}
+
+function isPositiveInteger(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
 
 function pruneState(cwd: string, state: JobState, maxJobs: number): JobState {

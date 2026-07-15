@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { withFileLock } from "../core/file-lock.js";
+import { withProcessLock } from "../core/process-lock.js";
 import type {
   EnqueueDeliveryInput,
   NotificationDelivery,
@@ -15,8 +15,8 @@ export interface EnqueueDeliveryResult {
 export function enqueueDelivery(
   file: string,
   input: EnqueueDeliveryInput
-): EnqueueDeliveryResult {
-  return withFileLock(resolveOutboxLock(file), () => {
+): Promise<EnqueueDeliveryResult> {
+  return withProcessLock(file, () => {
     const id = `${input.jobId}:${input.signalCursor}:${input.target.type}`;
     const existing = readDeliveries(file).find((delivery) => delivery.id === id);
     if (existing) return { delivery: existing, created: false };
@@ -57,8 +57,8 @@ export function claimDueDelivery(
   file: string,
   now: Date,
   leaseMs: number
-): NotificationDelivery | undefined {
-  return withFileLock(resolveOutboxLock(file), () => {
+): Promise<NotificationDelivery | undefined> {
+  return withProcessLock(file, () => {
     const delivery = readDeliveries(file).find((candidate) => isDue(candidate, now));
     if (!delivery) return undefined;
 
@@ -80,7 +80,7 @@ export function completeDelivery(
   id: string,
   expectedAttempt: number,
   deliveredAt: Date
-): NotificationDelivery {
+): Promise<NotificationDelivery> {
   return updateDelivery(file, id, expectedAttempt, (delivery) => {
     const completed: NotificationDelivery = {
       ...delivery,
@@ -99,7 +99,7 @@ export function retryDelivery(
   expectedAttempt: number,
   nextAttemptAt: Date,
   lastError: string
-): NotificationDelivery {
+): Promise<NotificationDelivery> {
   return updateDelivery(file, id, expectedAttempt, (delivery) => {
     const retried: NotificationDelivery = {
       ...delivery,
@@ -118,7 +118,7 @@ export function failDelivery(
   id: string,
   expectedAttempt: number,
   lastError: string
-): NotificationDelivery {
+): Promise<NotificationDelivery> {
   return updateDelivery(file, id, expectedAttempt, (delivery) => {
     const failed: NotificationDelivery = {
       ...delivery,
@@ -137,8 +137,8 @@ function updateDelivery(
   id: string,
   expectedAttempt: number,
   update: (delivery: NotificationDelivery) => NotificationDelivery
-): NotificationDelivery {
-  return withFileLock(resolveOutboxLock(file), () => {
+): Promise<NotificationDelivery> {
+  return withProcessLock(file, () => {
     const delivery = readDeliveries(file).find((candidate) => candidate.id === id);
     if (!delivery) throw new Error(`Notification delivery not found: ${id}`);
     if (delivery.status !== "delivering") {
@@ -178,10 +178,6 @@ function ensureLineBoundary(file: string): void {
   } catch (error) {
     if (!isMissingFileError(error)) throw error;
   }
-}
-
-function resolveOutboxLock(file: string): string {
-  return path.join(path.dirname(file), "notifications.lock");
 }
 
 function parseDeliveryLine(line: string): NotificationDelivery | undefined {

@@ -80,9 +80,11 @@ export interface JobTransitionFields {
 
 export interface PendingJobTransition extends JobTransitionFields {
   version: 1;
+  stage: "prepared" | "finalized";
   fromStatus: JobStatus;
   signalCursor: number;
   signalCreatedAt: string;
+  requestHash: string;
 }
 
 export interface JobRecord {

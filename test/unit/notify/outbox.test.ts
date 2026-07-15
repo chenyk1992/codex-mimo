@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   claimDueDelivery,
   completeDelivery,
@@ -23,22 +23,35 @@ function tempOutbox(): string {
 }
 
 afterEach(() => {
-  vi.restoreAllMocks();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
 describe("notification outbox", () => {
-  it("deduplicates job cursor and target kind", () => {
+  it("exposes one async enqueue contract without a filesystem lock artifact", async () => {
     const file = tempOutbox();
-    const { delivery: first, created: firstCreated } = enqueueDelivery(file, {
+    const pending = enqueueDelivery(file, {
+      jobId: "async-1",
+      signalCursor: 1,
+      target,
+      createdAt: now
+    });
+
+    expect(pending).toBeInstanceOf(Promise);
+    await pending;
+    expect(fs.existsSync(path.join(path.dirname(file), "notifications.lock"))).toBe(false);
+  });
+
+  it("deduplicates job cursor and target kind", async () => {
+    const file = tempOutbox();
+    const { delivery: first, created: firstCreated } = await enqueueDelivery(file, {
       jobId: "implement-1",
       signalCursor: 3,
       target,
       createdAt: now
     });
-    const { delivery: second, created: secondCreated } = enqueueDelivery(file, {
+    const { delivery: second, created: secondCreated } = await enqueueDelivery(file, {
       jobId: "implement-1",
       signalCursor: 3,
       target,
@@ -58,35 +71,35 @@ describe("notification outbox", () => {
     expect(fs.readFileSync(file, "utf8").trim().split(/\r?\n/)).toHaveLength(1);
   });
 
-  it("recovers an expired delivering lease", () => {
+  it("recovers an expired delivering lease", async () => {
     const file = tempOutbox();
-    enqueueDelivery(file, {
+    await enqueueDelivery(file, {
       jobId: "plan-1",
       signalCursor: 1,
       target,
       createdAt: now
     });
 
-    const first = claimDueDelivery(file, new Date(now), 30_000)!;
+    const first = (await claimDueDelivery(file, new Date(now), 30_000))!;
 
     expect(first).toMatchObject({ status: "delivering", attempts: 1 });
-    expect(claimDueDelivery(file, new Date("2026-07-16T00:00:10.000Z"), 30_000))
+    expect(await claimDueDelivery(file, new Date("2026-07-16T00:00:10.000Z"), 30_000))
       .toBeUndefined();
-    expect(claimDueDelivery(file, new Date("2026-07-16T00:00:31.000Z"), 30_000))
+    expect(await claimDueDelivery(file, new Date("2026-07-16T00:00:31.000Z"), 30_000))
       .toMatchObject({ id: first.id, status: "delivering", attempts: 2 });
   });
 
-  it("appends complete snapshots for retry, delivery, and failure", () => {
+  it("appends complete snapshots for retry, delivery, and failure", async () => {
     const file = tempOutbox();
-    const { delivery: first } = enqueueDelivery(file, {
+    const { delivery: first } = await enqueueDelivery(file, {
       jobId: "review-1",
       signalCursor: 2,
       target,
       createdAt: now
     });
-    const firstClaim = claimDueDelivery(file, new Date(now), 30_000)!;
+    const firstClaim = (await claimDueDelivery(file, new Date(now), 30_000))!;
 
-    const retried = retryDelivery(
+    const retried = await retryDelivery(
       file,
       first.id,
       firstClaim.attempts,
@@ -101,12 +114,12 @@ describe("notification outbox", () => {
     });
     expect(retried.leaseUntil).toBeUndefined();
 
-    const secondClaim = claimDueDelivery(
+    const secondClaim = (await claimDueDelivery(
       file,
       new Date("2026-07-16T00:00:10.000Z"),
       30_000
-    )!;
-    const delivered = completeDelivery(
+    ))!;
+    const delivered = await completeDelivery(
       file,
       first.id,
       secondClaim.attempts,
@@ -119,14 +132,14 @@ describe("notification outbox", () => {
     });
     expect(delivered.leaseUntil).toBeUndefined();
 
-    const { delivery: second } = enqueueDelivery(file, {
+    const { delivery: second } = await enqueueDelivery(file, {
       jobId: "review-1",
       signalCursor: 3,
       target,
       createdAt: now
     });
-    const failureClaim = claimDueDelivery(file, new Date(now), 30_000)!;
-    expect(failDelivery(file, second.id, failureClaim.attempts, "bad target")).toMatchObject({
+    const failureClaim = (await claimDueDelivery(file, new Date(now), 30_000))!;
+    expect(await failDelivery(file, second.id, failureClaim.attempts, "bad target")).toMatchObject({
       status: "failed",
       attempts: 1,
       lastError: "bad target"
@@ -135,9 +148,9 @@ describe("notification outbox", () => {
     expect(fs.readFileSync(file, "utf8").trim().split(/\r?\n/)).toHaveLength(8);
   });
 
-  it("ignores malformed journal lines during replay", () => {
+  it("ignores malformed journal lines during replay", async () => {
     const file = tempOutbox();
-    const { delivery } = enqueueDelivery(file, {
+    const { delivery } = await enqueueDelivery(file, {
       jobId: "fix-1",
       signalCursor: 4,
       target,
@@ -148,16 +161,16 @@ describe("notification outbox", () => {
     expect(readDeliveries(file)).toEqual([delivery]);
   });
 
-  it("does not claim a pending delivery before its retry time", () => {
+  it("does not claim a pending delivery before its retry time", async () => {
     const file = tempOutbox();
-    const { delivery } = enqueueDelivery(file, {
+    const { delivery } = await enqueueDelivery(file, {
       jobId: "fix-ci-1",
       signalCursor: 5,
       target,
       createdAt: now
     });
-    const claim = claimDueDelivery(file, new Date(now), 30_000)!;
-    retryDelivery(
+    const claim = (await claimDueDelivery(file, new Date(now), 30_000))!;
+    await retryDelivery(
       file,
       delivery.id,
       claim.attempts,
@@ -165,108 +178,108 @@ describe("notification outbox", () => {
       "busy"
     );
 
-    expect(claimDueDelivery(file, new Date("2026-07-16T00:00:59.999Z"), 30_000))
+    expect(await claimDueDelivery(file, new Date("2026-07-16T00:00:59.999Z"), 30_000))
       .toBeUndefined();
-    expect(claimDueDelivery(file, new Date("2026-07-16T00:01:00.000Z"), 30_000)?.id)
+    expect((await claimDueDelivery(file, new Date("2026-07-16T00:01:00.000Z"), 30_000))?.id)
       .toBe(delivery.id);
   });
 
-  it("does not return a delivered delivery to pending", () => {
+  it("does not return a delivered delivery to pending", async () => {
     const file = tempOutbox();
-    const { delivery } = enqueueDelivery(file, {
+    const { delivery } = await enqueueDelivery(file, {
       jobId: "implement-2",
       signalCursor: 1,
       target,
       createdAt: now
     });
-    const claim = claimDueDelivery(file, new Date(now), 30_000)!;
-    completeDelivery(file, delivery.id, claim.attempts, new Date(now));
+    const claim = (await claimDueDelivery(file, new Date(now), 30_000))!;
+    await completeDelivery(file, delivery.id, claim.attempts, new Date(now));
 
-    expect(() => retryDelivery(
+    await expect(retryDelivery(
       file,
       delivery.id,
       claim.attempts,
       new Date("2026-07-16T00:01:00.000Z"),
       "late"
-    )).toThrow("not delivering");
+    )).rejects.toThrow("not delivering");
     expect(readDeliveries(file)[0].status).toBe("delivered");
   });
 
-  it("does not overwrite failed and delivered terminal outcomes", () => {
+  it("does not overwrite failed and delivered terminal outcomes", async () => {
     const file = tempOutbox();
-    const { delivery: failed } = enqueueDelivery(file, {
+    const { delivery: failed } = await enqueueDelivery(file, {
       jobId: "implement-3",
       signalCursor: 1,
       target,
       createdAt: now
     });
-    const failedClaim = claimDueDelivery(file, new Date(now), 30_000)!;
-    failDelivery(file, failed.id, failedClaim.attempts, "permanent");
-    expect(() => completeDelivery(
+    const failedClaim = (await claimDueDelivery(file, new Date(now), 30_000))!;
+    await failDelivery(file, failed.id, failedClaim.attempts, "permanent");
+    await expect(completeDelivery(
       file,
       failed.id,
       failedClaim.attempts,
       new Date(now)
-    )).toThrow("not delivering");
+    )).rejects.toThrow("not delivering");
 
-    const { delivery: delivered } = enqueueDelivery(file, {
+    const { delivery: delivered } = await enqueueDelivery(file, {
       jobId: "implement-3",
       signalCursor: 2,
       target,
       createdAt: now
     });
-    const deliveredClaim = claimDueDelivery(file, new Date(now), 30_000)!;
-    completeDelivery(file, delivered.id, deliveredClaim.attempts, new Date(now));
-    expect(() => failDelivery(
+    const deliveredClaim = (await claimDueDelivery(file, new Date(now), 30_000))!;
+    await completeDelivery(file, delivered.id, deliveredClaim.attempts, new Date(now));
+    await expect(failDelivery(
       file,
       delivered.id,
       deliveredClaim.attempts,
       "too late"
-    )).toThrow("not delivering");
+    )).rejects.toThrow("not delivering");
 
     expect(readDeliveries(file).map((item) => item.status)).toEqual(["failed", "delivered"]);
   });
 
-  it("rejects every mutation from a worker whose lease was reclaimed", () => {
+  it("rejects every mutation from a worker whose lease was reclaimed", async () => {
     const file = tempOutbox();
-    const { delivery } = enqueueDelivery(file, {
+    const { delivery } = await enqueueDelivery(file, {
       jobId: "implement-4",
       signalCursor: 1,
       target,
       createdAt: now
     });
-    const first = claimDueDelivery(file, new Date(now), 30_000)!;
-    const second = claimDueDelivery(file, new Date("2026-07-16T00:00:31.000Z"), 30_000)!;
+    const first = (await claimDueDelivery(file, new Date(now), 30_000))!;
+    const second = (await claimDueDelivery(file, new Date("2026-07-16T00:00:31.000Z"), 30_000))!;
 
-    expect(() => completeDelivery(
+    await expect(completeDelivery(
       file,
       delivery.id,
       first.attempts,
       new Date("2026-07-16T00:00:32.000Z")
-    )).toThrow("lease generation");
-    expect(() => retryDelivery(
+    )).rejects.toThrow("lease generation");
+    await expect(retryDelivery(
       file,
       delivery.id,
       first.attempts,
       new Date("2026-07-16T00:01:00.000Z"),
       "stale"
-    )).toThrow("lease generation");
-    expect(() => failDelivery(
+    )).rejects.toThrow("lease generation");
+    await expect(failDelivery(
       file,
       delivery.id,
       first.attempts,
       "stale"
-    )).toThrow("lease generation");
+    )).rejects.toThrow("lease generation");
 
-    expect(completeDelivery(
+    expect((await completeDelivery(
       file,
       delivery.id,
       second.attempts,
       new Date("2026-07-16T00:00:32.000Z")
-    ).status).toBe("delivered");
+    )).status).toBe("delivered");
   });
 
-  it("strips secrets and extra fields from replayed snapshots and later mutations", () => {
+  it("strips secrets and extra fields from replayed snapshots and later mutations", async () => {
     const file = tempOutbox();
     const id = "review-2:1:webhook";
     fs.writeFileSync(file, `${JSON.stringify({
@@ -305,7 +318,7 @@ describe("notification outbox", () => {
       leaseUntil: "2026-07-16T00:00:30.000Z"
     });
 
-    failDelivery(file, id, replayed.attempts, "permanent");
+    await failDelivery(file, id, replayed.attempts, "permanent");
     const lastLine = fs.readFileSync(file, "utf8").trim().split(/\r?\n/).at(-1)!;
     expect(lastLine).not.toContain("target-secret");
     expect(lastLine).not.toContain("top-level-secret");
@@ -324,15 +337,15 @@ describe("notification outbox", () => {
         secretEnv: "HOOK_SECRET"
       }
     }]
-  ])("skips a snapshot with a mismatched %s identity", (_name, identityPatch) => {
+  ])("skips a snapshot with a mismatched %s identity", async (_name, identityPatch) => {
     const file = tempOutbox();
-    const { delivery: first } = enqueueDelivery(file, {
+    const { delivery: first } = await enqueueDelivery(file, {
       jobId: "identity-1",
       signalCursor: 1,
       target,
       createdAt: now
     });
-    const { delivery: second } = enqueueDelivery(file, {
+    const { delivery: second } = await enqueueDelivery(file, {
       jobId: "identity-1",
       signalCursor: 2,
       target,
@@ -383,9 +396,9 @@ describe("notification outbox", () => {
       status: "failed",
       attempts: 0
     }]
-  ])("skips a later %s snapshot and keeps the prior delivery claimable", (_name, invalidPatch) => {
+  ])("skips a later %s snapshot and keeps the prior delivery claimable", async (_name, invalidPatch) => {
     const file = tempOutbox();
-    const { delivery } = enqueueDelivery(file, {
+    const { delivery } = await enqueueDelivery(file, {
       jobId: "fix-2",
       signalCursor: 1,
       target,
@@ -394,23 +407,6 @@ describe("notification outbox", () => {
     fs.appendFileSync(file, `${JSON.stringify({ ...delivery, ...invalidPatch })}\n`, "utf8");
 
     expect(readDeliveries(file)).toEqual([delivery]);
-    expect(claimDueDelivery(file, new Date(now), 30_000)?.id).toBe(delivery.id);
-  });
-
-  it("removes the lock even when closing its descriptor throws", () => {
-    const file = tempOutbox();
-    const originalClose = fs.closeSync;
-    vi.spyOn(fs, "closeSync").mockImplementationOnce((descriptor) => {
-      originalClose(descriptor);
-      throw new Error("close failed");
-    });
-
-    expect(() => enqueueDelivery(file, {
-      jobId: "fix-3",
-      signalCursor: 1,
-      target,
-      createdAt: now
-    })).toThrow("close failed");
-    expect(fs.existsSync(path.join(path.dirname(file), "notifications.lock"))).toBe(false);
+    expect((await claimDueDelivery(file, new Date(now), 30_000))?.id).toBe(delivery.id);
   });
 });

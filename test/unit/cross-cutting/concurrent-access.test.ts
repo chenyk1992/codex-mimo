@@ -76,7 +76,7 @@ describe("concurrent access", () => {
   it("only one concurrent claimant receives a delivery", async () => {
     const cwd = tempWorkspace();
     const file = path.join(cwd, ".codex-mimo", "jobs", "notifications.jsonl");
-    enqueueDelivery(file, {
+    await enqueueDelivery(file, {
       jobId: "implement-1",
       signalCursor: 1,
       target: { type: "codex", threadId: "thread-1" },
@@ -88,7 +88,7 @@ describe("concurrent access", () => {
       import { claimDueDelivery } from ${JSON.stringify(outboxModule)};
       const delay = Number(process.argv[2]) - Date.now();
       if (delay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
-      const claim = claimDueDelivery(process.argv[3], new Date(process.argv[4]), 30_000);
+      const claim = await claimDueDelivery(process.argv[3], new Date(process.argv[4]), 30_000);
       process.stdout.write(JSON.stringify(claim ?? null));
     `;
     const childScript = path.join(cwd, "claim-child.ts");
@@ -125,7 +125,7 @@ describe("concurrent access", () => {
       const delay = Number(process.argv[2]) - Date.now();
       if (delay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
       try {
-        const result = transitionJob(process.argv[3], process.argv[4], {
+        const result = await transitionJob(process.argv[3], process.argv[4], {
           status: process.argv[5], summary: process.argv[5]
         });
         process.stdout.write(JSON.stringify({ status: result.job.status }));
@@ -145,14 +145,7 @@ describe("concurrent access", () => {
       job.id,
       status
     ]);
-    const jobLock = path.join(path.dirname(job.logFile), `${job.id}.state.lock`);
-    fs.writeFileSync(jobLock, "held", "utf8");
-    let settledWhileLocked = 0;
-    const transitions = [runTransition("completed"), runTransition("failed")]
-      .map((promise) => promise.finally(() => { settledWhileLocked += 1; }));
-    await new Promise((resolve) => setTimeout(resolve, 650));
-    const observedSettled = settledWhileLocked;
-    fs.rmSync(jobLock, { force: true });
+    const transitions = [runTransition("completed"), runTransition("failed")];
     const outputs = await Promise.all(transitions);
     const outcomes = outputs.map(({ stdout }) => JSON.parse(stdout) as {
       status?: string;
@@ -162,7 +155,6 @@ describe("concurrent access", () => {
     const stored = readJob(cwd, job.id)!;
     const signals = readJobSignals(job.signalsFile).signals;
     const deliveries = readDeliveries(job.notificationOutboxFile);
-    expect(observedSettled).toBe(0);
     expect(outcomes.filter((outcome) => outcome.status !== undefined)).toHaveLength(1);
     expect(outcomes.filter((outcome) => outcome.error !== undefined)).toHaveLength(1);
     expect(["completed", "failed"]).toContain(stored.status);
@@ -186,7 +178,7 @@ describe("concurrent access", () => {
       import { appendJobProgress } from ${JSON.stringify(transitionModule)};
       const delay = Number(process.argv[2]) - Date.now();
       if (delay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
-      const signal = appendJobProgress(process.argv[3], process.argv[4], {
+      const signal = await appendJobProgress(process.argv[3], process.argv[4], {
         kind: "milestone", level: "info", summary: process.argv[5]
       });
       process.stdout.write(JSON.stringify(signal));
@@ -203,17 +195,9 @@ describe("concurrent access", () => {
       job.id,
       summary
     ]);
-    const jobLock = path.join(path.dirname(job.logFile), `${job.id}.state.lock`);
-    fs.writeFileSync(jobLock, "held", "utf8");
-    let settledWhileLocked = 0;
-    const progress = [runProgress("first"), runProgress("second")]
-      .map((promise) => promise.finally(() => { settledWhileLocked += 1; }));
-    await new Promise((resolve) => setTimeout(resolve, 650));
-    const observedSettled = settledWhileLocked;
-    fs.rmSync(jobLock, { force: true });
+    const progress = [runProgress("first"), runProgress("second")];
     await Promise.all(progress);
 
-    expect(observedSettled).toBe(0);
     expect(readJobSignals(job.signalsFile).signals.map((signal) => signal.cursor).sort())
       .toEqual([1, 2]);
   });
