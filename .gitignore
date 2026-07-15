@@ -1,4 +1,5 @@
 node_modules/
 dist/
 .codex-mimo/
+.worktrees/
 *.log
