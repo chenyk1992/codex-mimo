@@ -34,3 +34,12 @@ export type DeliveryAttemptResult =
   | { outcome: "delivered" }
   | { outcome: "retry"; error: string }
   | { outcome: "permanent"; error: string };
+
+export class StaleDeliveryGenerationError extends Error {
+  readonly code = "STALE_DELIVERY_GENERATION" as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "StaleDeliveryGenerationError";
+  }
+}

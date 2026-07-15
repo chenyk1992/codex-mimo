@@ -9,9 +9,14 @@ import {
   completeDelivery,
   failDelivery,
   readDeliveries,
+  renewDeliveryLease,
   retryDelivery
 } from "./outbox.js";
-import type { DeliveryAttemptResult, NotificationDelivery } from "./types.js";
+import {
+  StaleDeliveryGenerationError,
+  type DeliveryAttemptResult,
+  type NotificationDelivery
+} from "./types.js";
 import { deliverWebhook } from "./webhook-adapter.js";
 
 const DEFAULT_LEASE_MS = 30_000;
@@ -30,7 +35,18 @@ export interface DispatcherDependencies {
   createCodexClient?: () => CodexAppServerClient;
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch;
+  renewDeliveryLease?: typeof renewDeliveryLease;
+  scheduleLeaseRenewal?: (
+    callback: () => Promise<void>,
+    delayMs: number
+  ) => unknown;
+  cancelLeaseRenewal?: (timer: unknown) => void;
 }
+
+export type NotificationDispatchResult =
+  | { outcome: "idle" }
+  | { outcome: "settled"; delivery: NotificationDelivery }
+  | { outcome: "stale"; delivery?: NotificationDelivery };
 
 export interface JobNotificationSummary {
   type: NotificationDelivery["target"]["type"];
@@ -48,21 +64,25 @@ export function retryDelayMs(attempts: number): number {
 export async function dispatchNextDelivery(
   cwd: string,
   dependencies: DispatcherDependencies = {}
-): Promise<NotificationDelivery | undefined> {
-  const now = dependencies.now?.() ?? new Date();
+): Promise<NotificationDispatchResult> {
+  const claimedAt = readNow(dependencies);
   const outboxFile = path.join(resolveJobDir(cwd), "notifications.jsonl");
+  const leaseMs = dependencies.leaseMs ?? DEFAULT_LEASE_MS;
   const claimed = await claimDueDelivery(
     outboxFile,
-    now,
-    dependencies.leaseMs ?? DEFAULT_LEASE_MS
+    claimedAt,
+    leaseMs
   );
-  if (!claimed) return undefined;
+  if (!claimed) return { outcome: "idle" };
 
   const context = loadDeliveryContext(cwd, outboxFile, claimed);
   if ("error" in context) {
-    return failDelivery(outboxFile, claimed.id, claimed.attempts, context.error);
+    return settleDelivery(outboxFile, claimed, () =>
+      failDelivery(outboxFile, claimed.id, claimed.attempts, context.error)
+    );
   }
 
+  const heartbeat = startLeaseHeartbeat(outboxFile, claimed, leaseMs, dependencies);
   let result: DeliveryAttemptResult;
   try {
     result = dependencies.deliver
@@ -70,22 +90,33 @@ export async function dispatchNextDelivery(
       : await deliverByTarget(claimed, context.job, context.signal, dependencies);
   } catch {
     result = { outcome: "retry", error: "Notification delivery failed" };
+  } finally {
+    await heartbeat.stop();
   }
+  if (heartbeat.ownershipLost()) return staleDispatchResult(outboxFile, claimed.id);
+
+  const settledAt = readNow(dependencies);
 
   if (result.outcome === "delivered") {
-    return completeDelivery(outboxFile, claimed.id, claimed.attempts, now);
+    return settleDelivery(outboxFile, claimed, () =>
+      completeDelivery(outboxFile, claimed.id, claimed.attempts, settledAt)
+    );
   }
   if (result.outcome === "permanent" ||
-      now.getTime() - Date.parse(claimed.createdAt) >= MAX_RETRY_AGE_MS) {
-    return failDelivery(outboxFile, claimed.id, claimed.attempts, result.error);
+      settledAt.getTime() - Date.parse(claimed.createdAt) >= MAX_RETRY_AGE_MS) {
+    return settleDelivery(outboxFile, claimed, () =>
+      failDelivery(outboxFile, claimed.id, claimed.attempts, result.error)
+    );
   }
 
-  return retryDelivery(
-    outboxFile,
-    claimed.id,
-    claimed.attempts,
-    new Date(now.getTime() + retryDelayMs(claimed.attempts)),
-    result.error
+  return settleDelivery(outboxFile, claimed, () =>
+    retryDelivery(
+      outboxFile,
+      claimed.id,
+      claimed.attempts,
+      new Date(settledAt.getTime() + retryDelayMs(claimed.attempts)),
+      result.error
+    )
   );
 }
 
@@ -178,4 +209,95 @@ function sameTarget(
     ? left.threadId === right.threadId
     : left.type === "webhook" && right.type === "webhook" &&
       left.url === right.url && left.secretEnv === right.secretEnv;
+}
+
+function startLeaseHeartbeat(
+  file: string,
+  delivery: NotificationDelivery,
+  leaseMs: number,
+  dependencies: DispatcherDependencies
+): { stop: () => Promise<void>; ownershipLost: () => boolean } {
+  const schedule = dependencies.scheduleLeaseRenewal ?? defaultScheduleLeaseRenewal;
+  const cancel = dependencies.cancelLeaseRenewal ?? defaultCancelLeaseRenewal;
+  const renew = dependencies.renewDeliveryLease ?? renewDeliveryLease;
+  const intervalMs = Math.max(1, Math.floor(leaseMs / 3));
+  let stopped = false;
+  let lost = false;
+  let timer: unknown;
+  let timerScheduled = false;
+  let inFlight: Promise<void> | undefined;
+
+  const scheduleNext = (): void => {
+    timer = schedule(tick, intervalMs);
+    timerScheduled = true;
+  };
+  const tick = async (): Promise<void> => {
+    timerScheduled = false;
+    if (stopped || lost) return;
+
+    const current = Promise.resolve().then(() => renew(
+      file,
+      delivery.id,
+      delivery.attempts,
+      readNow(dependencies),
+      leaseMs
+    )).then(
+      () => undefined,
+      () => { lost = true; }
+    );
+    inFlight = current;
+    await current;
+    if (inFlight === current) inFlight = undefined;
+    if (!stopped && !lost) scheduleNext();
+  };
+
+  scheduleNext();
+  return {
+    ownershipLost: () => lost,
+    stop: async () => {
+      stopped = true;
+      if (timerScheduled) {
+        cancel(timer);
+        timerScheduled = false;
+      }
+      await inFlight;
+    }
+  };
+}
+
+async function settleDelivery(
+  file: string,
+  claimed: NotificationDelivery,
+  settle: () => Promise<NotificationDelivery>
+): Promise<NotificationDispatchResult> {
+  try {
+    return { outcome: "settled", delivery: await settle() };
+  } catch (error) {
+    if (error instanceof StaleDeliveryGenerationError) {
+      return staleDispatchResult(file, claimed.id);
+    }
+    throw error;
+  }
+}
+
+function staleDispatchResult(file: string, id: string): NotificationDispatchResult {
+  const delivery = readDeliveries(file).find((candidate) => candidate.id === id);
+  return delivery === undefined
+    ? { outcome: "stale" }
+    : { outcome: "stale", delivery };
+}
+
+function readNow(dependencies: DispatcherDependencies): Date {
+  return dependencies.now?.() ?? new Date();
+}
+
+function defaultScheduleLeaseRenewal(
+  callback: () => Promise<void>,
+  delayMs: number
+): ReturnType<typeof setTimeout> {
+  return setTimeout(() => { void callback(); }, delayMs);
+}
+
+function defaultCancelLeaseRenewal(timer: unknown): void {
+  clearTimeout(timer as ReturnType<typeof setTimeout>);
 }

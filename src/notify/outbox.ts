@@ -6,6 +6,7 @@ import type {
   NotificationDelivery,
   NotificationTarget
 } from "./types.js";
+import { StaleDeliveryGenerationError as StaleGenerationError } from "./types.js";
 
 export interface EnqueueDeliveryResult {
   delivery: NotificationDelivery;
@@ -93,6 +94,23 @@ export function completeDelivery(
   });
 }
 
+export function renewDeliveryLease(
+  file: string,
+  id: string,
+  expectedAttempt: number,
+  now: Date,
+  leaseMs: number
+): Promise<NotificationDelivery> {
+  return updateDelivery(file, id, expectedAttempt, (delivery) => {
+    const currentLeaseUntil = Date.parse(delivery.leaseUntil!);
+    const renewedLeaseUntil = now.getTime() + leaseMs;
+    return {
+      ...delivery,
+      leaseUntil: new Date(Math.max(currentLeaseUntil, renewedLeaseUntil)).toISOString()
+    };
+  });
+}
+
 export function retryDelivery(
   file: string,
   id: string,
@@ -140,12 +158,16 @@ function updateDelivery(
 ): Promise<NotificationDelivery> {
   return withProcessLock(file, () => {
     const delivery = readDeliveries(file).find((candidate) => candidate.id === id);
-    if (!delivery) throw new Error(`Notification delivery not found: ${id}`);
+    if (!delivery) {
+      throw new StaleGenerationError(`Notification delivery not found: ${id}`);
+    }
     if (delivery.status !== "delivering") {
-      throw new Error(`Notification delivery is not delivering: ${id}`);
+      throw new StaleGenerationError(`Notification delivery is not delivering: ${id}`);
     }
     if (delivery.attempts !== expectedAttempt) {
-      throw new Error(`Notification delivery lease generation does not match: ${id}`);
+      throw new StaleGenerationError(
+        `Notification delivery lease generation does not match: ${id}`
+      );
     }
     const updated = update(delivery);
     appendSnapshot(file, updated);

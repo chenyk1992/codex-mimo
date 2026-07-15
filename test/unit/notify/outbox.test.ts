@@ -8,8 +8,10 @@ import {
   enqueueDelivery,
   failDelivery,
   readDeliveries,
+  renewDeliveryLease,
   retryDelivery
 } from "../../../src/notify/outbox.js";
+import { StaleDeliveryGenerationError } from "../../../src/notify/types.js";
 import type { NotificationTarget } from "../../../src/notify/types.js";
 
 const tempDirs: string[] = [];
@@ -87,6 +89,68 @@ describe("notification outbox", () => {
       .toBeUndefined();
     expect(await claimDueDelivery(file, new Date("2026-07-16T00:00:31.000Z"), 30_000))
       .toMatchObject({ id: first.id, status: "delivering", attempts: 2 });
+  });
+
+  it("atomically renews only the current delivery generation", async () => {
+    const file = tempOutbox();
+    const { delivery } = await enqueueDelivery(file, {
+      jobId: "plan-renew-1",
+      signalCursor: 1,
+      target,
+      createdAt: now
+    });
+    const claim = (await claimDueDelivery(file, new Date(now), 30_000))!;
+
+    const renewed = await renewDeliveryLease(
+      file,
+      delivery.id,
+      claim.attempts,
+      new Date("2026-07-16T00:00:10.000Z"),
+      30_000
+    );
+
+    expect(renewed).toMatchObject({
+      status: "delivering",
+      attempts: 1,
+      leaseUntil: "2026-07-16T00:00:40.000Z"
+    });
+    expect(await claimDueDelivery(file, new Date("2026-07-16T00:00:31.000Z"), 30_000))
+      .toBeUndefined();
+  });
+
+  it("reports a typed stale generation without overwriting a reclaimed or terminal delivery", async () => {
+    const file = tempOutbox();
+    const { delivery } = await enqueueDelivery(file, {
+      jobId: "plan-renew-2",
+      signalCursor: 1,
+      target,
+      createdAt: now
+    });
+    const first = (await claimDueDelivery(file, new Date(now), 30_000))!;
+    const second = (await claimDueDelivery(
+      file,
+      new Date("2026-07-16T00:00:31.000Z"),
+      30_000
+    ))!;
+
+    await expect(renewDeliveryLease(
+      file,
+      delivery.id,
+      first.attempts,
+      new Date("2026-07-16T00:00:32.000Z"),
+      30_000
+    )).rejects.toBeInstanceOf(StaleDeliveryGenerationError);
+    expect(readDeliveries(file)[0]).toMatchObject({ status: "delivering", attempts: 2 });
+
+    await completeDelivery(file, delivery.id, second.attempts, new Date("2026-07-16T00:00:33.000Z"));
+    await expect(renewDeliveryLease(
+      file,
+      delivery.id,
+      second.attempts,
+      new Date("2026-07-16T00:00:34.000Z"),
+      30_000
+    )).rejects.toMatchObject({ code: "STALE_DELIVERY_GENERATION" });
+    expect(readDeliveries(file)[0]).toMatchObject({ status: "delivered", attempts: 2 });
   });
 
   it("appends complete snapshots for retry, delivery, and failure", async () => {

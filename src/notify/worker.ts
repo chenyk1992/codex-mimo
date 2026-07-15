@@ -18,7 +18,7 @@ export async function runNotificationWorker(
 
   while (true) {
     const dispatched = await dispatchNextDelivery(cwd, dependencies);
-    if (dispatched) continue;
+    if (dispatched.outcome !== "idle") continue;
 
     const now = dependencies.now?.() ?? new Date();
     const unfinished = readNotificationDeliveries(cwd)
