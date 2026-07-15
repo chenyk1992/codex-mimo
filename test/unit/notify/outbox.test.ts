@@ -311,6 +311,37 @@ describe("notification outbox", () => {
   });
 
   it.each([
+    ["id", { id: "identity-1:2:codex" }],
+    ["eventId", { eventId: "identity-1:2:codex" }],
+    ["jobId", { jobId: "different-job" }],
+    ["signal cursor", { signalCursor: 99 }],
+    ["target kind", {
+      target: {
+        type: "webhook",
+        url: "https://example.test/hook",
+        secretEnv: "HOOK_SECRET"
+      }
+    }]
+  ])("skips a snapshot with a mismatched %s identity", (_name, identityPatch) => {
+    const file = tempOutbox();
+    const first = enqueueDelivery(file, {
+      jobId: "identity-1",
+      signalCursor: 1,
+      target,
+      createdAt: now
+    });
+    const second = enqueueDelivery(file, {
+      jobId: "identity-1",
+      signalCursor: 2,
+      target,
+      createdAt: now
+    });
+    fs.appendFileSync(file, `${JSON.stringify({ ...first, ...identityPatch })}\n`, "utf8");
+
+    expect(readDeliveries(file)).toEqual([first, second]);
+  });
+
+  it.each([
     ["invalid createdAt", { createdAt: "not-a-date" }],
     ["invalid nextAttemptAt", { nextAttemptAt: "not-a-date" }],
     ["delivering without a lease", { status: "delivering", attempts: 1 }],
@@ -331,6 +362,24 @@ describe("notification outbox", () => {
       status: "failed",
       attempts: 1,
       leaseUntil: "2026-07-16T00:00:30.000Z"
+    }],
+    ["pending retry with zero attempts", {
+      attempts: 0,
+      nextAttemptAt: "2026-07-16T00:00:30.000Z"
+    }],
+    ["delivering with zero attempts", {
+      status: "delivering",
+      attempts: 0,
+      leaseUntil: "2026-07-16T00:00:30.000Z"
+    }],
+    ["delivered with zero attempts", {
+      status: "delivered",
+      attempts: 0,
+      deliveredAt: now
+    }],
+    ["failed with zero attempts", {
+      status: "failed",
+      attempts: 0
     }]
   ])("skips a later %s snapshot and keeps the prior delivery claimable", (_name, invalidPatch) => {
     const file = tempOutbox();

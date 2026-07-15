@@ -215,7 +215,15 @@ function sanitizeNotificationDelivery(value: unknown): NotificationDelivery | un
     typeof value.jobId !== "string" ||
     typeof value.signalCursor !== "number" ||
     !Number.isInteger(value.signalCursor) ||
-    value.signalCursor < 0 ||
+    value.signalCursor < 0
+  ) {
+    return undefined;
+  }
+
+  const expectedId = `${value.jobId}:${value.signalCursor}:${target.type}`;
+  if (
+    value.id !== expectedId ||
+    value.eventId !== expectedId ||
     (value.status !== "pending" &&
       value.status !== "delivering" &&
       value.status !== "delivered" &&
@@ -266,19 +274,25 @@ function sanitizeNotificationTarget(value: unknown): NotificationTarget | undefi
 }
 
 function hasValidStatusFields(value: Record<string, unknown>): boolean {
+  if (typeof value.attempts !== "number") return false;
   switch (value.status) {
     case "pending":
-      return value.leaseUntil === undefined && value.deliveredAt === undefined;
+      return value.leaseUntil === undefined &&
+        value.deliveredAt === undefined &&
+        (value.nextAttemptAt === undefined || value.attempts > 0);
     case "delivering":
-      return value.leaseUntil !== undefined &&
+      return value.attempts > 0 &&
+        value.leaseUntil !== undefined &&
         value.nextAttemptAt === undefined &&
         value.deliveredAt === undefined;
     case "delivered":
-      return value.deliveredAt !== undefined &&
+      return value.attempts > 0 &&
+        value.deliveredAt !== undefined &&
         value.leaseUntil === undefined &&
         value.nextAttemptAt === undefined;
     case "failed":
-      return value.leaseUntil === undefined &&
+      return value.attempts > 0 &&
+        value.leaseUntil === undefined &&
         value.nextAttemptAt === undefined &&
         value.deliveredAt === undefined;
     default:
