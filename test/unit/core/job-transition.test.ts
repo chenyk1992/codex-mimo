@@ -217,6 +217,27 @@ describe("job transitions", () => {
     expect(readDeliveries(recovered!.job.notificationOutboxFile)).toHaveLength(1);
   });
 
+  it("recovers the worker trigger after intent clear commits but acknowledgment is lost", async () => {
+    const { cwd, jobId } = seedJob("running", true);
+    const job = readJob(cwd, jobId)!;
+
+    await expect(transitionJob(cwd, jobId, { status: "completed", summary: "done" }, {
+      afterIntentCleared: () => { throw new Error("after clear"); }
+    })).rejects.toThrow("after clear");
+    expect(readJob(cwd, jobId)).not.toHaveProperty("pendingTransition");
+    expect(readJobSignals(job.signalsFile).signals).toHaveLength(1);
+    expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(1);
+
+    const recovered = await recoverPendingTransition(cwd, jobId);
+    expect(recovered).toMatchObject({
+      deliveryCreated: true,
+      job: { status: "completed" },
+      signal: { cursor: 1, status: "completed" }
+    });
+    expect(readJobSignals(job.signalsFile).signals).toHaveLength(1);
+    expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(1);
+  });
+
   it("does not report a finalized job-file write as failed when state index refresh fails", async () => {
     const { cwd, jobId } = seedJob("running", true);
     const stateFile = resolveJobStateFile(cwd);

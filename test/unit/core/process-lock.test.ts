@@ -1,5 +1,6 @@
 import { once } from "node:events";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -60,6 +61,39 @@ describe("process lock", () => {
     expect(first.host).toMatch(/^127\.(?:[1-9]|[1-9]\d|1\d\d|2[0-4]\d|25[0-4])\.(?:[1-9]|[1-9]\d|1\d\d|2[0-4]\d|25[0-4])\.(?:[1-9]|[1-9]\d|1\d\d|2[0-4]\d|25[0-4])$/);
     expect(first.port).toBeGreaterThanOrEqual(49_152);
     expect(first.port).toBeLessThanOrEqual(65_535);
+  });
+
+  it("maps physical-path aliases to the same endpoint and serializes them", async () => {
+    const dir = tempDir();
+    const realDir = path.join(dir, "real");
+    const aliasDir = path.join(dir, "alias");
+    fs.mkdirSync(realDir);
+    fs.symlinkSync(realDir, aliasDir, process.platform === "win32" ? "junction" : "dir");
+    const realExisting = path.join(realDir, "job.json");
+    const aliasExisting = path.join(aliasDir, "job.json");
+    fs.writeFileSync(realExisting, "{}", "utf8");
+
+    expect(resolveProcessLockEndpoint(aliasExisting))
+      .toEqual(resolveProcessLockEndpoint(realExisting));
+    expect(resolveProcessLockEndpoint(path.join(aliasDir, "missing", "outbox.jsonl")))
+      .toEqual(resolveProcessLockEndpoint(path.join(realDir, "missing", "outbox.jsonl")));
+
+    let release!: () => void;
+    let firstEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { firstEntered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let aliasEntered = false;
+    const first = withProcessLock(realExisting, async () => {
+      firstEntered();
+      await held;
+    });
+    await entered;
+    const second = withProcessLock(aliasExisting, () => { aliasEntered = true; });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(aliasEntered).toBe(false);
+    release();
+    await Promise.all([first, second]);
+    expect(aliasEntered).toBe(true);
   });
 
   it("never overlaps two processes contending for the same key", async () => {
@@ -141,5 +175,28 @@ describe("process lock", () => {
         retryMs: 5
       })).rejects.toThrow("Timed out acquiring process lock");
     });
+  });
+
+  it("destroys accepted clients so close completes and the endpoint can be reacquired", async () => {
+    const key = path.join(tempDir(), "client-held.lock");
+    const endpoint = resolveProcessLockEndpoint(key);
+    let client: net.Socket | undefined;
+
+    const first = withProcessLock(key, async () => {
+      client = net.createConnection(endpoint);
+      client.on("error", () => undefined);
+      await once(client, "connect");
+    });
+
+    await waitFor(() => client !== undefined);
+    const observedReturned = await Promise.race([
+      first.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250))
+    ]);
+    if (!observedReturned) client?.destroy();
+    await first;
+    expect(observedReturned).toBe(true);
+    expect(client?.destroyed).toBe(true);
+    await expect(withProcessLock(key, () => "reacquired")).resolves.toBe("reacquired");
   });
 });

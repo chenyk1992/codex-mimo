@@ -25,7 +25,10 @@ import {
   type PendingJobTransition
 } from "./jobs.js";
 import { withProcessLock } from "./process-lock.js";
-import { enqueueDelivery as enqueueNotificationDelivery } from "../notify/outbox.js";
+import {
+  enqueueDelivery as enqueueNotificationDelivery,
+  readDeliveries
+} from "../notify/outbox.js";
 
 const LEGAL: Record<JobStatus, readonly JobStatus[]> = {
   queued: ["running", "failed", "cancelled"],
@@ -51,6 +54,7 @@ export interface JobTransitionDependencies {
   afterSignalAppended?: () => Promise<void> | void;
   afterJobFinalized?: () => Promise<void> | void;
   afterDeliveryEnqueued?: () => Promise<void> | void;
+  afterIntentCleared?: () => Promise<void> | void;
   appendSignal?: typeof appendJobSignalAtCursor;
   enqueueDelivery?: typeof enqueueNotificationDelivery;
 }
@@ -116,7 +120,7 @@ export async function recoverPendingTransition(
 ): Promise<JobTransitionResult | undefined> {
   return withProcessLock(resolveJobStateLock(cwd, jobId), async () => {
     const job = requireJob(cwd, jobId);
-    if (!job.pendingTransition) return undefined;
+    if (!job.pendingTransition) return recoverUnacknowledgedDelivery(job);
     return applyPendingTransition(cwd, job, job.pendingTransition, dependencies);
   });
 }
@@ -161,7 +165,24 @@ async function applyPendingTransition(
   }
 
   const cleared = clearPendingJobTransition(cwd, finalized.id, pending);
+  await dependencies.afterIntentCleared?.();
   return { job: cleared, signal, deliveryCreated };
+}
+
+function recoverUnacknowledgedDelivery(job: JobRecord): JobTransitionResult | undefined {
+  const delivery = readDeliveries(job.notificationOutboxFile)
+    .filter((candidate) => candidate.jobId === job.id &&
+      (candidate.status === "pending" || candidate.status === "delivering"))
+    .sort((left, right) => right.signalCursor - left.signalCursor)[0];
+  if (!delivery) return undefined;
+
+  const signal = readJobSignals(job.signalsFile).signals.find(
+    (candidate) => candidate.cursor === delivery.signalCursor &&
+      candidate.status === job.status &&
+      isAttentionSignal(candidate)
+  );
+  if (!signal) return undefined;
+  return { job, signal, deliveryCreated: true };
 }
 
 function buildPendingTransition(

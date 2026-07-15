@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 
@@ -51,8 +52,21 @@ export async function withProcessLock<T>(
 }
 
 function canonicalizeLockKey(key: string): string {
-  const resolved = path.resolve(key);
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  let ancestor = path.resolve(key);
+  const remaining: string[] = [];
+  while (true) {
+    try {
+      const physicalAncestor = fs.realpathSync.native(ancestor);
+      const physicalPath = path.join(physicalAncestor, ...remaining);
+      return process.platform === "win32" ? physicalPath.toLowerCase() : physicalPath;
+    } catch (error) {
+      if (!isErrorWithCode(error, "ENOENT") && !isErrorWithCode(error, "ENOTDIR")) throw error;
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) throw error;
+      remaining.unshift(path.basename(ancestor));
+      ancestor = parent;
+    }
+  }
 }
 
 async function acquireEndpoint(
@@ -80,7 +94,7 @@ async function acquireEndpoint(
 
 function listen(endpoint: ProcessLockEndpoint): Promise<net.Server> {
   return new Promise((resolve, reject) => {
-    const server = net.createServer();
+    const server = net.createServer((socket) => socket.destroy());
     const onError = (error: Error) => {
       server.off("listening", onListening);
       reject(error);
