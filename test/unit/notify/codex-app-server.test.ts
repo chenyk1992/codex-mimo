@@ -453,7 +453,58 @@ describe("Codex App Server client", () => {
 
     expect(process.exitCode).toBe(0);
     expect(process.killCalls).toBe(0);
+    expect(process.listenerCount("error")).toBe(0);
+    expect(process.stdin.listenerCount("error")).toBe(0);
+    expect(process.stdout.listenerCount("error")).toBe(0);
+    expect(process.stderr.listenerCount("error")).toBe(0);
   });
+
+  it.each(["child", "stdin", "stdout", "stderr"] as const)(
+    "keeps every error guard installed while teardown from %s error is pending",
+    async (source) => {
+      vi.useFakeTimers();
+      process = new FakeAppServerProcess(false, null);
+      spawnMock.mockReturnValue(process);
+      const client = await initializeClient(process);
+      const resume = client.resumeThread("thread-1");
+      messagesFrom(process);
+      void resume.catch(() => undefined);
+
+      const emitter = source === "child" ? process : process[source];
+      emitter.emit("error", new Error("first private transport detail"));
+      const teardown = client.close();
+      const pendingError = await resume.catch((error: unknown) => error);
+      expect(pendingError).toMatchObject({ kind: "transport" });
+
+      const expectErrorsGuarded = () => {
+        const kills = [...process.killSignals];
+        expect(() => process.emit("error", new Error("second child detail"))).not.toThrow();
+        expect(() => process.stdin.emit("error", new Error("second stdin detail"))).not.toThrow();
+        expect(() => process.stdout.emit("error", new Error("second stdout detail"))).not.toThrow();
+        expect(() => process.stderr.emit("error", new Error("second stderr detail"))).not.toThrow();
+        expect(client.close()).toBe(teardown);
+        expect(process.killSignals).toEqual(kills);
+      };
+
+      expectErrorsGuarded();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(process.killSignals).toEqual(["SIGTERM"]);
+      expectErrorsGuarded();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+      expectErrorsGuarded();
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(teardown).resolves.toBeUndefined();
+      expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(process.listenerCount("error")).toBe(1);
+      expect(process.stdin.listenerCount("error")).toBe(1);
+      expect(process.stdout.listenerCount("error")).toBe(1);
+      expect(process.stderr.listenerCount("error")).toBe(1);
+      expect(await resume.catch((error: unknown) => error)).toBe(pendingError);
+      expect(await client.resumeThread("thread-1").catch((error: unknown) => error)).toBe(pendingError);
+    }
+  );
 
   it("escalates from SIGTERM to SIGKILL when EOF and SIGTERM do not stop the child", async () => {
     vi.useFakeTimers();

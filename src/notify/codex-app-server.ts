@@ -86,10 +86,10 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     this.lines.on("line", this.onLine);
     this.lines.on("error", this.onTransportError);
     child.stderr.resume();
-    child.once("error", this.onTransportError);
-    child.stdin.once("error", this.onTransportError);
-    child.stdout.once("error", this.onTransportError);
-    child.stderr.once("error", this.onTransportError);
+    child.on("error", this.onTransportError);
+    child.stdin.on("error", this.onTransportError);
+    child.stdout.on("error", this.onTransportError);
+    child.stderr.on("error", this.onTransportError);
     child.once("exit", this.onExit);
   }
 
@@ -312,17 +312,14 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     } catch {}
 
     this.child.off("error", this.onTransportError);
+    if (stillAlive) this.child.on("error", this.onLateError);
     this.child.off("exit", this.onExit);
     this.child.stdin.off("error", this.onTransportError);
+    if (stillAlive) this.child.stdin.on("error", this.onLateError);
     this.child.stdout.off("error", this.onTransportError);
+    if (stillAlive) this.child.stdout.on("error", this.onLateError);
     this.child.stderr.off("error", this.onTransportError);
-
-    if (stillAlive) {
-      this.child.on("error", this.onLateError);
-      this.child.stdin.on("error", this.onLateError);
-      this.child.stdout.on("error", this.onLateError);
-      this.child.stderr.on("error", this.onLateError);
-    }
+    if (stillAlive) this.child.stderr.on("error", this.onLateError);
 
     for (const stream of [this.child.stdin, this.child.stdout, this.child.stderr]) {
       try {
