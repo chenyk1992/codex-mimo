@@ -1,0 +1,72 @@
+import type { JobSignal } from "../core/job-signals.js";
+import type { JobRecord } from "../core/jobs.js";
+import {
+  CodexAppServerError,
+  type CodexAppServerClient
+} from "./codex-app-server.js";
+import type { DeliveryAttemptResult, NotificationDelivery } from "./types.js";
+
+const MAX_PROMPT_LENGTH = 240;
+
+export function buildCodexNotificationPrompt(job: JobRecord, signal: JobSignal): string {
+  const prefix = "MiMoCode job ";
+  const suffix = ` emitted ${signal.kind}. ` +
+    "Call mimo_result and continue handling the original request.";
+  const jobId = singleLine(job.id).slice(0, MAX_PROMPT_LENGTH - prefix.length - suffix.length);
+  const base = `${prefix}${jobId}${suffix}`;
+  if (signal.kind !== "needs_input" && signal.kind !== "blocked") return base;
+
+  const reasonPrefix = " Reason: ";
+  const available = Math.max(0, MAX_PROMPT_LENGTH - base.length - reasonPrefix.length);
+  const reason = singleLine(signal.summary).slice(0, available);
+  return `${base}${reasonPrefix}${reason}`.slice(0, MAX_PROMPT_LENGTH);
+}
+
+export async function deliverCodexNotification(
+  delivery: NotificationDelivery,
+  job: JobRecord,
+  signal: JobSignal,
+  client: CodexAppServerClient
+): Promise<DeliveryAttemptResult> {
+  if (delivery.target.type !== "codex") {
+    return { outcome: "permanent", error: "Notification target is not Codex" };
+  }
+
+  let result: DeliveryAttemptResult | undefined;
+  try {
+    await client.initialize();
+    const thread = await client.resumeThread(delivery.target.threadId);
+    if (!thread.exists) {
+      result = { outcome: "permanent", error: "Codex thread does not exist" };
+    } else if (thread.busy) {
+      result = { outcome: "retry", error: "Codex thread is busy" };
+    } else {
+      await client.startTurn(
+        delivery.target.threadId,
+        buildCodexNotificationPrompt(job, signal)
+      );
+      result = { outcome: "delivered" };
+    }
+  } catch (error) {
+    result = classifyCodexError(error);
+  }
+
+  try {
+    await client.close();
+  } catch {
+    if (!result || result.outcome === "delivered") {
+      return { outcome: "retry", error: "Codex App Server request failed" };
+    }
+  }
+  return result ?? { outcome: "retry", error: "Codex App Server request failed" };
+}
+
+function classifyCodexError(error: unknown): DeliveryAttemptResult {
+  return error instanceof CodexAppServerError && error.kind === "forbidden"
+    ? { outcome: "permanent", error: "Codex thread is forbidden" }
+    : { outcome: "retry", error: "Codex App Server request failed" };
+}
+
+function singleLine(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+}
