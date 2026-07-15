@@ -238,6 +238,19 @@ describe("job transitions", () => {
     expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(1);
   });
 
+  it("does not recover an unacknowledged delivery from a mismatched signal kind", async () => {
+    const { cwd, jobId } = seedJob("running", true);
+    const job = readJob(cwd, jobId)!;
+    await expect(transitionJob(cwd, jobId, { status: "completed", summary: "done" }, {
+      afterIntentCleared: () => { throw new Error("after clear"); }
+    })).rejects.toThrow("after clear");
+    const signal = readJobSignals(job.signalsFile).signals[0];
+    fs.writeFileSync(job.signalsFile, `${JSON.stringify({ ...signal, kind: "failed" })}\n`, "utf8");
+
+    expect(await recoverPendingTransition(cwd, jobId)).toBeUndefined();
+    expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(1);
+  });
+
   it("does not report a finalized job-file write as failed when state index refresh fails", async () => {
     const { cwd, jobId } = seedJob("running", true);
     const stateFile = resolveJobStateFile(cwd);

@@ -5,8 +5,8 @@ import path from "node:path";
 
 const DEFAULT_TIMEOUT_MS = 2_000;
 const DEFAULT_RETRY_MS = 10;
-const DYNAMIC_PORT_START = 49_152;
-const DYNAMIC_PORT_COUNT = 16_384;
+const PROCESS_LOCK_PORT_START = 20_000;
+const PROCESS_LOCK_PORT_COUNT = 10_000;
 
 export interface ProcessLockOptions {
   timeoutMs?: number;
@@ -24,7 +24,7 @@ export function resolveProcessLockEndpoint(key: string): ProcessLockEndpoint {
   const octet = (value: number) => (value % 254) + 1;
   return {
     host: `127.${octet(hash[0])}.${octet(hash[1])}.${octet(hash[2])}`,
-    port: DYNAMIC_PORT_START + (hash.readUInt16BE(3) % DYNAMIC_PORT_COUNT)
+    port: PROCESS_LOCK_PORT_START + (hash.readUInt16BE(3) % PROCESS_LOCK_PORT_COUNT)
   };
 }
 

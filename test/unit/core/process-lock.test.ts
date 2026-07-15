@@ -59,8 +59,8 @@ describe("process lock", () => {
 
     expect(second).toEqual(first);
     expect(first.host).toMatch(/^127\.(?:[1-9]|[1-9]\d|1\d\d|2[0-4]\d|25[0-4])\.(?:[1-9]|[1-9]\d|1\d\d|2[0-4]\d|25[0-4])\.(?:[1-9]|[1-9]\d|1\d\d|2[0-4]\d|25[0-4])$/);
-    expect(first.port).toBeGreaterThanOrEqual(49_152);
-    expect(first.port).toBeLessThanOrEqual(65_535);
+    expect(first.port).toBeGreaterThanOrEqual(20_000);
+    expect(first.port).toBeLessThanOrEqual(29_999);
   });
 
   it("maps physical-path aliases to the same endpoint and serializes them", async () => {

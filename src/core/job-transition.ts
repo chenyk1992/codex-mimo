@@ -179,6 +179,7 @@ function recoverUnacknowledgedDelivery(job: JobRecord): JobTransitionResult | un
   const signal = readJobSignals(job.signalsFile).signals.find(
     (candidate) => candidate.cursor === delivery.signalCursor &&
       candidate.status === job.status &&
+      candidate.kind === job.status &&
       isAttentionSignal(candidate)
   );
   if (!signal) return undefined;
