@@ -20,12 +20,13 @@ class FakeAppServerProcess extends EventEmitter {
   readonly stderr = new PassThrough();
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
-  killCalls = 0;
+  readonly killSignals: NodeJS.Signals[] = [];
+  unrefCalls = 0;
   private exited = false;
 
   constructor(
     private readonly exitOnStdinEnd = true,
-    private readonly exitOnKill = true
+    private readonly exitOnSignal: NodeJS.Signals | null = "SIGTERM"
   ) {
     super();
     this.stdin.once("finish", () => {
@@ -42,9 +43,17 @@ class FakeAppServerProcess extends EventEmitter {
   }
 
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
-    this.killCalls += 1;
-    if (this.exitOnKill) this.exit(null, signal);
+    this.killSignals.push(signal);
+    if (signal === this.exitOnSignal) this.exit(null, signal);
     return true;
+  }
+
+  unref(): void {
+    this.unrefCalls += 1;
+  }
+
+  get killCalls(): number {
+    return this.killSignals.length;
   }
 }
 
@@ -417,7 +426,8 @@ describe("Codex App Server client", () => {
     );
     await expect(client.resumeThread("thread-1")).rejects.toMatchObject({ kind: "transport" });
     await client.close();
-    expect(process.killCalls).toBe(1);
+    expect(process.stdin.writableEnded).toBe(true);
+    expect(process.killCalls).toBe(0);
   });
 
   it.each(["stdin", "stdout", "stderr"] as const)(
@@ -431,7 +441,8 @@ describe("Codex App Server client", () => {
 
       await expect(resume).rejects.toMatchObject({ kind: "transport" });
       await client.close();
-      expect(process.killCalls).toBe(1);
+      expect(process.stdin.writableEnded).toBe(true);
+      expect(process.killCalls).toBe(0);
     }
   );
 
@@ -444,9 +455,9 @@ describe("Codex App Server client", () => {
     expect(process.killCalls).toBe(0);
   });
 
-  it("kills a child that does not exit after stdin EOF", async () => {
+  it("escalates from SIGTERM to SIGKILL when EOF and SIGTERM do not stop the child", async () => {
     vi.useFakeTimers();
-    process = new FakeAppServerProcess(false);
+    process = new FakeAppServerProcess(false, "SIGKILL");
     spawnMock.mockReturnValue(process);
     const client = createCodexAppServerClient();
 
@@ -460,12 +471,12 @@ describe("Codex App Server client", () => {
 
     await expect(closing).resolves.toBeUndefined();
     expect(closedWithinBound).toBe(true);
-    expect(process.killCalls).toBe(1);
+    expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
   });
 
-  it("returns from close after bounded waits even when kill does not produce exit", async () => {
+  it("releases every resource after bounded waits when SIGKILL does not produce exit", async () => {
     vi.useFakeTimers();
-    process = new FakeAppServerProcess(false, false);
+    process = new FakeAppServerProcess(false, null);
     spawnMock.mockReturnValue(process);
     const client = createCodexAppServerClient();
 
@@ -479,6 +490,53 @@ describe("Codex App Server client", () => {
 
     await expect(closing).resolves.toBeUndefined();
     expect(closedWithinBound).toBe(true);
-    expect(process.killCalls).toBe(1);
+    expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(process.stdin.destroyed).toBe(true);
+    expect(process.stdout.destroyed).toBe(true);
+    expect(process.stderr.destroyed).toBe(true);
+    expect(process.listenerCount("error")).toBe(0);
+    expect(process.listenerCount("exit")).toBe(0);
+    expect(process.stdin.listenerCount("error")).toBe(0);
+    expect(process.stdout.listenerCount("error")).toBe(0);
+    expect(process.stderr.listenerCount("error")).toBe(0);
+    expect(process.unrefCalls).toBe(1);
+  });
+
+  it("starts one teardown immediately on stream error without waiting for explicit close", async () => {
+    vi.useFakeTimers();
+    process = new FakeAppServerProcess(false, "SIGKILL");
+    spawnMock.mockReturnValue(process);
+    const client = await initializeClient(process);
+    const resume = client.resumeThread("thread-1");
+    messagesFrom(process);
+    void resume.catch(() => undefined);
+
+    process.stderr.emit("error", new Error("private stream detail"));
+    expect(process.stdin.writableEnded).toBe(true);
+    const firstClose = client.close();
+    const secondClose = client.close();
+    expect(secondClose).toBe(firstClose);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(resume).rejects.toMatchObject({ kind: "transport" });
+    await expect(firstClose).resolves.toBeUndefined();
+    expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+
+  it("starts teardown immediately on malformed JSONL without explicit close", async () => {
+    vi.useFakeTimers();
+    process = new FakeAppServerProcess(false, "SIGKILL");
+    spawnMock.mockReturnValue(process);
+    const client = await initializeClient(process);
+    const resume = client.resumeThread("thread-1");
+    messagesFrom(process);
+    void resume.catch(() => undefined);
+
+    process.stdout.write("not-json\n");
+    expect(process.stdin.writableEnded).toBe(true);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(resume).rejects.toMatchObject({ kind: "protocol" });
+    expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
   });
 });

@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createInterface } from "node:readline";
+import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { withUtf8ProcessEnv } from "../core/encoding.js";
 
 export interface ThreadResumeResult {
@@ -45,6 +45,7 @@ interface PendingRequest {
 
 const MISSING_THREAD = Symbol("missing-thread");
 const CLOSE_GRACE_MS = 1_000;
+const CLOSE_TERM_WAIT_MS = 1_000;
 const CLOSE_KILL_WAIT_MS = 1_000;
 
 export function createCodexAppServerClient(): CodexAppServerClient {
@@ -70,23 +71,25 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
   private closePromise?: Promise<void>;
   private terminalError?: CodexAppServerError;
   private processExited = false;
+  private resourcesReleased = false;
+  private readonly lines: ReadlineInterface;
+  private readonly onLine = (line: string) => this.handleLine(line);
+  private readonly onTransportError = () => this.failTransport();
+  private readonly onExit = () => {
+    this.processExited = true;
+    this.failTransport("Codex App Server exited");
+  };
 
   constructor(private readonly child: ChildProcessWithoutNullStreams) {
-    const failTransport = () => {
-      this.failAll(new CodexAppServerError("transport", "Codex App Server transport failed"));
-    };
-    const lines = createInterface({ input: child.stdout });
-    lines.on("line", (line) => this.handleLine(line));
-    lines.on("error", failTransport);
+    this.lines = createInterface({ input: child.stdout });
+    this.lines.on("line", this.onLine);
+    this.lines.on("error", this.onTransportError);
     child.stderr.resume();
-    child.once("error", failTransport);
-    child.stdin.once("error", failTransport);
-    child.stdout.once("error", failTransport);
-    child.stderr.once("error", failTransport);
-    child.once("exit", () => {
-      this.processExited = true;
-      this.failAll(new CodexAppServerError("transport", "Codex App Server exited"));
-    });
+    child.once("error", this.onTransportError);
+    child.stdin.once("error", this.onTransportError);
+    child.stdout.once("error", this.onTransportError);
+    child.stderr.once("error", this.onTransportError);
+    child.once("exit", this.onExit);
   }
 
   initialize(): Promise<void> {
@@ -127,24 +130,33 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
 
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
-    this.closePromise = this.closeProcess();
+    let resolveClose!: () => void;
+    let rejectClose!: (error: unknown) => void;
+    this.closePromise = new Promise<void>((resolve, reject) => {
+      resolveClose = resolve;
+      rejectClose = reject;
+    });
+    void this.closeProcess().then(resolveClose, rejectClose);
     return this.closePromise;
   }
 
   private async closeProcess(): Promise<void> {
-    if (this.hasExited()) return;
+    try {
+      if (this.hasExited()) return;
 
-    if (!this.terminalError) {
       try {
         this.child.stdin.end();
       } catch {}
       if (await this.waitForExit(CLOSE_GRACE_MS)) return;
-    }
 
-    try {
-      this.child.kill();
-    } catch {}
-    await this.waitForExit(CLOSE_KILL_WAIT_MS);
+      this.kill("SIGTERM");
+      if (await this.waitForExit(CLOSE_TERM_WAIT_MS)) return;
+
+      this.kill("SIGKILL");
+      await this.waitForExit(CLOSE_KILL_WAIT_MS);
+    } finally {
+      this.releaseResources();
+    }
   }
 
   private requireInitialized(): void {
@@ -163,9 +175,7 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
       try {
         this.write({ method, id, params });
       } catch {
-        const error = new CodexAppServerError("transport", "Codex App Server transport failed");
-        this.pending.delete(id);
-        reject(error);
+        this.failTransport();
       }
     });
   }
@@ -240,6 +250,12 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
 
   private failProtocol(): void {
     this.failAll(new CodexAppServerError("protocol", "Invalid Codex App Server response"));
+    this.observeTeardown();
+  }
+
+  private failTransport(message = "Codex App Server transport failed"): void {
+    this.failAll(new CodexAppServerError("transport", message));
+    this.observeTeardown();
   }
 
   private failAll(error: CodexAppServerError): void {
@@ -271,6 +287,45 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
       }, timeoutMs);
       this.child.once("exit", finish);
     });
+  }
+
+  private observeTeardown(): void {
+    void this.close().catch(() => undefined);
+  }
+
+  private kill(signal: NodeJS.Signals): void {
+    try {
+      this.child.kill(signal);
+    } catch {}
+  }
+
+  private releaseResources(): void {
+    if (this.resourcesReleased) return;
+    this.resourcesReleased = true;
+
+    this.lines.off("line", this.onLine);
+    this.lines.off("error", this.onTransportError);
+    try {
+      this.lines.close();
+    } catch {}
+
+    this.child.off("error", this.onTransportError);
+    this.child.off("exit", this.onExit);
+    this.child.stdin.off("error", this.onTransportError);
+    this.child.stdout.off("error", this.onTransportError);
+    this.child.stderr.off("error", this.onTransportError);
+
+    for (const stream of [this.child.stdin, this.child.stdout, this.child.stderr]) {
+      try {
+        stream.destroy();
+      } catch {}
+    }
+
+    if (!this.hasExited()) {
+      try {
+        this.child.unref();
+      } catch {}
+    }
   }
 }
 
