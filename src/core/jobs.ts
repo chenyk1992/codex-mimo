@@ -62,6 +62,29 @@ export interface ExecutionCallbackSummary {
   error?: string;
 }
 
+export interface JobTransitionFields {
+  status: JobStatus;
+  summary: string;
+  phase?: JobPhase;
+  pid?: number | null;
+  startedAt?: string;
+  completedAt?: string;
+  sessionId?: string | null;
+  changedFiles?: string[];
+  verification?: JobVerification[];
+  executionCallback?: ExecutionCallbackSummary;
+  reportPaths?: JobReportPaths;
+  error?: string;
+  errorCode?: string;
+}
+
+export interface PendingJobTransition extends JobTransitionFields {
+  version: 1;
+  fromStatus: JobStatus;
+  signalCursor: number;
+  signalCreatedAt: string;
+}
+
 export interface JobRecord {
   id: string;
   kind: JobKind;
@@ -81,6 +104,7 @@ export interface JobRecord {
   changedFiles: string[];
   verification: JobVerification[];
   executionCallback?: ExecutionCallbackSummary;
+  pendingTransition?: PendingJobTransition;
   notificationTarget?: NotificationTarget;
   reportPaths?: JobReportPaths;
   logFile: string;

@@ -59,7 +59,9 @@ export function classifyRunOutcome(evidence: RunEvidence): JobOutcome {
   const callbackCode = callbackFailureCode(evidence.executionCallback);
   if (callbackCode) {
     const callbackError = evidence.executionCallback?.error
-      ?? `MiMoCode completion callback reported ${evidence.executionCallback?.outcome}.`;
+      ?? (evidence.executionCallback
+        ? `MiMoCode completion callback reported ${evidence.executionCallback.outcome}.`
+        : "MiMoCode completion callback was not received.");
     return {
       status: "failed",
       summary: summary || callbackError,
@@ -123,7 +125,7 @@ function failureOutcome(
 }
 
 function callbackFailureCode(callback?: ExecutionCallbackSummary): string | undefined {
-  if (callback?.outcome === "missing") return "callback_missing";
+  if (!callback || callback.outcome === "missing") return "callback_missing";
   if (callback?.outcome === "error") return "callback_error";
   if (callback?.outcome === "cancelled") return "callback_cancelled";
   return undefined;
@@ -132,8 +134,15 @@ function callbackFailureCode(callback?: ExecutionCallbackSummary): string | unde
 function matchesExplicitOutput(text: string, patterns: readonly RegExp[]): boolean {
   if (!text) return false;
   const paragraphs = text
-    .split(/\r?\n+/)
+    .split(/(?:\r?\n){2,}/)
     .map((part) => part.trim())
     .filter(Boolean);
-  return paragraphs.some((part) => patterns.some((pattern) => pattern.test(part)));
+  const finalParagraph = paragraphs.at(-1);
+  if (!finalParagraph) return false;
+  const finalSentence = finalParagraph
+    .split(/(?<=[.!?])\s+(?=\S)/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .at(-1);
+  return finalSentence !== undefined && patterns.some((pattern) => pattern.test(finalSentence));
 }

@@ -5,7 +5,8 @@ import {
   isActiveJobStatus,
   nowIso,
   type JobKind,
-  type JobRecord
+  type JobRecord,
+  type PendingJobTransition
 } from "./jobs.js";
 import type { NotificationTarget } from "../notify/types.js";
 
@@ -39,7 +40,10 @@ export interface JobStoreOptions {
   maxJobs?: number;
 }
 
-export type JobUpdatePatch = Partial<Omit<JobRecord, "id" | "kind" | "cwd" | "createdAt">>;
+export type JobUpdatePatch = Partial<Omit<
+  JobRecord,
+  "id" | "kind" | "cwd" | "createdAt" | "pendingTransition"
+>>;
 
 export function resolveJobDir(cwd: string): string {
   return path.join(cwd, ".codex-mimo", "jobs");
@@ -173,6 +177,57 @@ export function updateJob(
   return updated;
 }
 
+export function savePendingJobTransition(
+  cwd: string,
+  jobId: string,
+  pendingTransition: PendingJobTransition
+): JobRecord {
+  const existing = readJob(cwd, jobId);
+  if (!existing) throw new Error(`Job not found: ${jobId}`);
+  if (existing.pendingTransition) {
+    if (samePendingTransition(existing.pendingTransition, pendingTransition)) return existing;
+    throw new Error(`Job already has a pending transition: ${jobId}`);
+  }
+  if (existing.status !== pendingTransition.fromStatus) {
+    throw new Error(
+      `Pending transition expected ${pendingTransition.fromStatus}, found ${existing.status}`
+    );
+  }
+
+  return writeUpdatedJob(cwd, {
+    ...existing,
+    pendingTransition,
+    updatedAt: nowIso()
+  });
+}
+
+export function finalizePendingJobTransition(
+  cwd: string,
+  jobId: string,
+  pendingTransition: PendingJobTransition
+): JobRecord {
+  const existing = readJob(cwd, jobId);
+  if (!existing) throw new Error(`Job not found: ${jobId}`);
+  if (!existing.pendingTransition ||
+      !samePendingTransition(existing.pendingTransition, pendingTransition)) {
+    throw new Error(`Pending transition changed before final commit: ${jobId}`);
+  }
+  if (existing.status !== pendingTransition.fromStatus) {
+    throw new Error(
+      `Pending transition expected ${pendingTransition.fromStatus}, found ${existing.status}`
+    );
+  }
+
+  const updated: JobRecord = {
+    ...existing,
+    ...transitionRecordPatch(pendingTransition),
+    updatedAt: nowIso()
+  };
+  delete updated.pendingTransition;
+  if (pendingTransition.phase === undefined) delete updated.phase;
+  return writeUpdatedJob(cwd, updated);
+}
+
 function assertValidJobId(jobId: string): void {
   if (!isValidJobId(jobId)) {
     throw new Error(`Invalid job id: ${jobId}`);
@@ -239,7 +294,51 @@ function writeState(cwd: string, state: JobState): void {
 
 function writeJobRecord(cwd: string, record: JobRecord): void {
   ensureJobDir(cwd);
-  fs.writeFileSync(resolveJobPaths(cwd, record.id).jobFile, JSON.stringify(record, null, 2), "utf-8");
+  const jobFile = resolveJobPaths(cwd, record.id).jobFile;
+  const temporary = `${jobFile}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(record, null, 2), "utf-8");
+    fs.renameSync(temporary, jobFile);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
+function writeUpdatedJob(cwd: string, record: JobRecord): JobRecord {
+  writeJobRecord(cwd, record);
+  const state = readState(cwd);
+  state.jobs = [record.id, ...state.jobs.filter((id) => id !== record.id)];
+  writeState(cwd, pruneState(cwd, state, DEFAULT_MAX_JOBS));
+  return record;
+}
+
+function samePendingTransition(
+  left: PendingJobTransition,
+  right: PendingJobTransition
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function transitionRecordPatch(
+  transition: PendingJobTransition
+): JobUpdatePatch {
+  return {
+    status: transition.status,
+    summary: transition.summary,
+    phase: transition.phase,
+    pid: transition.pid,
+    ...(transition.startedAt !== undefined ? { startedAt: transition.startedAt } : {}),
+    ...(transition.completedAt !== undefined ? { completedAt: transition.completedAt } : {}),
+    ...(transition.sessionId !== undefined ? { sessionId: transition.sessionId } : {}),
+    ...(transition.changedFiles !== undefined ? { changedFiles: transition.changedFiles } : {}),
+    ...(transition.verification !== undefined ? { verification: transition.verification } : {}),
+    ...(transition.executionCallback !== undefined
+      ? { executionCallback: transition.executionCallback }
+      : {}),
+    ...(transition.reportPaths !== undefined ? { reportPaths: transition.reportPaths } : {}),
+    ...(transition.error !== undefined ? { error: transition.error } : {}),
+    ...(transition.errorCode !== undefined ? { errorCode: transition.errorCode } : {})
+  };
 }
 
 function pruneState(cwd: string, state: JobState, maxJobs: number): JobState {

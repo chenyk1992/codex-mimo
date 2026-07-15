@@ -75,13 +75,32 @@ export function isAttentionSignal(
 
 export function appendJobSignal(file: string, signal: NewJobSignal): JobSignal {
   const cursor = readJobSignals(file).nextCursor + 1;
+  return appendJobSignalAtCursor(file, cursor, signal);
+}
+
+export function appendJobSignalAtCursor(
+  file: string,
+  cursor: number,
+  signal: NewJobSignal
+): JobSignal {
   const stored: JobSignal = {
     ...signal,
     cursor,
     createdAt: signal.createdAt ?? new Date().toISOString()
   };
 
+  const current = readJobSignals(file);
+  const existing = current.signals.find((candidate) => candidate.cursor === cursor);
+  if (existing) {
+    if (sameSignal(existing, stored)) return existing;
+    throw new Error(`Job signal cursor conflict: ${cursor}`);
+  }
+  if (cursor !== current.nextCursor + 1) {
+    throw new Error(`Job signal cursor must be ${current.nextCursor + 1}, received ${cursor}`);
+  }
+
   fs.mkdirSync(path.dirname(file), { recursive: true });
+  ensureLineBoundary(file);
   fs.appendFileSync(file, `${JSON.stringify(stored)}\n`, "utf8");
   return stored;
 }
@@ -132,4 +151,21 @@ function isJobSignal(value: Partial<JobSignal>): value is JobSignal {
     typeof value.createdAt === "string" &&
     typeof value.summary === "string"
   );
+}
+
+function sameSignal(left: JobSignal, right: JobSignal): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function ensureLineBoundary(file: string): void {
+  try {
+    const contents = fs.readFileSync(file);
+    if (contents.length > 0 && contents[contents.length - 1] !== 0x0a) {
+      fs.appendFileSync(file, "\n", "utf8");
+    }
+  } catch (error) {
+    if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")) {
+      throw error;
+    }
+  }
 }

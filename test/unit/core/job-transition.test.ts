@@ -2,11 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { appendJobProgress, transitionJob } from "../../../src/core/job-transition.js";
+import * as transitionApi from "../../../src/core/job-transition.js";
 import { readJobSignals } from "../../../src/core/job-signals.js";
 import { createJobStore, readJob, updateJob } from "../../../src/core/job-store.js";
 import type { JobPhase, JobStatus } from "../../../src/core/jobs.js";
 import { readDeliveries } from "../../../src/notify/outbox.js";
+
+const { appendJobProgress, transitionJob } = transitionApi;
 
 const tempDirs: string[] = [];
 
@@ -128,5 +130,63 @@ describe("job transitions", () => {
       summary: "not progress"
     } as never)).toThrow("Attention signal failed must be written by transitionJob");
     expect(readJob(cwd, jobId)?.status).toBe("running");
+  });
+
+  it.each([
+    ["after durable intent", {
+      afterIntentPersisted: () => { throw new Error("after intent"); }
+    }],
+    ["during signal append", {
+      appendSignal: (file: string) => {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.appendFileSync(file, "{\"partial\"", "utf8");
+        throw new Error("signal append");
+      }
+    }],
+    ["during outbox enqueue", {
+      enqueueDelivery: (file: string) => {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.appendFileSync(file, "{\"partial\"", "utf8");
+        throw new Error("outbox enqueue");
+      }
+    }],
+    ["before final state commit", {
+      beforeFinalCommit: () => { throw new Error("before commit"); }
+    }]
+  ] as const)("recovers idempotently from failure %s", (_boundary, dependencies) => {
+    const { cwd, jobId } = seedJob("running", true);
+    const transitionWithDeps = transitionJob as unknown as (
+      cwd: string,
+      jobId: string,
+      transition: { status: "completed"; summary: string },
+      dependencies: typeof dependencies
+    ) => unknown;
+
+    expect(() => transitionWithDeps(cwd, jobId, {
+      status: "completed",
+      summary: "done"
+    }, dependencies)).toThrow();
+
+    const pending = readJob(cwd, jobId) as unknown as {
+      status: JobStatus;
+      pendingTransition?: { status: JobStatus; signalCursor: number };
+      signalsFile: string;
+      notificationOutboxFile: string;
+    };
+    expect(pending.status).toBe("running");
+    expect(pending.pendingTransition).toMatchObject({ status: "completed", signalCursor: 1 });
+
+    const recover = transitionApi.recoverPendingTransition as unknown as (
+      cwd: string,
+      jobId: string
+    ) => { job: { status: JobStatus; pendingTransition?: unknown } } | undefined;
+    expect(recover(cwd, jobId)?.job.status).toBe("completed");
+    expect(readJob(cwd, jobId)).not.toHaveProperty("pendingTransition");
+    expect(readJobSignals(pending.signalsFile).signals).toHaveLength(1);
+    expect(readDeliveries(pending.notificationOutboxFile)).toHaveLength(1);
+
+    expect(recover(cwd, jobId)).toBeUndefined();
+    expect(readJobSignals(pending.signalsFile).signals).toHaveLength(1);
+    expect(readDeliveries(pending.notificationOutboxFile)).toHaveLength(1);
   });
 });

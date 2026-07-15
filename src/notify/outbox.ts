@@ -1,14 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import { withFileLock } from "../core/file-lock.js";
 import type {
   EnqueueDeliveryInput,
   NotificationDelivery,
   NotificationTarget
 } from "./types.js";
-
-const LOCK_TIMEOUT_MS = 2_000;
-const LOCK_RETRY_MS = 10;
-const lockWaitArray = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 
 export interface EnqueueDeliveryResult {
   delivery: NotificationDelivery;
@@ -19,7 +16,7 @@ export function enqueueDelivery(
   file: string,
   input: EnqueueDeliveryInput
 ): EnqueueDeliveryResult {
-  return withJournalLock(file, () => {
+  return withFileLock(resolveOutboxLock(file), () => {
     const id = `${input.jobId}:${input.signalCursor}:${input.target.type}`;
     const existing = readDeliveries(file).find((delivery) => delivery.id === id);
     if (existing) return { delivery: existing, created: false };
@@ -61,7 +58,7 @@ export function claimDueDelivery(
   now: Date,
   leaseMs: number
 ): NotificationDelivery | undefined {
-  return withJournalLock(file, () => {
+  return withFileLock(resolveOutboxLock(file), () => {
     const delivery = readDeliveries(file).find((candidate) => isDue(candidate, now));
     if (!delivery) return undefined;
 
@@ -141,7 +138,7 @@ function updateDelivery(
   expectedAttempt: number,
   update: (delivery: NotificationDelivery) => NotificationDelivery
 ): NotificationDelivery {
-  return withJournalLock(file, () => {
+  return withFileLock(resolveOutboxLock(file), () => {
     const delivery = readDeliveries(file).find((candidate) => candidate.id === id);
     if (!delivery) throw new Error(`Notification delivery not found: ${id}`);
     if (delivery.status !== "delivering") {
@@ -168,35 +165,23 @@ function isDue(delivery: NotificationDelivery, now: Date): boolean {
 
 function appendSnapshot(file: string, delivery: NotificationDelivery): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
+  ensureLineBoundary(file);
   fs.appendFileSync(file, `${JSON.stringify(delivery)}\n`, "utf8");
 }
 
-function withJournalLock<T>(file: string, action: () => T): T {
-  const directory = path.dirname(file);
-  const lockFile = path.join(directory, "notifications.lock");
-  fs.mkdirSync(directory, { recursive: true });
-
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
-  let descriptor: number;
-  while (true) {
-    try {
-      descriptor = fs.openSync(lockFile, "wx");
-      break;
-    } catch (error) {
-      if (!isFileExistsError(error) || Date.now() >= deadline) throw error;
-      Atomics.wait(lockWaitArray, 0, 0, LOCK_RETRY_MS);
-    }
-  }
-
+function ensureLineBoundary(file: string): void {
   try {
-    return action();
-  } finally {
-    try {
-      fs.closeSync(descriptor);
-    } finally {
-      fs.rmSync(lockFile, { force: true });
+    const contents = fs.readFileSync(file);
+    if (contents.length > 0 && contents[contents.length - 1] !== 0x0a) {
+      fs.appendFileSync(file, "\n", "utf8");
     }
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error;
   }
+}
+
+function resolveOutboxLock(file: string): string {
+  return path.join(path.dirname(file), "notifications.lock");
 }
 
 function parseDeliveryLine(line: string): NotificationDelivery | undefined {
@@ -329,10 +314,6 @@ function isOptionalTimestamp(value: unknown): boolean {
 
 function isMissingFileError(error: unknown): boolean {
   return isErrorWithCode(error, "ENOENT");
-}
-
-function isFileExistsError(error: unknown): boolean {
-  return isErrorWithCode(error, "EEXIST");
 }
 
 function isErrorWithCode(error: unknown, code: string): boolean {

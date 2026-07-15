@@ -19,6 +19,13 @@ function evidence(patch: Partial<RunEvidence> = {}): RunEvidence {
 }
 
 describe("run outcome classification", () => {
+  it("treats an absent execution callback as callback_missing", () => {
+    expect(classifyRunOutcome(evidence({ executionCallback: undefined }))).toMatchObject({
+      status: "failed",
+      errorCode: "callback_missing"
+    });
+  });
+
   it("gives user cancellation highest precedence", () => {
     const outcome = classifyRunOutcome(evidence({
       terminationReason: "user_cancelled",
@@ -103,6 +110,13 @@ describe("run outcome classification", () => {
     "Could this code use a smaller abstraction?",
     "What happens when the queue is empty?"
   ])("does not treat an ordinary reasoning question as needs-input: %s", (finalText) => {
+    expect(classifyRunOutcome(evidence({ finalText }))).toMatchObject({ status: "completed" });
+  });
+
+  it.each([
+    "Which database should I use?\n\nImplementation completed successfully.",
+    "Blocked: the registry was temporarily unavailable.\n\nImplementation completed successfully."
+  ])("uses only the final meaningful paragraph: %s", (finalText) => {
     expect(classifyRunOutcome(evidence({ finalText }))).toMatchObject({ status: "completed" });
   });
 
