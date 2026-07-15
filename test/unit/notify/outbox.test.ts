@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   claimDueDelivery,
   completeDelivery,
@@ -23,6 +23,7 @@ function tempOutbox(): string {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -81,11 +82,12 @@ describe("notification outbox", () => {
       target,
       createdAt: now
     });
-    claimDueDelivery(file, new Date(now), 30_000);
+    const firstClaim = claimDueDelivery(file, new Date(now), 30_000)!;
 
     const retried = retryDelivery(
       file,
       first.id,
+      firstClaim.attempts,
       new Date("2026-07-16T00:00:10.000Z"),
       "offline"
     );
@@ -97,10 +99,15 @@ describe("notification outbox", () => {
     });
     expect(retried.leaseUntil).toBeUndefined();
 
-    claimDueDelivery(file, new Date("2026-07-16T00:00:10.000Z"), 30_000);
+    const secondClaim = claimDueDelivery(
+      file,
+      new Date("2026-07-16T00:00:10.000Z"),
+      30_000
+    )!;
     const delivered = completeDelivery(
       file,
       first.id,
+      secondClaim.attempts,
       new Date("2026-07-16T00:00:11.000Z")
     );
     expect(delivered).toMatchObject({
@@ -116,8 +123,8 @@ describe("notification outbox", () => {
       target,
       createdAt: now
     });
-    claimDueDelivery(file, new Date(now), 30_000);
-    expect(failDelivery(file, second.id, "bad target")).toMatchObject({
+    const failureClaim = claimDueDelivery(file, new Date(now), 30_000)!;
+    expect(failDelivery(file, second.id, failureClaim.attempts, "bad target")).toMatchObject({
       status: "failed",
       attempts: 1,
       lastError: "bad target"
@@ -147,12 +154,212 @@ describe("notification outbox", () => {
       target,
       createdAt: now
     });
-    claimDueDelivery(file, new Date(now), 30_000);
-    retryDelivery(file, delivery.id, new Date("2026-07-16T00:01:00.000Z"), "busy");
+    const claim = claimDueDelivery(file, new Date(now), 30_000)!;
+    retryDelivery(
+      file,
+      delivery.id,
+      claim.attempts,
+      new Date("2026-07-16T00:01:00.000Z"),
+      "busy"
+    );
 
     expect(claimDueDelivery(file, new Date("2026-07-16T00:00:59.999Z"), 30_000))
       .toBeUndefined();
     expect(claimDueDelivery(file, new Date("2026-07-16T00:01:00.000Z"), 30_000)?.id)
       .toBe(delivery.id);
+  });
+
+  it("does not return a delivered delivery to pending", () => {
+    const file = tempOutbox();
+    const delivery = enqueueDelivery(file, {
+      jobId: "implement-2",
+      signalCursor: 1,
+      target,
+      createdAt: now
+    });
+    const claim = claimDueDelivery(file, new Date(now), 30_000)!;
+    completeDelivery(file, delivery.id, claim.attempts, new Date(now));
+
+    expect(() => retryDelivery(
+      file,
+      delivery.id,
+      claim.attempts,
+      new Date("2026-07-16T00:01:00.000Z"),
+      "late"
+    )).toThrow("not delivering");
+    expect(readDeliveries(file)[0].status).toBe("delivered");
+  });
+
+  it("does not overwrite failed and delivered terminal outcomes", () => {
+    const file = tempOutbox();
+    const failed = enqueueDelivery(file, {
+      jobId: "implement-3",
+      signalCursor: 1,
+      target,
+      createdAt: now
+    });
+    const failedClaim = claimDueDelivery(file, new Date(now), 30_000)!;
+    failDelivery(file, failed.id, failedClaim.attempts, "permanent");
+    expect(() => completeDelivery(
+      file,
+      failed.id,
+      failedClaim.attempts,
+      new Date(now)
+    )).toThrow("not delivering");
+
+    const delivered = enqueueDelivery(file, {
+      jobId: "implement-3",
+      signalCursor: 2,
+      target,
+      createdAt: now
+    });
+    const deliveredClaim = claimDueDelivery(file, new Date(now), 30_000)!;
+    completeDelivery(file, delivered.id, deliveredClaim.attempts, new Date(now));
+    expect(() => failDelivery(
+      file,
+      delivered.id,
+      deliveredClaim.attempts,
+      "too late"
+    )).toThrow("not delivering");
+
+    expect(readDeliveries(file).map((item) => item.status)).toEqual(["failed", "delivered"]);
+  });
+
+  it("rejects every mutation from a worker whose lease was reclaimed", () => {
+    const file = tempOutbox();
+    const delivery = enqueueDelivery(file, {
+      jobId: "implement-4",
+      signalCursor: 1,
+      target,
+      createdAt: now
+    });
+    const first = claimDueDelivery(file, new Date(now), 30_000)!;
+    const second = claimDueDelivery(file, new Date("2026-07-16T00:00:31.000Z"), 30_000)!;
+
+    expect(() => completeDelivery(
+      file,
+      delivery.id,
+      first.attempts,
+      new Date("2026-07-16T00:00:32.000Z")
+    )).toThrow("lease generation");
+    expect(() => retryDelivery(
+      file,
+      delivery.id,
+      first.attempts,
+      new Date("2026-07-16T00:01:00.000Z"),
+      "stale"
+    )).toThrow("lease generation");
+    expect(() => failDelivery(
+      file,
+      delivery.id,
+      first.attempts,
+      "stale"
+    )).toThrow("lease generation");
+
+    expect(completeDelivery(
+      file,
+      delivery.id,
+      second.attempts,
+      new Date("2026-07-16T00:00:32.000Z")
+    ).status).toBe("delivered");
+  });
+
+  it("strips secrets and extra fields from replayed snapshots and later mutations", () => {
+    const file = tempOutbox();
+    const id = "review-2:1:webhook";
+    fs.writeFileSync(file, `${JSON.stringify({
+      id,
+      eventId: id,
+      jobId: "review-2",
+      signalCursor: 1,
+      target: {
+        type: "webhook",
+        url: "https://example.test/hook",
+        secretEnv: "HOOK_SECRET",
+        secret: "target-secret"
+      },
+      status: "delivering",
+      attempts: 1,
+      createdAt: now,
+      leaseUntil: "2026-07-16T00:00:30.000Z",
+      secretValue: "top-level-secret",
+      arbitrary: { nested: true }
+    })}\n`, "utf8");
+
+    const replayed = readDeliveries(file)[0];
+    expect(replayed).toEqual({
+      id,
+      eventId: id,
+      jobId: "review-2",
+      signalCursor: 1,
+      target: {
+        type: "webhook",
+        url: "https://example.test/hook",
+        secretEnv: "HOOK_SECRET"
+      },
+      status: "delivering",
+      attempts: 1,
+      createdAt: now,
+      leaseUntil: "2026-07-16T00:00:30.000Z"
+    });
+
+    failDelivery(file, id, replayed.attempts, "permanent");
+    const lastLine = fs.readFileSync(file, "utf8").trim().split(/\r?\n/).at(-1)!;
+    expect(lastLine).not.toContain("target-secret");
+    expect(lastLine).not.toContain("top-level-secret");
+    expect(lastLine).not.toContain("arbitrary");
+  });
+
+  it.each([
+    ["invalid createdAt", { createdAt: "not-a-date" }],
+    ["invalid nextAttemptAt", { nextAttemptAt: "not-a-date" }],
+    ["delivering without a lease", { status: "delivering", attempts: 1 }],
+    ["delivering with an invalid lease", {
+      status: "delivering",
+      attempts: 1,
+      leaseUntil: "not-a-date"
+    }],
+    ["delivered without deliveredAt", { status: "delivered", attempts: 1 }],
+    ["delivered with an active lease", {
+      status: "delivered",
+      attempts: 1,
+      deliveredAt: now,
+      leaseUntil: "2026-07-16T00:00:30.000Z"
+    }],
+    ["pending with deliveredAt", { deliveredAt: now }],
+    ["failed with an active lease", {
+      status: "failed",
+      attempts: 1,
+      leaseUntil: "2026-07-16T00:00:30.000Z"
+    }]
+  ])("skips a later %s snapshot and keeps the prior delivery claimable", (_name, invalidPatch) => {
+    const file = tempOutbox();
+    const delivery = enqueueDelivery(file, {
+      jobId: "fix-2",
+      signalCursor: 1,
+      target,
+      createdAt: now
+    });
+    fs.appendFileSync(file, `${JSON.stringify({ ...delivery, ...invalidPatch })}\n`, "utf8");
+
+    expect(readDeliveries(file)).toEqual([delivery]);
+    expect(claimDueDelivery(file, new Date(now), 30_000)?.id).toBe(delivery.id);
+  });
+
+  it("removes the lock even when closing its descriptor throws", () => {
+    const file = tempOutbox();
+    const originalClose = fs.closeSync;
+    vi.spyOn(fs, "closeSync").mockImplementationOnce((descriptor) => {
+      originalClose(descriptor);
+      throw new Error("close failed");
+    });
+
+    expect(() => enqueueDelivery(file, {
+      jobId: "fix-3",
+      signalCursor: 1,
+      target,
+      createdAt: now
+    })).toThrow("close failed");
+    expect(fs.existsSync(path.join(path.dirname(file), "notifications.lock"))).toBe(false);
   });
 });

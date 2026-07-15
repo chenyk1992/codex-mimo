@@ -76,9 +76,10 @@ export function claimDueDelivery(
 export function completeDelivery(
   file: string,
   id: string,
+  expectedAttempt: number,
   deliveredAt: Date
 ): NotificationDelivery {
-  return updateDelivery(file, id, (delivery) => {
+  return updateDelivery(file, id, expectedAttempt, (delivery) => {
     const completed: NotificationDelivery = {
       ...delivery,
       status: "delivered",
@@ -93,10 +94,11 @@ export function completeDelivery(
 export function retryDelivery(
   file: string,
   id: string,
+  expectedAttempt: number,
   nextAttemptAt: Date,
   lastError: string
 ): NotificationDelivery {
-  return updateDelivery(file, id, (delivery) => {
+  return updateDelivery(file, id, expectedAttempt, (delivery) => {
     const retried: NotificationDelivery = {
       ...delivery,
       status: "pending",
@@ -112,9 +114,10 @@ export function retryDelivery(
 export function failDelivery(
   file: string,
   id: string,
+  expectedAttempt: number,
   lastError: string
 ): NotificationDelivery {
-  return updateDelivery(file, id, (delivery) => {
+  return updateDelivery(file, id, expectedAttempt, (delivery) => {
     const failed: NotificationDelivery = {
       ...delivery,
       status: "failed",
@@ -130,11 +133,18 @@ export function failDelivery(
 function updateDelivery(
   file: string,
   id: string,
+  expectedAttempt: number,
   update: (delivery: NotificationDelivery) => NotificationDelivery
 ): NotificationDelivery {
   return withJournalLock(file, () => {
     const delivery = readDeliveries(file).find((candidate) => candidate.id === id);
     if (!delivery) throw new Error(`Notification delivery not found: ${id}`);
+    if (delivery.status !== "delivering") {
+      throw new Error(`Notification delivery is not delivering: ${id}`);
+    }
+    if (delivery.attempts !== expectedAttempt) {
+      throw new Error(`Notification delivery lease generation does not match: ${id}`);
+    }
     const updated = update(delivery);
     appendSnapshot(file, updated);
     return updated;
@@ -176,8 +186,11 @@ function withJournalLock<T>(file: string, action: () => T): T {
   try {
     return action();
   } finally {
-    fs.closeSync(descriptor);
-    fs.rmSync(lockFile, { force: true });
+    try {
+      fs.closeSync(descriptor);
+    } finally {
+      fs.rmSync(lockFile, { force: true });
+    }
   }
 }
 
@@ -186,42 +199,91 @@ function parseDeliveryLine(line: string): NotificationDelivery | undefined {
   if (!trimmed) return undefined;
   try {
     const value = JSON.parse(trimmed) as unknown;
-    return isNotificationDelivery(value) ? value : undefined;
+    return sanitizeNotificationDelivery(value);
   } catch {
     return undefined;
   }
 }
 
-function isNotificationDelivery(value: unknown): value is NotificationDelivery {
-  if (!isRecord(value) || !isNotificationTarget(value.target)) return false;
-  return (
-    typeof value.id === "string" &&
-    typeof value.eventId === "string" &&
-    typeof value.jobId === "string" &&
-    typeof value.signalCursor === "number" &&
-    Number.isInteger(value.signalCursor) &&
-    value.signalCursor >= 0 &&
-    (value.status === "pending" ||
-      value.status === "delivering" ||
-      value.status === "delivered" ||
-      value.status === "failed") &&
-    typeof value.attempts === "number" &&
-    Number.isInteger(value.attempts) &&
-    value.attempts >= 0 &&
-    typeof value.createdAt === "string" &&
-    isOptionalString(value.nextAttemptAt) &&
-    isOptionalString(value.leaseUntil) &&
-    isOptionalString(value.deliveredAt) &&
-    isOptionalString(value.lastError)
-  );
+function sanitizeNotificationDelivery(value: unknown): NotificationDelivery | undefined {
+  if (!isRecord(value)) return undefined;
+  const target = sanitizeNotificationTarget(value.target);
+  if (
+    !target ||
+    typeof value.id !== "string" ||
+    typeof value.eventId !== "string" ||
+    typeof value.jobId !== "string" ||
+    typeof value.signalCursor !== "number" ||
+    !Number.isInteger(value.signalCursor) ||
+    value.signalCursor < 0 ||
+    (value.status !== "pending" &&
+      value.status !== "delivering" &&
+      value.status !== "delivered" &&
+      value.status !== "failed") ||
+    typeof value.attempts !== "number" ||
+    !Number.isInteger(value.attempts) ||
+    value.attempts < 0 ||
+    !isTimestamp(value.createdAt) ||
+    !isOptionalTimestamp(value.nextAttemptAt) ||
+    !isOptionalTimestamp(value.leaseUntil) ||
+    !isOptionalTimestamp(value.deliveredAt) ||
+    !isOptionalString(value.lastError) ||
+    !hasValidStatusFields(value)
+  ) {
+    return undefined;
+  }
+
+  const delivery: NotificationDelivery = {
+    id: value.id,
+    eventId: value.eventId,
+    jobId: value.jobId,
+    signalCursor: value.signalCursor,
+    target,
+    status: value.status,
+    attempts: value.attempts,
+    createdAt: value.createdAt
+  };
+  if (typeof value.nextAttemptAt === "string") delivery.nextAttemptAt = value.nextAttemptAt;
+  if (typeof value.leaseUntil === "string") delivery.leaseUntil = value.leaseUntil;
+  if (typeof value.deliveredAt === "string") delivery.deliveredAt = value.deliveredAt;
+  if (typeof value.lastError === "string") delivery.lastError = value.lastError;
+  return delivery;
 }
 
-function isNotificationTarget(value: unknown): value is NotificationTarget {
-  if (!isRecord(value)) return false;
-  if (value.type === "codex") return typeof value.threadId === "string";
-  return value.type === "webhook" &&
+function sanitizeNotificationTarget(value: unknown): NotificationTarget | undefined {
+  if (!isRecord(value)) return undefined;
+  if (value.type === "codex" && typeof value.threadId === "string") {
+    return { type: "codex", threadId: value.threadId };
+  }
+  if (
+    value.type === "webhook" &&
     typeof value.url === "string" &&
-    typeof value.secretEnv === "string";
+    typeof value.secretEnv === "string"
+  ) {
+    return { type: "webhook", url: value.url, secretEnv: value.secretEnv };
+  }
+  return undefined;
+}
+
+function hasValidStatusFields(value: Record<string, unknown>): boolean {
+  switch (value.status) {
+    case "pending":
+      return value.leaseUntil === undefined && value.deliveredAt === undefined;
+    case "delivering":
+      return value.leaseUntil !== undefined &&
+        value.nextAttemptAt === undefined &&
+        value.deliveredAt === undefined;
+    case "delivered":
+      return value.deliveredAt !== undefined &&
+        value.leaseUntil === undefined &&
+        value.nextAttemptAt === undefined;
+    case "failed":
+      return value.leaseUntil === undefined &&
+        value.nextAttemptAt === undefined &&
+        value.deliveredAt === undefined;
+    default:
+      return false;
+  }
 }
 
 function cloneTarget(target: NotificationTarget): NotificationTarget {
@@ -236,6 +298,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isOptionalString(value: unknown): boolean {
   return value === undefined || typeof value === "string";
+}
+
+function isTimestamp(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function isOptionalTimestamp(value: unknown): boolean {
+  return value === undefined || isTimestamp(value);
 }
 
 function isMissingFileError(error: unknown): boolean {
