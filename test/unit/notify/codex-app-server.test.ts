@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const spawnMock = vi.hoisted(() => vi.fn());
 
@@ -20,18 +20,71 @@ class FakeAppServerProcess extends EventEmitter {
   readonly stderr = new PassThrough();
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
+  killCalls = 0;
+  private exited = false;
 
-  constructor() {
+  constructor(
+    private readonly exitOnStdinEnd = true,
+    private readonly exitOnKill = true
+  ) {
     super();
     this.stdin.once("finish", () => {
-      if (this.exitCode === null) this.exit(0);
+      if (!this.exited && this.exitOnStdinEnd) this.exit(0);
     });
   }
 
-  exit(code: number | null): void {
+  exit(code: number | null, signal: NodeJS.Signals | null = null): void {
+    if (this.exited) return;
+    this.exited = true;
     this.exitCode = code;
-    this.emit("exit", code, null);
+    this.signalCode = signal;
+    this.emit("exit", code, signal);
   }
+
+  kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
+    this.killCalls += 1;
+    if (this.exitOnKill) this.exit(null, signal);
+    return true;
+  }
+}
+
+const initializeResult = {
+  codexHome: "C:\\Users\\test\\.codex",
+  platformFamily: "windows",
+  platformOs: "windows",
+  userAgent: "codex-cli/0.144.2"
+};
+
+function threadResumeResult(
+  id: string,
+  status: { type: string; activeFlags?: string[] }
+): Record<string, unknown> {
+  return {
+    approvalPolicy: "never",
+    approvalsReviewer: "user",
+    cwd: "C:\\workspace",
+    model: "gpt-5.4",
+    modelProvider: "openai",
+    sandbox: { type: "dangerFullAccess" },
+    thread: {
+      cliVersion: "0.144.2",
+      createdAt: 1,
+      cwd: "C:\\workspace",
+      ephemeral: false,
+      id,
+      modelProvider: "openai",
+      preview: "",
+      sessionId: id,
+      source: { type: "appServer" },
+      status,
+      turns: [],
+      updatedAt: 1
+    }
+  };
+}
+
+function turnStartResult(id = "turn-1"): Record<string, unknown> {
+  return { turn: { id, status: "inProgress", items: [] } };
 }
 
 function messagesFrom(process: FakeAppServerProcess): unknown[] {
@@ -58,7 +111,7 @@ async function initializeClient(process: FakeAppServerProcess) {
       }
     }
   }]);
-  respond(process, { id: 1, result: { userAgent: "codex-cli/0.144.2" } });
+  respond(process, { id: 1, result: initializeResult });
   await initialized;
   expect(messagesFrom(process)).toEqual([{ method: "initialized", params: {} }]);
   return client;
@@ -71,6 +124,10 @@ describe("Codex App Server client", () => {
     process = new FakeAppServerProcess();
     spawnMock.mockReset();
     spawnMock.mockReturnValue(process);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("spawns the stdio App Server hidden with piped streams and a UTF-8 environment", async () => {
@@ -100,7 +157,7 @@ describe("Codex App Server client", () => {
     await Promise.resolve();
     expect(messagesFrom(process)).toEqual([]);
 
-    respond(process, { id: 1, result: {} });
+    respond(process, { id: 1, result: initializeResult });
     await initialization;
     expect(messagesFrom(process)).toEqual([{ method: "initialized", params: {} }]);
     await client.close();
@@ -112,10 +169,22 @@ describe("Codex App Server client", () => {
     const second = client.initialize();
 
     expect(messagesFrom(process)).toHaveLength(1);
-    respond(process, { id: 1, result: {} });
+    respond(process, { id: 1, result: initializeResult });
 
     await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
     expect(messagesFrom(process)).toEqual([{ method: "initialized", params: {} }]);
+    await client.close();
+  });
+
+  it("rejects an initialize response missing installed-schema required fields", async () => {
+    const client = createCodexAppServerClient();
+    const initialization = client.initialize();
+    messagesFrom(process);
+
+    respond(process, { id: 1, result: { userAgent: "codex-cli/0.144.2" } });
+
+    await expect(initialization).rejects.toMatchObject({ kind: "protocol" });
+    expect(messagesFrom(process)).toEqual([]);
     await client.close();
   });
 
@@ -136,30 +205,110 @@ describe("Codex App Server client", () => {
       }
     ]);
 
-    respond(process, { id: 3, result: { turn: { id: "turn-1", status: "inProgress", items: [] } } });
-    respond(process, {
-      id: 2,
-      result: { thread: { id: "thread-1", status: { type: "idle" }, turns: [] } }
-    });
+    respond(process, { id: 3, result: turnStartResult() });
+    respond(process, { id: 2, result: threadResumeResult("thread-1", { type: "idle" }) });
 
     await expect(start).resolves.toBeUndefined();
     await expect(resume).resolves.toEqual({ exists: true, busy: false });
     await client.close();
   });
 
-  it("ignores non-response JSONL without disturbing pending requests", async () => {
+  it("ignores valid notifications without disturbing pending requests", async () => {
     const client = await initializeClient(process);
 
     const resume = client.resumeThread("thread-1");
     const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
-    process.stdout.write("null\n");
     process.stdout.write(`${JSON.stringify({ method: "thread/status/changed", params: {} })}\n`);
+    respond(process, { id, result: threadResumeResult("thread-1", { type: "idle" }) });
+
+    await expect(resume).resolves.toEqual({ exists: true, busy: false });
+    await client.close();
+  });
+
+  it("rejects a notification-shaped frame that also carries a response member", async () => {
+    const client = await initializeClient(process);
+    const resume = client.resumeThread("thread-1");
+    messagesFrom(process);
+    void resume.catch(() => undefined);
+
+    respond(process, {
+      method: "thread/status/changed",
+      params: {},
+      result: { private: "detail" }
+    });
+    await Promise.resolve();
+    process.exit(17);
+
+    await expect(resume).rejects.toMatchObject({ kind: "protocol" });
+    await client.close();
+  });
+
+  it("turns malformed JSONL into a terminal protocol failure for every pending request", async () => {
+    const client = await initializeClient(process);
+    const resume = client.resumeThread("thread-1");
+    const start = client.startTurn("thread-1", "continue");
+    messagesFrom(process);
+    void resume.catch(() => undefined);
+    void start.catch(() => undefined);
+
+    process.stdout.write("not-json\n");
+    await Promise.resolve();
+    process.exit(17);
+
+    await expect(resume).rejects.toMatchObject({ kind: "protocol" });
+    await expect(start).rejects.toMatchObject({ kind: "protocol" });
+    await expect(client.resumeThread("thread-1")).rejects.toMatchObject({ kind: "protocol" });
+    await client.close();
+  });
+
+  it.each([
+    ["missing result and error", (id: number) => ({ id })],
+    ["both result and error", (id: number) => ({
+      id,
+      result: threadResumeResult("thread-1", { type: "idle" }),
+      error: { code: -32600, message: "private conflict" }
+    })],
+    ["malformed error", (id: number) => ({
+      id,
+      error: { code: "-32600", message: 17 }
+    })]
+  ] as const)("makes a matching response with %s a terminal protocol failure", async (_name, frame) => {
+    const client = await initializeClient(process);
+    const resume = client.resumeThread("thread-1");
+    const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
+
+    respond(process, frame(id));
+    await expect(resume).rejects.toMatchObject({ kind: "protocol" });
+
+    const future = client.resumeThread("thread-1");
+    void future.catch(() => undefined);
+    process.exit(17);
+    await expect(future).rejects.toMatchObject({ kind: "protocol" });
+    await client.close();
+  });
+
+  it("rejects a thread/resume result missing installed-schema required fields", async () => {
+    const client = await initializeClient(process);
+    const resume = client.resumeThread("thread-1");
+    const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
+
     respond(process, {
       id,
       result: { thread: { id: "thread-1", status: { type: "idle" }, turns: [] } }
     });
 
-    await expect(resume).resolves.toEqual({ exists: true, busy: false });
+    await expect(resume).rejects.toMatchObject({ kind: "protocol" });
+    await client.close();
+  });
+
+  it("rejects a turn/start result missing the required turn fields", async () => {
+    const client = await initializeClient(process);
+    const start = client.startTurn("thread-1", "continue");
+    const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
+
+    respond(process, { id, result: { turn: { id: "turn-1" } } });
+
+    await expect(start).rejects.toMatchObject({ kind: "protocol" });
     await client.close();
   });
 
@@ -170,13 +319,10 @@ describe("Codex App Server client", () => {
     const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
     respond(process, {
       id,
-      result: {
-        thread: {
-          id: "thread-active",
-          status: { type: "active", activeFlags: ["waitingOnApproval"] },
-          turns: []
-        }
-      }
+      result: threadResumeResult(
+        "thread-active",
+        { type: "active", activeFlags: ["waitingOnApproval"] }
+      )
     });
     await expect(active).resolves.toEqual({ exists: true, busy: true });
     await client.close();
@@ -189,9 +335,7 @@ describe("Codex App Server client", () => {
     const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
     respond(process, {
       id,
-      result: {
-        thread: { id: "thread-not-loaded", status: { type: "notLoaded" }, turns: [] }
-      }
+      result: threadResumeResult("thread-not-loaded", { type: "notLoaded" })
     });
 
     await expect(resume).resolves.toEqual({ exists: true, busy: true });
@@ -205,7 +349,7 @@ describe("Codex App Server client", () => {
     const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
     respond(process, {
       id,
-      result: { thread: { id: "thread-error", status: { type: "systemError" }, turns: [] } }
+      result: threadResumeResult("thread-error", { type: "systemError" })
     });
 
     await expect(resume).rejects.toMatchObject({ kind: "protocol" });
@@ -258,6 +402,7 @@ describe("Codex App Server client", () => {
     await expect(start).rejects.toMatchObject({ kind: "transport" });
     await expect(client.resumeThread("thread-1")).rejects.toMatchObject({ kind: "transport" });
     await client.close();
+    expect(process.killCalls).toBe(0);
   });
 
   it("rejects every pending request when the process emits an error", async () => {
@@ -272,6 +417,7 @@ describe("Codex App Server client", () => {
     );
     await expect(client.resumeThread("thread-1")).rejects.toMatchObject({ kind: "transport" });
     await client.close();
+    expect(process.killCalls).toBe(1);
   });
 
   it.each(["stdin", "stdout", "stderr"] as const)(
@@ -285,6 +431,7 @@ describe("Codex App Server client", () => {
 
       await expect(resume).rejects.toMatchObject({ kind: "transport" });
       await client.close();
+      expect(process.killCalls).toBe(1);
     }
   );
 
@@ -294,5 +441,44 @@ describe("Codex App Server client", () => {
     await Promise.all([client.close(), client.close(), client.close()]);
 
     expect(process.exitCode).toBe(0);
+    expect(process.killCalls).toBe(0);
+  });
+
+  it("kills a child that does not exit after stdin EOF", async () => {
+    vi.useFakeTimers();
+    process = new FakeAppServerProcess(false);
+    spawnMock.mockReturnValue(process);
+    const client = createCodexAppServerClient();
+
+    const closing = client.close();
+    let closed = false;
+    void closing.then(() => { closed = true; });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await Promise.resolve();
+    const closedWithinBound = closed;
+    if (!closed) process.exit(0);
+
+    await expect(closing).resolves.toBeUndefined();
+    expect(closedWithinBound).toBe(true);
+    expect(process.killCalls).toBe(1);
+  });
+
+  it("returns from close after bounded waits even when kill does not produce exit", async () => {
+    vi.useFakeTimers();
+    process = new FakeAppServerProcess(false, false);
+    spawnMock.mockReturnValue(process);
+    const client = createCodexAppServerClient();
+
+    const closing = client.close();
+    let closed = false;
+    void closing.then(() => { closed = true; });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await Promise.resolve();
+    const closedWithinBound = closed;
+    if (!closed) process.exit(0);
+
+    await expect(closing).resolves.toBeUndefined();
+    expect(closedWithinBound).toBe(true);
+    expect(process.killCalls).toBe(1);
   });
 });

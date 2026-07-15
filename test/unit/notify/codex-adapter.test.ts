@@ -152,8 +152,21 @@ describe("Codex notification adapter", () => {
     });
   });
 
-  it("retries when close is the only failure", async () => {
+  it("keeps an accepted turn delivered when best-effort close fails", async () => {
     const client = fakeClient();
+    client.close.mockRejectedValueOnce(new Error("close private detail"));
+
+    expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({
+      outcome: "delivered"
+    });
+    expect(client.startTurn).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a pre-acceptance transport failure when close also fails", async () => {
+    const client = fakeClient();
+    client.startTurn.mockRejectedValueOnce(
+      new CodexAppServerError("transport", "private transport detail")
+    );
     client.close.mockRejectedValueOnce(new Error("close private detail"));
 
     expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({

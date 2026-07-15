@@ -32,7 +32,7 @@ export async function deliverCodexNotification(
     return { outcome: "permanent", error: "Notification target is not Codex" };
   }
 
-  let result: DeliveryAttemptResult | undefined;
+  let result: DeliveryAttemptResult;
   try {
     await client.initialize();
     const thread = await client.resumeThread(delivery.target.threadId);
@@ -54,11 +54,9 @@ export async function deliverCodexNotification(
   try {
     await client.close();
   } catch {
-    if (!result || result.outcome === "delivered") {
-      return { outcome: "retry", error: "Codex App Server request failed" };
-    }
+    // Cleanup is best effort after the delivery outcome has been determined.
   }
-  return result ?? { outcome: "retry", error: "Codex App Server request failed" };
+  return result;
 }
 
 function classifyCodexError(error: unknown): DeliveryAttemptResult {

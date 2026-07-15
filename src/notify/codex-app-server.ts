@@ -44,6 +44,8 @@ interface PendingRequest {
 }
 
 const MISSING_THREAD = Symbol("missing-thread");
+const CLOSE_GRACE_MS = 1_000;
+const CLOSE_KILL_WAIT_MS = 1_000;
 
 export function createCodexAppServerClient(): CodexAppServerClient {
   let child: ChildProcessWithoutNullStreams;
@@ -67,11 +69,10 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
   private initializePromise?: Promise<void>;
   private closePromise?: Promise<void>;
   private terminalError?: CodexAppServerError;
-  private ended = false;
+  private processExited = false;
 
   constructor(private readonly child: ChildProcessWithoutNullStreams) {
     const failTransport = () => {
-      this.ended = true;
       this.failAll(new CodexAppServerError("transport", "Codex App Server transport failed"));
     };
     const lines = createInterface({ input: child.stdout });
@@ -83,7 +84,7 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     child.stdout.once("error", failTransport);
     child.stderr.once("error", failTransport);
     child.once("exit", () => {
-      this.ended = true;
+      this.processExited = true;
       this.failAll(new CodexAppServerError("transport", "Codex App Server exited"));
     });
   }
@@ -131,19 +132,19 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
   }
 
   private async closeProcess(): Promise<void> {
-    if (this.ended || this.child.exitCode !== null || this.child.signalCode !== null) return;
+    if (this.hasExited()) return;
 
-    await new Promise<void>((resolve, reject) => {
-      const finish = () => resolve();
-      const fail = () => reject(
-        new CodexAppServerError("transport", "Codex App Server transport failed")
-      );
-      this.child.once("exit", finish);
-      this.child.once("error", fail);
-      this.child.stdin.end((error?: Error | null) => {
-        if (error) fail();
-      });
-    });
+    if (!this.terminalError) {
+      try {
+        this.child.stdin.end();
+      } catch {}
+      if (await this.waitForExit(CLOSE_GRACE_MS)) return;
+    }
+
+    try {
+      this.child.kill();
+    } catch {}
+    await this.waitForExit(CLOSE_KILL_WAIT_MS);
   }
 
   private requireInitialized(): void {
@@ -174,7 +175,7 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
   }
 
   private write(message: unknown): void {
-    if (this.terminalError || this.ended || !this.child.stdin.writable) {
+    if (this.terminalError || this.hasExited() || !this.child.stdin.writable) {
       throw new CodexAppServerError("transport", "Codex App Server transport failed");
     }
     this.child.stdin.write(`${JSON.stringify(message)}\n`, "utf8");
@@ -185,20 +186,47 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     try {
       parsed = JSON.parse(line) as unknown;
     } catch {
+      this.failProtocol();
       return;
     }
-    if (!isRecord(parsed)) return;
+    if (!isRecord(parsed)) {
+      this.failProtocol();
+      return;
+    }
+    if (!hasOwn(parsed, "id")) {
+      if (!isNotification(parsed)) this.failProtocol();
+      return;
+    }
     const response = parsed as unknown as RpcResponse;
-    if (!Number.isInteger(response.id)) return;
+    if (!Number.isInteger(response.id)) {
+      this.failProtocol();
+      return;
+    }
 
     const pending = this.pending.get(response.id);
     if (!pending) return;
-    this.pending.delete(response.id);
 
-    if (!response.error) {
+    const hasResult = hasOwn(parsed, "result");
+    const hasError = hasOwn(parsed, "error");
+    if (hasResult === hasError) {
+      this.failProtocol();
+      return;
+    }
+    if (hasResult) {
+      if (!isValidResult(pending.method, response.result)) {
+        this.failProtocol();
+        return;
+      }
+      this.pending.delete(response.id);
       pending.resolve(response.result);
       return;
     }
+    if (!isRpcError(response.error)) {
+      this.failProtocol();
+      return;
+    }
+
+    this.pending.delete(response.id);
     if (pending.method === "thread/resume" && isMissingThreadError(response.error)) {
       pending.resolve(MISSING_THREAD);
       return;
@@ -210,10 +238,39 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     pending.reject(new CodexAppServerError("protocol", "Codex App Server request failed"));
   }
 
+  private failProtocol(): void {
+    this.failAll(new CodexAppServerError("protocol", "Invalid Codex App Server response"));
+  }
+
   private failAll(error: CodexAppServerError): void {
     if (!this.terminalError) this.terminalError = error;
     for (const pending of this.pending.values()) pending.reject(this.terminalError);
     this.pending.clear();
+  }
+
+  private hasExited(): boolean {
+    if (this.processExited || this.child.exitCode !== null || this.child.signalCode !== null) {
+      this.processExited = true;
+      return true;
+    }
+    return false;
+  }
+
+  private waitForExit(timeoutMs: number): Promise<boolean> {
+    if (this.hasExited()) return Promise.resolve(true);
+
+    return new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        this.child.off("exit", finish);
+        resolve(this.hasExited());
+      };
+      const timer = setTimeout(() => {
+        this.child.off("exit", finish);
+        resolve(this.hasExited());
+      }, timeoutMs);
+      this.child.once("exit", finish);
+    });
   }
 }
 
@@ -234,6 +291,92 @@ function isMissingThreadError(error: RpcError): boolean {
 
 function isForbiddenThreadError(error: RpcError): boolean {
   return /forbidden|permission denied|access denied|unauthori[sz]ed/i.test(error.message);
+}
+
+function isValidResult(method: string, result: unknown): boolean {
+  if (method === "initialize") return isInitializeResult(result);
+  if (method === "thread/resume") return isThreadResumeResult(result);
+  if (method === "turn/start") return isTurnStartResult(result);
+  return false;
+}
+
+function isInitializeResult(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.codexHome === "string" &&
+    typeof value.platformFamily === "string" &&
+    typeof value.platformOs === "string" &&
+    typeof value.userAgent === "string";
+}
+
+function isThreadResumeResult(value: unknown): boolean {
+  const responseKeys = [
+    "approvalPolicy",
+    "approvalsReviewer",
+    "cwd",
+    "model",
+    "modelProvider",
+    "sandbox",
+    "thread"
+  ];
+  if (!isRecord(value) || !hasKeys(value, responseKeys) || !isRecord(value.thread)) return false;
+
+  const threadKeys = [
+    "cliVersion",
+    "createdAt",
+    "cwd",
+    "ephemeral",
+    "id",
+    "modelProvider",
+    "preview",
+    "sessionId",
+    "source",
+    "status",
+    "turns",
+    "updatedAt"
+  ];
+  return hasKeys(value.thread, threadKeys) &&
+    typeof value.thread.id === "string" &&
+    Array.isArray(value.thread.turns) &&
+    isThreadStatus(value.thread.status);
+}
+
+function isTurnStartResult(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.turn)) return false;
+  return hasKeys(value.turn, ["id", "items", "status"]) &&
+    typeof value.turn.id === "string" &&
+    Array.isArray(value.turn.items) &&
+    (value.turn.status === "completed" ||
+      value.turn.status === "interrupted" ||
+      value.turn.status === "failed" ||
+      value.turn.status === "inProgress");
+}
+
+function isThreadStatus(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.type !== "string") return false;
+  if (value.type === "active") {
+    return Array.isArray(value.activeFlags) &&
+      value.activeFlags.every((flag) => typeof flag === "string");
+  }
+  return value.type === "idle" || value.type === "notLoaded" || value.type === "systemError";
+}
+
+function isRpcError(value: unknown): value is RpcError {
+  return isRecord(value) && Number.isInteger(value.code) && typeof value.message === "string";
+}
+
+function isNotification(value: Record<string, unknown>): boolean {
+  return typeof value.method === "string" &&
+    hasOwn(value, "params") &&
+    !hasOwn(value, "result") &&
+    !hasOwn(value, "error");
+}
+
+function hasKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.every((key) => hasOwn(value, key));
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
