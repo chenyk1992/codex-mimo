@@ -1,67 +1,34 @@
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { withUtf8ProcessEnv } from "./encoding.js";
 
-export type WorkerKind = "compose";
+export type WorkerCommand = "job-worker" | "notify-worker";
 
-export interface WorkerProcessLaunch {
-  entryPoint: string;
-  args: string[];
-  cwd: string;
+export function resolveCliEntrypoint(moduleUrl = import.meta.url): string {
+  return path.resolve(path.dirname(fileURLToPath(moduleUrl)), "..", "cli", "main.js");
 }
 
-export function buildWorkerArgs(kind: WorkerKind, jobId: string): string[] {
-  if (kind === "compose") return ["compose-worker", "--job-id", jobId];
-  return [String(kind), "--job-id", jobId];
-}
-
-export function buildWorkerProcessLaunch(
-  projectCwd: string,
-  kind: WorkerKind,
-  jobId: string,
-  moduleUrl = import.meta.url
-): WorkerProcessLaunch {
-  const moduleDir = path.dirname(fileURLToPath(moduleUrl));
-  const distDir = path.resolve(moduleDir, "..");
-  const pluginRoot = path.resolve(distDir, "..");
-  const entryPoint = path.join(distDir, "cli", "main.js");
-
-  return {
-    entryPoint,
-    args: [entryPoint, ...buildWorkerArgs(kind, jobId), "--cwd", projectCwd],
-    cwd: pluginRoot
-  };
-}
-
-export interface SpawnWorkerOptions {
-  spawnProcess?: (...args: unknown[]) => { pid?: number; unref: () => void; on: (event: string, listener: (...args: unknown[]) => void) => void };
-  onError?: (error: Error) => void;
-  onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
-}
-
-export function spawnJobWorker(
-  cwd: string,
-  kind: WorkerKind,
-  jobId: string,
-  options: SpawnWorkerOptions = {}
-): number | null {
-  const launch = buildWorkerProcessLaunch(cwd, kind, jobId);
-  const spawnFn = options.spawnProcess ?? spawn;
-  const child = spawnFn(process.execPath, launch.args, {
-    cwd: launch.cwd,
-    detached: process.platform !== "win32",
+export function spawnWorker(command: WorkerCommand, cwd: string, jobId?: string): number {
+  const args = [resolveCliEntrypoint(), command, "--cwd", cwd];
+  if (jobId) args.push("--job-id", jobId);
+  const child = spawn(process.execPath, args, {
+    cwd,
+    detached: true,
     stdio: "ignore",
     windowsHide: true,
-    shell: false
+    env: withUtf8ProcessEnv()
   });
   child.unref();
-  if (options.onError) {
-    child.on("error", options.onError);
-  }
-  if (options.onExit) {
-    child.on("exit", options.onExit);
-  }
-  return child.pid ?? null;
+  return child.pid ?? 0;
+}
+
+export function spawnJobWorker(cwd: string, jobId: string): number {
+  return spawnWorker("job-worker", cwd, jobId);
+}
+
+export function spawnNotificationWorker(cwd: string): number {
+  return spawnWorker("notify-worker", cwd);
 }
 
 export function terminateJobProcess(
