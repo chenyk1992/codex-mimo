@@ -41,13 +41,22 @@ describe("job store", () => {
     const cwd = tempWorkspace();
     const task = "Run dev workflow";
     const request = { workflow: "dev", task };
+    const notificationTarget = { type: "codex" as const, threadId: "thread-1" };
 
-    const job = createJobStore(cwd).create({ kind: "compose", workflow: "dev", task, request });
+    const job = createJobStore(cwd).create({ kind: "compose", task, request, notificationTarget });
     const paths = resolveJobPaths(cwd, job.id);
 
     expect(job.id.startsWith("compose-")).toBe(true);
+    expect(job.status).toBe("queued");
+    expect(job).not.toHaveProperty("phase");
+    expect(job).not.toHaveProperty("workflow");
+    expect(job.notificationTarget).toEqual(notificationTarget);
     expect(fs.existsSync(paths.jobFile)).toBe(true);
+    expect(job.eventsFile.endsWith(".events.jsonl")).toBe(true);
+    expect(job.signalsFile.endsWith(".signals.jsonl")).toBe(true);
     expect(job.signalsFile).toBe(paths.signalsFile);
+    expect(job.notificationOutboxFile).toBe(path.join(cwd, ".codex-mimo", "jobs", "notifications.jsonl"));
+    expect(job.notificationOutboxFile).toBe(paths.notificationOutboxFile);
     expect(readJob(cwd, job.id)?.task).toBe(task);
     expect(listJobs(cwd).map((entry) => entry.id)).toEqual([job.id]);
   });
@@ -56,7 +65,6 @@ describe("job store", () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({
       kind: "compose",
-      workflow: "dev",
       task: "Run dev workflow",
       request: { workflow: "dev" }
     });
@@ -77,7 +85,7 @@ describe("job store", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd);
 
-    const first = store.create({ kind: "compose", workflow: "dev", task: "First", request: {} });
+    const first = store.create({ kind: "compose", task: "First", request: { workflow: "dev" } });
     fs.writeFileSync(resolveJobPaths(cwd, "compose-bad-file").jobFile, "{bad-job", "utf-8");
     fs.writeFileSync(resolveJobPaths(cwd, "compose-empty").jobFile, "{}", "utf-8");
     fs.writeFileSync(
@@ -87,7 +95,7 @@ describe("job store", () => {
     );
     fs.writeFileSync(resolveJobStateFile(cwd), "{not-json", "utf-8");
 
-    const second = store.create({ kind: "compose", workflow: "dev", task: "Second", request: {} });
+    const second = store.create({ kind: "compose", task: "Second", request: { workflow: "dev" } });
 
     expect(listJobs(cwd).map((entry) => entry.id)).toEqual([second.id, first.id]);
   });
@@ -109,11 +117,11 @@ describe("job store", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd, { maxJobs: 2 });
 
-    const active = store.create({ kind: "compose", workflow: "dev", task: "Active", request: {} });
-    const completed = store.create({ kind: "compose", workflow: "dev", task: "Completed", request: {} });
-    updateJob(cwd, completed.id, { status: "completed", phase: "done" }, { maxJobs: 2 });
-    const newest = store.create({ kind: "compose", workflow: "dev", task: "Newest", request: {} });
-    updateJob(cwd, newest.id, { status: "completed", phase: "done" }, { maxJobs: 2 });
+    const active = store.create({ kind: "compose", task: "Active", request: { workflow: "dev" } });
+    const completed = store.create({ kind: "compose", task: "Completed", request: { workflow: "dev" } });
+    updateJob(cwd, completed.id, { status: "completed", phase: undefined }, { maxJobs: 2 });
+    const newest = store.create({ kind: "compose", task: "Newest", request: { workflow: "dev" } });
+    updateJob(cwd, newest.id, { status: "completed", phase: undefined }, { maxJobs: 2 });
 
     expect(readJob(cwd, active.id)?.status).toBe("queued");
     expect(listJobs(cwd).map((entry) => entry.id)).toEqual([newest.id, active.id]);
@@ -123,13 +131,13 @@ describe("job store", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd, { maxJobs: 3 });
 
-    const first = store.create({ kind: "compose", workflow: "dev", task: "First", request: {} });
-    const second = store.create({ kind: "compose", workflow: "dev", task: "Second", request: {} });
-    const third = store.create({ kind: "compose", workflow: "dev", task: "Third", request: {} });
+    const first = store.create({ kind: "compose", task: "First", request: { workflow: "dev" } });
+    const second = store.create({ kind: "compose", task: "Second", request: { workflow: "dev" } });
+    const third = store.create({ kind: "compose", task: "Third", request: { workflow: "dev" } });
 
-    updateJob(cwd, second.id, { status: "completed", phase: "done" }, { maxJobs: 3 });
-    updateJob(cwd, third.id, { status: "completed", phase: "done" }, { maxJobs: 3 });
-    updateJob(cwd, first.id, { status: "completed", phase: "done" }, { maxJobs: 2 });
+    updateJob(cwd, second.id, { status: "completed", phase: undefined }, { maxJobs: 3 });
+    updateJob(cwd, third.id, { status: "completed", phase: undefined }, { maxJobs: 3 });
+    updateJob(cwd, first.id, { status: "completed", phase: undefined }, { maxJobs: 2 });
 
     expect(listJobs(cwd).map((entry) => entry.id)).toEqual([first.id, third.id]);
     expect(readJob(cwd, second.id)).toBeUndefined();
@@ -139,14 +147,14 @@ describe("job store", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd);
 
-    const job = store.create({ kind: "compose", workflow: "dev", task: "Valid", request: {} });
+    const job = store.create({ kind: "compose", task: "Valid", request: { workflow: "dev" } });
     const partialPaths = resolveJobPaths(cwd, "compose-partial");
     fs.writeFileSync(partialPaths.jobFile, "{partial-job", "utf-8");
     fs.writeFileSync(partialPaths.logFile, "partial log", "utf-8");
     fs.writeFileSync(partialPaths.eventsFile, "{}\n", "utf-8");
     fs.writeFileSync(resolveJobStateFile(cwd), JSON.stringify({ jobs: ["compose-partial", job.id] }), "utf-8");
 
-    updateJob(cwd, job.id, { status: "completed", phase: "done" }, { maxJobs: 10 });
+    updateJob(cwd, job.id, { status: "completed", phase: undefined }, { maxJobs: 10 });
 
     expect(fs.existsSync(partialPaths.jobFile)).toBe(true);
     expect(fs.existsSync(partialPaths.logFile)).toBe(true);
@@ -158,15 +166,15 @@ describe("job store", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd, { maxJobs: 2 });
 
-    const first = store.create({ kind: "compose", workflow: "dev", task: "First", request: {} });
-    const second = store.create({ kind: "compose", workflow: "dev", task: "Second", request: {} });
+    const first = store.create({ kind: "compose", task: "First", request: { workflow: "dev" } });
+    const second = store.create({ kind: "compose", task: "Second", request: { workflow: "dev" } });
     const firstPaths = resolveJobPaths(cwd, first.id);
     fs.writeFileSync(firstPaths.logFile, "first log", "utf-8");
     fs.writeFileSync(firstPaths.eventsFile, "{}\n", "utf-8");
     fs.writeFileSync(firstPaths.signalsFile, "{}\n", "utf-8");
-    updateJob(cwd, first.id, { status: "completed", phase: "done" }, { maxJobs: 2 });
-    updateJob(cwd, second.id, { status: "completed", phase: "done" }, { maxJobs: 2 });
-    const third = store.create({ kind: "compose", workflow: "dev", task: "Third", request: {} });
+    updateJob(cwd, first.id, { status: "completed", phase: undefined }, { maxJobs: 2 });
+    updateJob(cwd, second.id, { status: "completed", phase: undefined }, { maxJobs: 2 });
+    const third = store.create({ kind: "compose", task: "Third", request: { workflow: "dev" } });
 
     expect(listJobs(cwd).map((entry) => entry.id)).toEqual([third.id, second.id]);
     expect(fs.existsSync(firstPaths.jobFile)).toBe(false);
@@ -180,7 +188,7 @@ describe("failStaleJobs", () => {
   it("marks queued jobs older than threshold as failed", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd);
-    const job = store.create({ kind: "compose", workflow: "dev", task: "Stuck task", request: {} });
+    const job = store.create({ kind: "compose", task: "Stuck task", request: { workflow: "dev" } });
 
     const failed = failStaleJobs(cwd, { staleThresholdMs: -1 });
     expect(failed).toHaveLength(1);
@@ -194,10 +202,10 @@ describe("failStaleJobs", () => {
   it("does not affect running or completed jobs", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd);
-    const running = store.create({ kind: "compose", workflow: "dev", task: "Running", request: {} });
+    const running = store.create({ kind: "compose", task: "Running", request: { workflow: "dev" } });
     updateJob(cwd, running.id, { status: "running", phase: "starting" });
-    const completed = store.create({ kind: "compose", workflow: "dev", task: "Done", request: {} });
-    updateJob(cwd, completed.id, { status: "completed", phase: "done" });
+    const completed = store.create({ kind: "compose", task: "Done", request: { workflow: "dev" } });
+    updateJob(cwd, completed.id, { status: "completed", phase: undefined });
 
     const failed = failStaleJobs(cwd, { staleThresholdMs: 0 });
     expect(failed).toHaveLength(0);
@@ -206,7 +214,7 @@ describe("failStaleJobs", () => {
   it("does not affect recent queued jobs", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd);
-    store.create({ kind: "compose", workflow: "dev", task: "Fresh", request: {} });
+    store.create({ kind: "compose", task: "Fresh", request: { workflow: "dev" } });
 
     const failed = failStaleJobs(cwd, { staleThresholdMs: 300_000 });
     expect(failed).toHaveLength(0);

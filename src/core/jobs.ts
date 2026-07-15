@@ -1,19 +1,37 @@
-export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+import type { NotificationTarget } from "../notify/types.js";
+
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "needs_input"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "timeout";
 
 export type JobPhase =
-  | "queued"
   | "starting"
   | "planning"
   | "investigating"
   | "editing"
   | "verifying"
   | "reviewing"
-  | "finalizing"
-  | "done"
-  | "failed"
-  | "cancelled";
+  | "finalizing";
 
-export type JobKind = "plan" | "implement" | "review" | "fix-ci" | "compose" | "resume" | "acp";
+export type JobKind = "plan" | "implement" | "review" | "fix-ci" | "resume" | "compose";
+
+export interface JobReceipt {
+  jobId: string;
+  kind: JobKind;
+  status: "queued";
+  actions: {
+    status: "mimo_status";
+    events: "mimo_events";
+    result: "mimo_result";
+    cancel: "mimo_cancel";
+  };
+}
 
 export interface JobVerification {
   command: string;
@@ -36,13 +54,7 @@ export interface JobSignalsHint {
   sinceCursor: number;
 }
 
-export interface JobWakeHint {
-  tool: "mimo_wake";
-  jobId: string;
-  sinceCursor: number;
-}
-
-export interface JobCallbackSummary {
+export interface ExecutionCallbackSummary {
   invocationId: string;
   outcome: "completed" | "error" | "cancelled" | "missing";
   sessionId?: string | null;
@@ -53,12 +65,11 @@ export interface JobCallbackSummary {
 export interface JobRecord {
   id: string;
   kind: JobKind;
-  workflow?: string;
   cwd: string;
   task: string;
   request: unknown;
   status: JobStatus;
-  phase: JobPhase;
+  phase?: JobPhase;
   pid?: number | null;
   sessionId?: string | null;
   parentJobId?: string | null;
@@ -69,42 +80,29 @@ export interface JobRecord {
   summary?: string;
   changedFiles: string[];
   verification: JobVerification[];
-  callback?: JobCallbackSummary;
+  executionCallback?: ExecutionCallbackSummary;
+  notificationTarget?: NotificationTarget;
   reportPaths?: JobReportPaths;
   logFile: string;
   eventsFile: string;
   signalsFile: string;
+  notificationOutboxFile: string;
   error?: string;
   errorCode?: string;
-}
-
-export interface JobLaunchResult {
-  jobId: string;
-  status: JobStatus;
-  phase: JobPhase;
-  summary: string;
-  actions: {
-    status: "mimo_status";
-    result: "mimo_result";
-    cancel: "mimo_cancel";
-  };
-  signals: JobSignalsHint;
-  wake: JobWakeHint;
 }
 
 export interface JobStatusResult {
   jobId: string;
   kind: JobKind;
   status: JobStatus;
-  phase: JobPhase;
+  phase?: JobPhase;
   elapsedMs: number | null;
   sessionId: string | null;
   summary: string;
   changedFiles: string[];
-  callback?: JobCallbackSummary;
+  executionCallback?: ExecutionCallbackSummary;
   progress: string[];
   signals: JobSignalsHint;
-  wake?: JobWakeHint;
   actions: {
     result?: "mimo_result";
     cancel?: "mimo_cancel";
@@ -118,19 +116,11 @@ export interface JobResult {
   sessionId: string | null;
   changedFiles: string[];
   verification: JobVerification[];
-  callback?: JobCallbackSummary;
+  executionCallback?: ExecutionCallbackSummary;
   error?: string;
   errorCode?: string;
   reportPaths?: JobReportPaths;
   signals: JobSignalsHint;
-  resumeHint?: {
-    tool: "mimo_resume_job";
-    jobId: string;
-  };
-  directResumeHint?: {
-    tool: "mimo_resume";
-    session: string;
-  };
 }
 
 export function nowIso(): string {
@@ -147,5 +137,5 @@ export function buildJobId(
 }
 
 export function isActiveJobStatus(status: JobStatus): boolean {
-  return status === "queued" || status === "running";
+  return status === "queued" || status === "running" || status === "needs_input" || status === "blocked";
 }

@@ -3,6 +3,8 @@ import {
   buildJobId,
   isActiveJobStatus,
   nowIso,
+  type ExecutionCallbackSummary,
+  type JobReceipt,
   type JobRecord
 } from "../../src/core/jobs.js";
 
@@ -15,9 +17,12 @@ describe("job types", () => {
   it("detects active statuses", () => {
     expect(isActiveJobStatus("queued")).toBe(true);
     expect(isActiveJobStatus("running")).toBe(true);
+    expect(isActiveJobStatus("needs_input")).toBe(true);
+    expect(isActiveJobStatus("blocked")).toBe(true);
     expect(isActiveJobStatus("completed")).toBe(false);
     expect(isActiveJobStatus("failed")).toBe(false);
     expect(isActiveJobStatus("cancelled")).toBe(false);
+    expect(isActiveJobStatus("timeout")).toBe(false);
   });
 
   it("allows the canonical job record shape", () => {
@@ -29,7 +34,6 @@ describe("job types", () => {
       task: "Run dev workflow",
       request: { workflow: "dev" },
       status: "queued",
-      phase: "queued",
       pid: null,
       sessionId: null,
       parentJobId: null,
@@ -38,10 +42,33 @@ describe("job types", () => {
       changedFiles: [],
       verification: [],
       logFile: "E:/project/app/.codex-mimo/jobs/compose-abc.log",
-      eventsFile: "E:/project/app/.codex-mimo/jobs/compose-abc.events.jsonl"
+      eventsFile: "E:/project/app/.codex-mimo/jobs/compose-abc.events.jsonl",
+      signalsFile: "E:/project/app/.codex-mimo/jobs/compose-abc.signals.jsonl",
+      notificationOutboxFile: "E:/project/app/.codex-mimo/jobs/notifications.jsonl"
     };
 
     expect(record.kind).toBe("compose");
     expect(record.status).toBe("queued");
+  });
+
+  it("uses the unified execution callback and queued receipt contracts", () => {
+    const executionCallback: ExecutionCallbackSummary = {
+      invocationId: "invocation-1",
+      outcome: "completed"
+    };
+    const receipt: JobReceipt = {
+      jobId: "implement-abc",
+      kind: "implement",
+      status: "queued",
+      actions: {
+        status: "mimo_status",
+        events: "mimo_events",
+        result: "mimo_result",
+        cancel: "mimo_cancel"
+      }
+    };
+
+    expect(executionCallback.outcome).toBe("completed");
+    expect(receipt.actions.events).toBe("mimo_events");
   });
 });

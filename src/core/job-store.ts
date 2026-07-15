@@ -7,6 +7,7 @@ import {
   type JobKind,
   type JobRecord
 } from "./jobs.js";
+import type { NotificationTarget } from "../notify/types.js";
 
 const DEFAULT_MAX_JOBS = 100;
 
@@ -23,14 +24,15 @@ export interface JobPaths {
   logFile: string;
   eventsFile: string;
   signalsFile: string;
+  notificationOutboxFile: string;
 }
 
 export interface CreateJobInput {
   kind: JobKind;
-  workflow?: string;
   task: string;
   request: unknown;
   parentJobId?: string | null;
+  notificationTarget?: NotificationTarget;
 }
 
 export interface JobStoreOptions {
@@ -54,7 +56,8 @@ export function resolveJobPaths(cwd: string, jobId: string): JobPaths {
     jobFile: path.join(jobDir, `${jobId}.json`),
     logFile: path.join(jobDir, `${jobId}.log`),
     eventsFile: path.join(jobDir, `${jobId}.events.jsonl`),
-    signalsFile: path.join(jobDir, `${jobId}.signals.jsonl`)
+    signalsFile: path.join(jobDir, `${jobId}.signals.jsonl`),
+    notificationOutboxFile: path.join(jobDir, "notifications.jsonl")
   };
 }
 
@@ -73,12 +76,10 @@ export function createJobStore(cwd: string, options: JobStoreOptions = {}): {
       const record: JobRecord = {
         id,
         kind: input.kind,
-        workflow: input.workflow,
         cwd,
         task: input.task,
         request: input.request,
         status: "queued",
-        phase: "queued",
         pid: null,
         sessionId: null,
         parentJobId: input.parentJobId ?? null,
@@ -86,9 +87,11 @@ export function createJobStore(cwd: string, options: JobStoreOptions = {}): {
         updatedAt: timestamp,
         changedFiles: [],
         verification: [],
+        notificationTarget: input.notificationTarget,
         logFile: paths.logFile,
         eventsFile: paths.eventsFile,
-        signalsFile: paths.signalsFile
+        signalsFile: paths.signalsFile,
+        notificationOutboxFile: paths.notificationOutboxFile
       };
 
       writeJobRecord(cwd, record);
@@ -135,10 +138,7 @@ function readJobFile(cwd: string, jobId: string, options: ReadJobOptions = {}): 
     }
     throw new Error(`Malformed job file for job id: ${jobId}`);
   }
-  return {
-    ...parsed,
-    signalsFile: parsed.signalsFile ?? paths.signalsFile
-  };
+  return parsed;
 }
 
 export function updateJob(
@@ -193,13 +193,15 @@ function isJobRecord(value: unknown, expectedJobId: string): value is JobRecord 
     typeof value.cwd === "string" &&
     typeof value.task === "string" &&
     typeof value.status === "string" &&
-    typeof value.phase === "string" &&
+    (value.phase === undefined || typeof value.phase === "string") &&
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string" &&
     Array.isArray(value.changedFiles) &&
     Array.isArray(value.verification) &&
     typeof value.logFile === "string" &&
-    typeof value.eventsFile === "string"
+    typeof value.eventsFile === "string" &&
+    typeof value.signalsFile === "string" &&
+    typeof value.notificationOutboxFile === "string"
   );
 }
 
@@ -305,7 +307,7 @@ export function failStaleJobs(
 
     const updated = updateJob(cwd, job.id, {
       status: "failed",
-      phase: "failed",
+      phase: undefined,
       pid: null,
       completedAt: nowIso(),
       errorCode: "stale_queued",
