@@ -5,3 +5,27 @@ export type NotificationInput =
 export type NotificationTarget =
   | { type: "codex"; threadId: string }
   | { type: "webhook"; url: string; secretEnv: string };
+
+export type DeliveryStatus = "pending" | "delivering" | "delivered" | "failed";
+
+export interface NotificationDelivery {
+  id: string;
+  eventId: string;
+  jobId: string;
+  signalCursor: number;
+  target: NotificationTarget;
+  status: DeliveryStatus;
+  attempts: number;
+  createdAt: string;
+  nextAttemptAt?: string;
+  leaseUntil?: string;
+  deliveredAt?: string;
+  lastError?: string;
+}
+
+export interface EnqueueDeliveryInput {
+  jobId: string;
+  signalCursor: number;
+  target: NotificationTarget;
+  createdAt: string;
+}
