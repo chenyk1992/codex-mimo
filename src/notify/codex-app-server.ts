@@ -75,6 +75,7 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
   private readonly lines: ReadlineInterface;
   private readonly onLine = (line: string) => this.handleLine(line);
   private readonly onTransportError = () => this.failTransport();
+  private readonly onLateError = (): void => undefined;
   private readonly onExit = () => {
     this.processExited = true;
     this.failTransport("Codex App Server exited");
@@ -302,6 +303,7 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
   private releaseResources(): void {
     if (this.resourcesReleased) return;
     this.resourcesReleased = true;
+    const stillAlive = !this.hasExited();
 
     this.lines.off("line", this.onLine);
     this.lines.off("error", this.onTransportError);
@@ -315,13 +317,20 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     this.child.stdout.off("error", this.onTransportError);
     this.child.stderr.off("error", this.onTransportError);
 
+    if (stillAlive) {
+      this.child.on("error", this.onLateError);
+      this.child.stdin.on("error", this.onLateError);
+      this.child.stdout.on("error", this.onLateError);
+      this.child.stderr.on("error", this.onLateError);
+    }
+
     for (const stream of [this.child.stdin, this.child.stdout, this.child.stderr]) {
       try {
         stream.destroy();
       } catch {}
     }
 
-    if (!this.hasExited()) {
+    if (stillAlive) {
       try {
         this.child.unref();
       } catch {}

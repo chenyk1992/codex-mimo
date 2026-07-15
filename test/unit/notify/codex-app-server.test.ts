@@ -494,12 +494,25 @@ describe("Codex App Server client", () => {
     expect(process.stdin.destroyed).toBe(true);
     expect(process.stdout.destroyed).toBe(true);
     expect(process.stderr.destroyed).toBe(true);
-    expect(process.listenerCount("error")).toBe(0);
+    expect(process.listenerCount("error")).toBe(1);
     expect(process.listenerCount("exit")).toBe(0);
-    expect(process.stdin.listenerCount("error")).toBe(0);
-    expect(process.stdout.listenerCount("error")).toBe(0);
-    expect(process.stderr.listenerCount("error")).toBe(0);
+    expect(process.stdin.listenerCount("error")).toBe(1);
+    expect(process.stdout.listenerCount("error")).toBe(1);
+    expect(process.stderr.listenerCount("error")).toBe(1);
     expect(process.unrefCalls).toBe(1);
+
+    const kills = [...process.killSignals];
+    expect(() => process.emit("error", new Error("late child error"))).not.toThrow();
+    expect(() => process.stdin.emit("error", new Error("late stdin error"))).not.toThrow();
+    expect(() => process.stdout.emit("error", new Error("late stdout error"))).not.toThrow();
+    expect(() => process.stderr.emit("error", new Error("late stderr error"))).not.toThrow();
+    expect(client.close()).toBe(closing);
+    expect(process.killSignals).toEqual(kills);
+    expect(process.unrefCalls).toBe(1);
+    expect(process.listenerCount("error")).toBe(1);
+    expect(process.stdin.listenerCount("error")).toBe(1);
+    expect(process.stdout.listenerCount("error")).toBe(1);
+    expect(process.stderr.listenerCount("error")).toBe(1);
   });
 
   it("starts one teardown immediately on stream error without waiting for explicit close", async () => {
@@ -525,7 +538,7 @@ describe("Codex App Server client", () => {
 
   it("starts teardown immediately on malformed JSONL without explicit close", async () => {
     vi.useFakeTimers();
-    process = new FakeAppServerProcess(false, "SIGKILL");
+    process = new FakeAppServerProcess(false, null);
     spawnMock.mockReturnValue(process);
     const client = await initializeClient(process);
     const resume = client.resumeThread("thread-1");
@@ -534,9 +547,22 @@ describe("Codex App Server client", () => {
 
     process.stdout.write("not-json\n");
     expect(process.stdin.writableEnded).toBe(true);
+    const teardown = client.close();
     await vi.advanceTimersByTimeAsync(5_000);
 
-    await expect(resume).rejects.toMatchObject({ kind: "protocol" });
+    const pendingError = await resume.catch((error: unknown) => error);
+    expect(pendingError).toMatchObject({ kind: "protocol" });
+    await expect(teardown).resolves.toBeUndefined();
     expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+
+    expect(() => process.emit("error", new Error("late child private detail"))).not.toThrow();
+    expect(() => process.stdin.emit("error", new Error("late stdin private detail"))).not.toThrow();
+    expect(() => process.stdout.emit("error", new Error("late stdout private detail"))).not.toThrow();
+    expect(() => process.stderr.emit("error", new Error("late stderr private detail"))).not.toThrow();
+    expect(client.close()).toBe(teardown);
+    expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(process.unrefCalls).toBe(1);
+    expect(await resume.catch((error: unknown) => error)).toBe(pendingError);
+    expect(await client.resumeThread("thread-1").catch((error: unknown) => error)).toBe(pendingError);
   });
 });
