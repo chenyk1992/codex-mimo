@@ -10,7 +10,7 @@ export function resolveNotificationTarget(
   }
 
   if (input.type === "codex") {
-    const threadId = input.threadId?.trim();
+    const threadId = input.threadId?.trim() || env.CODEX_THREAD_ID?.trim();
     if (!threadId) {
       throw new Error("Codex notification requires threadId");
     }

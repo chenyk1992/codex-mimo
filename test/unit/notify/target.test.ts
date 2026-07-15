@@ -15,6 +15,11 @@ describe("resolveNotificationTarget", () => {
     expect(resolveNotificationTarget(undefined, {})).toBeUndefined();
   });
 
+  it("uses ambient Codex thread when an explicit Codex target omits threadId", () => {
+    expect(resolveNotificationTarget({ type: "codex" }, { CODEX_THREAD_ID: " ambient " }))
+      .toEqual({ type: "codex", threadId: "ambient" });
+  });
+
   it.each(["file:///tmp/hook", "ftp://example.test/hook", "not-a-url"])("rejects webhook URL %s", (url) => {
     expect(() => resolveNotificationTarget({ type: "webhook", url, secretEnv: "HOOK_SECRET" }, {}))
       .toThrow("Webhook URL must use http or https");
