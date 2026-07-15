@@ -29,3 +29,8 @@ export interface EnqueueDeliveryInput {
   target: NotificationTarget;
   createdAt: string;
 }
+
+export type DeliveryAttemptResult =
+  | { outcome: "delivered" }
+  | { outcome: "retry"; error: string }
+  | { outcome: "permanent"; error: string };
