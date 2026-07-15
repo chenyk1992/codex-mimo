@@ -16,6 +16,17 @@ export type JobSignalKind =
   | "cancelled"
   | "timeout";
 
+export const ATTENTION_SIGNAL_KINDS = [
+  "needs_input",
+  "blocked",
+  "completed",
+  "failed",
+  "cancelled",
+  "timeout"
+] as const satisfies readonly JobSignalKind[];
+
+export type AttentionSignalKind = typeof ATTENTION_SIGNAL_KINDS[number];
+
 export interface JobSignal {
   cursor: number;
   jobId: string;
@@ -54,6 +65,13 @@ const LEVEL_RANK: Record<JobSignalLevel, number> = {
   warn: 2,
   error: 3
 };
+
+export function isAttentionSignal(
+  signal: JobSignalKind | Pick<JobSignal, "kind">
+): boolean {
+  const kind = typeof signal === "string" ? signal : signal.kind;
+  return (ATTENTION_SIGNAL_KINDS as readonly JobSignalKind[]).includes(kind);
+}
 
 export function appendJobSignal(file: string, signal: NewJobSignal): JobSignal {
   const cursor = readJobSignals(file).nextCursor + 1;

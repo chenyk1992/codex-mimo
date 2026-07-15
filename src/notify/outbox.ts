@@ -10,14 +10,19 @@ const LOCK_TIMEOUT_MS = 2_000;
 const LOCK_RETRY_MS = 10;
 const lockWaitArray = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 
+export interface EnqueueDeliveryResult {
+  delivery: NotificationDelivery;
+  created: boolean;
+}
+
 export function enqueueDelivery(
   file: string,
   input: EnqueueDeliveryInput
-): NotificationDelivery {
+): EnqueueDeliveryResult {
   return withJournalLock(file, () => {
     const id = `${input.jobId}:${input.signalCursor}:${input.target.type}`;
     const existing = readDeliveries(file).find((delivery) => delivery.id === id);
-    if (existing) return existing;
+    if (existing) return { delivery: existing, created: false };
 
     const delivery: NotificationDelivery = {
       id,
@@ -30,7 +35,7 @@ export function enqueueDelivery(
       createdAt: input.createdAt
     };
     appendSnapshot(file, delivery);
-    return delivery;
+    return { delivery, created: true };
   });
 }
 

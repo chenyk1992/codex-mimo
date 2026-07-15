@@ -2,7 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { appendJobSignal, readJobSignals } from "../../src/core/job-signals.js";
+import {
+  ATTENTION_SIGNAL_KINDS,
+  appendJobSignal,
+  isAttentionSignal,
+  readJobSignals
+} from "../../src/core/job-signals.js";
 
 function tempSignalFile(): string {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-signals-")), "signals.jsonl");
@@ -70,5 +75,19 @@ describe("job signals", () => {
   it("returns an empty cursor result when the signal file is missing", () => {
     const result = readJobSignals(path.join(os.tmpdir(), "missing-codex-mimo-signals.jsonl"));
     expect(result).toEqual({ signals: [], nextCursor: 0 });
+  });
+
+  it("identifies only attention-worthy signal kinds", () => {
+    expect(ATTENTION_SIGNAL_KINDS).toEqual([
+      "needs_input",
+      "blocked",
+      "completed",
+      "failed",
+      "cancelled",
+      "timeout"
+    ]);
+    expect(ATTENTION_SIGNAL_KINDS.every(isAttentionSignal)).toBe(true);
+    expect(isAttentionSignal("phase_changed")).toBe(false);
+    expect(isAttentionSignal({ kind: "milestone" })).toBe(false);
   });
 });

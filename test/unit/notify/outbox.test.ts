@@ -32,19 +32,21 @@ afterEach(() => {
 describe("notification outbox", () => {
   it("deduplicates job cursor and target kind", () => {
     const file = tempOutbox();
-    const first = enqueueDelivery(file, {
+    const { delivery: first, created: firstCreated } = enqueueDelivery(file, {
       jobId: "implement-1",
       signalCursor: 3,
       target,
       createdAt: now
     });
-    const second = enqueueDelivery(file, {
+    const { delivery: second, created: secondCreated } = enqueueDelivery(file, {
       jobId: "implement-1",
       signalCursor: 3,
       target,
       createdAt: now
     });
 
+    expect(firstCreated).toBe(true);
+    expect(secondCreated).toBe(false);
     expect(second.id).toBe(first.id);
     expect(first).toMatchObject({
       id: "implement-1:3:codex",
@@ -76,7 +78,7 @@ describe("notification outbox", () => {
 
   it("appends complete snapshots for retry, delivery, and failure", () => {
     const file = tempOutbox();
-    const first = enqueueDelivery(file, {
+    const { delivery: first } = enqueueDelivery(file, {
       jobId: "review-1",
       signalCursor: 2,
       target,
@@ -117,7 +119,7 @@ describe("notification outbox", () => {
     });
     expect(delivered.leaseUntil).toBeUndefined();
 
-    const second = enqueueDelivery(file, {
+    const { delivery: second } = enqueueDelivery(file, {
       jobId: "review-1",
       signalCursor: 3,
       target,
@@ -135,7 +137,7 @@ describe("notification outbox", () => {
 
   it("ignores malformed journal lines during replay", () => {
     const file = tempOutbox();
-    const delivery = enqueueDelivery(file, {
+    const { delivery } = enqueueDelivery(file, {
       jobId: "fix-1",
       signalCursor: 4,
       target,
@@ -148,7 +150,7 @@ describe("notification outbox", () => {
 
   it("does not claim a pending delivery before its retry time", () => {
     const file = tempOutbox();
-    const delivery = enqueueDelivery(file, {
+    const { delivery } = enqueueDelivery(file, {
       jobId: "fix-ci-1",
       signalCursor: 5,
       target,
@@ -171,7 +173,7 @@ describe("notification outbox", () => {
 
   it("does not return a delivered delivery to pending", () => {
     const file = tempOutbox();
-    const delivery = enqueueDelivery(file, {
+    const { delivery } = enqueueDelivery(file, {
       jobId: "implement-2",
       signalCursor: 1,
       target,
@@ -192,7 +194,7 @@ describe("notification outbox", () => {
 
   it("does not overwrite failed and delivered terminal outcomes", () => {
     const file = tempOutbox();
-    const failed = enqueueDelivery(file, {
+    const { delivery: failed } = enqueueDelivery(file, {
       jobId: "implement-3",
       signalCursor: 1,
       target,
@@ -207,7 +209,7 @@ describe("notification outbox", () => {
       new Date(now)
     )).toThrow("not delivering");
 
-    const delivered = enqueueDelivery(file, {
+    const { delivery: delivered } = enqueueDelivery(file, {
       jobId: "implement-3",
       signalCursor: 2,
       target,
@@ -227,7 +229,7 @@ describe("notification outbox", () => {
 
   it("rejects every mutation from a worker whose lease was reclaimed", () => {
     const file = tempOutbox();
-    const delivery = enqueueDelivery(file, {
+    const { delivery } = enqueueDelivery(file, {
       jobId: "implement-4",
       signalCursor: 1,
       target,
@@ -324,13 +326,13 @@ describe("notification outbox", () => {
     }]
   ])("skips a snapshot with a mismatched %s identity", (_name, identityPatch) => {
     const file = tempOutbox();
-    const first = enqueueDelivery(file, {
+    const { delivery: first } = enqueueDelivery(file, {
       jobId: "identity-1",
       signalCursor: 1,
       target,
       createdAt: now
     });
-    const second = enqueueDelivery(file, {
+    const { delivery: second } = enqueueDelivery(file, {
       jobId: "identity-1",
       signalCursor: 2,
       target,
@@ -383,7 +385,7 @@ describe("notification outbox", () => {
     }]
   ])("skips a later %s snapshot and keeps the prior delivery claimable", (_name, invalidPatch) => {
     const file = tempOutbox();
-    const delivery = enqueueDelivery(file, {
+    const { delivery } = enqueueDelivery(file, {
       jobId: "fix-2",
       signalCursor: 1,
       target,

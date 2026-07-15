@@ -161,6 +161,9 @@ export function updateJob(
     createdAt: existing.createdAt,
     updatedAt: nowIso()
   };
+  if (Object.prototype.hasOwnProperty.call(patch, "phase") && patch.phase === undefined) {
+    delete updated.phase;
+  }
 
   writeJobRecord(cwd, updated);
   const state = readState(cwd);
