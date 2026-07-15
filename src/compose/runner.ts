@@ -68,6 +68,11 @@ interface ComposeRunnerDeps {
   now?: () => Date;
 }
 
+type ComposeReportPatch = Omit<
+  BuildComposeReportFromRunInput,
+  "id" | "createdAt" | "input" | "mimoArgs" | "requestedSkills" | "reportDir" | "eventsDir" | "diffsDir"
+>;
+
 export async function runComposeWorkflow(
   input: ComposeRunInput,
   deps: ComposeRunnerDeps = {}
@@ -107,6 +112,22 @@ export async function runComposeWorkflow(
   const writeReport = deps.writeReport ?? writeComposeReport;
   const captureStatus = deps.captureStatus ?? captureGitStatus;
   const captureHead = deps.captureHead ?? captureGitHead;
+  const emptyDiff: GitDiffSnapshot = { changedFiles: [], diffStat: "", diff: "" };
+  const reportBase = {
+    id,
+    createdAt,
+    input,
+    mimoArgs,
+    requestedSkills: workflow.skillChain,
+    reportDir,
+    eventsDir,
+    diffsDir
+  };
+  const finish = (patch: ComposeReportPatch): ComposeReport => {
+    const report = buildComposeReportFromRun({ ...reportBase, ...patch });
+    writeReport(report);
+    return report;
+  };
 
   let gitStatusBefore: GitStatusSnapshot | undefined;
   try {
@@ -122,24 +143,14 @@ export async function runComposeWorkflow(
   }
 
   if (input.dryRun) {
-    const report = buildComposeReportFromRun({
-      id,
-      createdAt,
-      input,
-      mimoArgs,
-      requestedSkills: workflow.skillChain,
+    return finish({
       eventsStdout: "",
-      diff: { changedFiles: [], diffStat: "", diff: "" },
+      diff: emptyDiff,
       verification: [],
-      reportDir,
-      eventsDir,
-      diffsDir,
       status: "needs_review",
       gitStatusBefore,
       gitHeadBefore
     });
-    writeReport(report);
-    return report;
   }
 
   const runMimo = deps.runMimo ?? defaultRunMimo;
@@ -162,18 +173,10 @@ export async function runComposeWorkflow(
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const report = buildComposeReportFromRun({
-      id,
-      createdAt,
-      input,
-      mimoArgs,
-      requestedSkills: workflow.skillChain,
+    return finish({
       eventsStdout: "",
-      diff: { changedFiles: [], diffStat: "", diff: "" },
+      diff: emptyDiff,
       verification: [],
-      reportDir,
-      eventsDir,
-      diffsDir,
       status: "failed",
       gitStatusBefore,
       gitHeadBefore,
@@ -181,8 +184,6 @@ export async function runComposeWorkflow(
       callbackTimedOut,
       error: `MiMoCode execution failed: ${errorMessage}`
     });
-    writeReport(report);
-    return report;
   }
   const callbackError = callbackFailureMessage(callback, callbackTimedOut);
 
@@ -191,19 +192,10 @@ export async function runComposeWorkflow(
     diff = await captureDiff(input.cwd, input.since ?? "HEAD");
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    diff = { changedFiles: [], diffStat: "", diff: "" };
-    const report = buildComposeReportFromRun({
-      id,
-      createdAt,
-      input,
-      mimoArgs,
-      requestedSkills: workflow.skillChain,
+    return finish({
       eventsStdout: mimoResult.stdout,
-      diff,
+      diff: emptyDiff,
       verification: [],
-      reportDir,
-      eventsDir,
-      diffsDir,
       status: "failed",
       gitStatusBefore,
       gitHeadBefore,
@@ -211,8 +203,6 @@ export async function runComposeWorkflow(
       callbackTimedOut,
       error: callbackError ?? `Git diff capture failed: ${errorMessage}`
     });
-    writeReport(report);
-    return report;
   }
 
   let gitStatusAfter: GitStatusSnapshot | undefined;
@@ -245,18 +235,10 @@ export async function runComposeWorkflow(
     : mergeUnique(readOnlyViolationFiles, gitCommitChanges.changedFiles);
   if (!workflow.writesAllowed && (readOnlyChangedFiles.length > 0 || gitHeadChanged(gitHeadBefore, gitHeadAfter))) {
     const violationDiff = buildReadOnlyReportDiff(diff, readOnlyChangedFiles);
-    const report = buildComposeReportFromRun({
-      id,
-      createdAt,
-      input,
-      mimoArgs,
-      requestedSkills: workflow.skillChain,
+    return finish({
       eventsStdout: mimoResult.stdout,
       diff: violationDiff,
       verification: [],
-      reportDir,
-      eventsDir,
-      diffsDir,
       status: "failed",
       gitStatusBefore,
       gitStatusAfter,
@@ -267,8 +249,6 @@ export async function runComposeWorkflow(
       callbackTimedOut,
       error: readOnlyViolationError(workflow.name, readOnlyChangedFiles, gitHeadBefore, gitHeadAfter, callbackError)
     });
-    writeReport(report);
-    return report;
   }
 
   let reportDiff = workflow.writesAllowed ? diff : buildReadOnlyReportDiff(diff, readOnlyViolationFiles);
@@ -287,18 +267,10 @@ export async function runComposeWorkflow(
     verification = await runVerification(input.cwd, verificationCommands);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const report = buildComposeReportFromRun({
-      id,
-      createdAt,
-      input,
-      mimoArgs,
-      requestedSkills: workflow.skillChain,
+    return finish({
       eventsStdout: mimoResult.stdout,
       diff: reportDiff,
       verification: [],
-      reportDir,
-      eventsDir,
-      diffsDir,
       status: "failed",
       gitStatusBefore,
       gitStatusAfter,
@@ -309,24 +281,14 @@ export async function runComposeWorkflow(
       callbackTimedOut,
       error: callbackError ?? `Verification execution failed: ${errorMessage}`
     });
-    writeReport(report);
-    return report;
   }
 
   const semanticFailure = detectSemanticFailure(mimoResult.stdout);
   if (semanticFailure) {
-    const report = buildComposeReportFromRun({
-      id,
-      createdAt,
-      input,
-      mimoArgs,
-      requestedSkills: workflow.skillChain,
+    return finish({
       eventsStdout: mimoResult.stdout,
       diff: reportDiff,
       verification,
-      reportDir,
-      eventsDir,
-      diffsDir,
       status: "failed",
       gitStatusBefore,
       gitStatusAfter,
@@ -337,23 +299,13 @@ export async function runComposeWorkflow(
       callbackTimedOut,
       error: callbackError ?? semanticFailure
     });
-    writeReport(report);
-    return report;
   }
 
   const status = determineStatus(mimoResult.exitCode, reportDiff.changedFiles, verification, callback, callbackTimedOut);
-  const report = buildComposeReportFromRun({
-    id,
-    createdAt,
-    input,
-    mimoArgs,
-    requestedSkills: workflow.skillChain,
+  return finish({
     eventsStdout: mimoResult.stdout,
     diff: reportDiff,
     verification,
-    reportDir,
-    eventsDir,
-    diffsDir,
     status,
     terminationReason: mimoResult.terminationReason,
     gitStatusBefore,
@@ -365,9 +317,6 @@ export async function runComposeWorkflow(
     callbackTimedOut,
     error: status === "timeout" ? timeoutError(mimoResult.terminationReason) : callbackError
   });
-
-  writeReport(report);
-  return report;
 }
 
 async function defaultRunMimo(
@@ -457,9 +406,7 @@ export function timeoutError(reason?: TerminationReason): string {
   return "MiMoCode exceeded the configured process timeout.";
 }
 
-
-
-export function buildComposeReportFromRun(input: {
+interface BuildComposeReportFromRunInput {
   id: string;
   createdAt: string;
   input: ComposeRunInput;
@@ -481,7 +428,9 @@ export function buildComposeReportFromRun(input: {
   gitHeadAfter?: GitHeadSnapshot;
   gitCommits?: string[];
   error?: string;
-}): ComposeReport {
+}
+
+export function buildComposeReportFromRun(input: BuildComposeReportFromRunInput): ComposeReport {
   const events = parseMimoJsonLines(input.eventsStdout);
   const sessionId = input.callback?.sessionId ?? extractSessionIdFromEvents(events);
   const diffPath = input.diff.diff ? path.join(input.diffsDir, `${input.id}.diff`) : undefined;

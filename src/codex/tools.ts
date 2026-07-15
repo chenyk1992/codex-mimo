@@ -141,20 +141,16 @@ export async function mimoReview(input: unknown) {
     throw new Error(`Git diff capture failed: ${diffResult.stderr || `exit ${diffResult.exitCode}`}`);
   }
 
-  const diffSummary = diffResult.stdout || "No changes found.";
-  let files: string[] | undefined;
-  let prompt = reviewPrompt(diffSummary);
-  if (diffResult.stdout) {
-    const diffFile = writeReviewDiffInput(parsed.cwd, parsed.base, diffResult.stdout);
-    files = [diffFile];
-    prompt = reviewPrompt(`The current diff is attached as @${diffFile}. Review that attached diff.`);
-  }
+  const diffFile = diffResult.stdout ? writeReviewDiffInput(parsed.base, diffResult.stdout) : undefined;
+  const prompt = reviewPrompt(
+    diffFile ? `The current diff is attached as @${diffFile}. Review that attached diff.` : "No changes found."
+  );
 
   const result = await runAndCapture({
     cwd: parsed.cwd,
     agent: "plan",
     message: prompt,
-    files,
+    files: diffFile ? [diffFile] : undefined,
     timeoutMs: parsed.timeoutMs
   });
 
@@ -170,7 +166,6 @@ export async function mimoReview(input: unknown) {
     throw new Error("MiMoCode review returned a greeting instead of review content. Agent may not have initialized properly.");
   }
   
-  // Return findings based on review content
   const findings = result.summary && result.summary !== "Completed."
     ? [{ severity: "info", title: "Review Summary", body: result.summary }]
     : [];
@@ -202,7 +197,7 @@ function isGreetingResponse(summary: string | undefined): boolean {
   return patterns.some((p) => p.test(text));
 }
 
-function writeReviewDiffInput(cwd: string, base: string, diff: string): string {
+function writeReviewDiffInput(base: string, diff: string): string {
   const dir = path.join(os.tmpdir(), "codex-mimo-review-inputs");
   fs.mkdirSync(dir, { recursive: true });
   const safeBase = base.replace(/[^a-zA-Z0-9_.-]/g, "_") || "HEAD";
@@ -213,44 +208,26 @@ function writeReviewDiffInput(cwd: string, base: string, diff: string): string {
 
 export async function mimoFixCi(input: unknown) {
   const parsed = FixCiInput.parse(input);
-  const before = await captureWorktreeFiles(parsed.cwd);
-  const result = await runAndCapture({
+  const { result, changedFiles } = await runWritableMimo({
     cwd: parsed.cwd,
-    agent: "build",
+    label: "fix-ci",
     message: implementPrompt(parsed.task ?? "Fix the CI failures shown in the attached log."),
     files: [parsed.file],
     timeoutMs: parsed.timeoutMs
   });
-  assertMimoRunSucceeded(result, "fix-ci");
-  const after = await captureWorktreeFiles(parsed.cwd);
-  return {
-    summary: result.summary,
-    sessionId: result.sessionId,
-    changedFiles: mergeChangedFiles(result.changedFiles, diffAddedFiles(before, after)),
-    commands: result.commands,
-    risks: result.errors
-  };
+  return renderWritableMimoResult(result, changedFiles);
 }
 
 export async function mimoResume(input: unknown) {
   const parsed = ResumeInput.parse(input);
-  const before = await captureWorktreeFiles(parsed.cwd);
-  const result = await runAndCapture({
+  const { result, changedFiles } = await runWritableMimo({
     cwd: parsed.cwd,
-    agent: "build",
+    label: "resume",
     message: implementPrompt(parsed.task),
     session: parsed.session,
     timeoutMs: parsed.timeoutMs
   });
-  assertMimoRunSucceeded(result, "resume");
-  const after = await captureWorktreeFiles(parsed.cwd);
-  return {
-    summary: result.summary,
-    sessionId: result.sessionId,
-    changedFiles: mergeChangedFiles(result.changedFiles, diffAddedFiles(before, after)),
-    commands: result.commands,
-    risks: result.errors
-  };
+  return renderWritableMimoResult(result, changedFiles);
 }
 
 export async function mimoCompose(
@@ -503,6 +480,42 @@ export async function mimoResumeJob(
     sessionId: parent.sessionId,
     status: child.status,
     summary: "Resume job created. Run it in background with background=true."
+  };
+}
+
+interface WritableMimoRunInput {
+  cwd: string;
+  label: string;
+  message: string;
+  files?: string[];
+  session?: string;
+  timeoutMs?: number;
+}
+
+async function runWritableMimo({ label, ...options }: WritableMimoRunInput): Promise<{
+  result: MimoRunResult;
+  changedFiles: string[];
+}> {
+  const before = await captureWorktreeFiles(options.cwd);
+  const result = await runAndCapture({ ...options, agent: "build" });
+  assertMimoRunSucceeded(result, label);
+  const after = await captureWorktreeFiles(options.cwd);
+  return {
+    result,
+    changedFiles: mergeChangedFiles(result.changedFiles, diffAddedFiles(before, after))
+  };
+}
+
+function renderWritableMimoResult(
+  { summary, sessionId, commands, errors }: MimoRunResult,
+  changedFiles: string[]
+) {
+  return {
+    summary,
+    sessionId,
+    changedFiles,
+    commands,
+    risks: errors
   };
 }
 
