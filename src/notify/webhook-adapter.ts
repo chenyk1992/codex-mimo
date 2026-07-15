@@ -86,8 +86,8 @@ export async function deliverWebhook(
       },
       body
     });
-  } catch (error) {
-    return { outcome: "retry", error: redactSecret(errorMessage(error), secret) };
+  } catch {
+    return { outcome: "retry", error: "Webhook request failed" };
   }
 
   if (response.status >= 200 && response.status < 300) {
@@ -97,15 +97,9 @@ export async function deliverWebhook(
   const result = {
     error: `Webhook responded with HTTP ${response.status}`
   };
-  return response.status === 408 || response.status === 429 || response.status >= 500
+  return response.status === 408 ||
+    response.status === 429 ||
+    (response.status >= 500 && response.status <= 599)
     ? { outcome: "retry", ...result }
     : { outcome: "permanent", ...result };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function redactSecret(message: string, secret: string): string {
-  return message.split(secret).join("[REDACTED]");
 }

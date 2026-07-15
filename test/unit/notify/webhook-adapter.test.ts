@@ -134,6 +134,7 @@ describe("webhook adapter", () => {
     [429, "retry"],
     [500, "retry"],
     [599, "retry"],
+    [600, "permanent"],
     [300, "permanent"],
     [404, "permanent"]
   ] as const)("classifies HTTP %s as %s", async (status, outcome) => {
@@ -181,8 +182,29 @@ describe("webhook adapter", () => {
 
     expect(result).toEqual({
       outcome: "retry",
-      error: "connection refused while using [REDACTED]"
+      error: "Webhook request failed"
     });
     expect(JSON.stringify(result)).not.toContain("secret");
+  });
+
+  it.each([
+    "[REDACTED]",
+    "RED",
+    "E"
+  ])("never returns a colliding secret in a transport error (%s)", async (secret) => {
+    const fetch = vi.fn(async () => {
+      throw new Error(`connection failed for ${secret}`);
+    });
+
+    const result = await deliverWebhook(
+      delivery,
+      job,
+      signal,
+      { HOOK_SECRET: secret },
+      fetch
+    );
+
+    expect(result.outcome).toBe("retry");
+    expect("error" in result ? result.error : "").not.toContain(secret);
   });
 });
