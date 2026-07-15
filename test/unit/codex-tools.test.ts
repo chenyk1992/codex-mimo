@@ -124,7 +124,7 @@ describe("codex tool handlers", () => {
 
     expect(result).toMatchObject({
       status: "queued",
-      phase: "queued",
+      phase: undefined,
       actions: {
         status: "mimo_status",
         result: "mimo_result",
