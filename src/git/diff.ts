@@ -1,9 +1,17 @@
 import { execa } from "execa";
+import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
+
+export interface GitFileFingerprint {
+  status: string;
+  contentHash: string;
+}
 
 export interface GitStatusSnapshot {
   short: string;
   dirty: boolean;
+  fingerprints: Record<string, GitFileFingerprint>;
 }
 
 export interface GitHeadSnapshot {
@@ -18,14 +26,77 @@ export interface GitCommitChangeSnapshot {
 }
 
 export async function captureGitStatus(cwd: string): Promise<GitStatusSnapshot> {
-  const result = await execa("git", gitArgs(cwd, ["status", "--short"]), { cwd, reject: false });
+  const result = await execa(
+    "git",
+    gitArgs(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+    { cwd, reject: false }
+  );
   if (result.exitCode !== 0) {
     throw new Error(`Git status capture failed: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`);
   }
+  const entries = parsePorcelainStatus(result.stdout ?? "");
   return {
-    short: result.stdout ?? "",
-    dirty: (result.stdout ?? "").trim().length > 0
+    short: entries.map((entry) => entry.display).join("\n"),
+    dirty: entries.length > 0,
+    fingerprints: Object.fromEntries(entries.flatMap((entry) => entry.paths.map((file, index) => [
+      file,
+      {
+        status: index === 0 ? entry.status : "D ",
+        contentHash: hashWorkspacePath(cwd, file)
+      }
+    ])))
   };
+}
+
+interface PorcelainEntry {
+  status: string;
+  paths: string[];
+  display: string;
+}
+
+function parsePorcelainStatus(output: string): PorcelainEntry[] {
+  const tokens = output.split("\0").filter(Boolean);
+  const entries: PorcelainEntry[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.length < 4) continue;
+    const status = token.slice(0, 2);
+    const currentPath = token.slice(3);
+    if (/[RC]/.test(status)) {
+      const previousPath = tokens[index + 1];
+      if (previousPath !== undefined) index += 1;
+      const paths = previousPath ? [currentPath, previousPath] : [currentPath];
+      entries.push({
+        status,
+        paths,
+        display: previousPath ? `${status} ${previousPath} -> ${currentPath}` : `${status} ${currentPath}`
+      });
+      continue;
+    }
+    entries.push({ status, paths: [currentPath], display: `${status} ${currentPath}` });
+  }
+  return entries;
+}
+
+function hashWorkspacePath(cwd: string, file: string): string {
+  const root = path.resolve(cwd);
+  const absolute = path.resolve(root, file);
+  const relative = path.relative(root, absolute);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return "outside-workspace";
+  try {
+    const stat = fs.lstatSync(absolute);
+    if (stat.isSymbolicLink()) {
+      return crypto.createHash("sha256").update(`symlink:${fs.readlinkSync(absolute)}`).digest("hex");
+    }
+    if (!stat.isFile()) return stat.isDirectory() ? "directory" : "special";
+    return crypto.createHash("sha256").update(fs.readFileSync(absolute)).digest("hex");
+  } catch (error) {
+    return isMissingPathError(error) ? "missing" : "unreadable";
+  }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
 export interface GitDiffSnapshot {
@@ -42,17 +113,30 @@ export function parseChangedFiles(output: string): string[] {
 }
 
 export async function captureGitDiff(cwd: string, base = "HEAD"): Promise<GitDiffSnapshot> {
-  const [names, stat, diff] = await Promise.all([
-    execa("git", gitArgs(cwd, ["diff", "--name-only", base]), { cwd }),
-    execa("git", gitArgs(cwd, ["diff", "--stat", base]), { cwd }),
-    execa("git", gitArgs(cwd, ["diff", base]), { cwd })
-  ]);
-
-  return {
-    changedFiles: parseChangedFiles(names.stdout),
-    diffStat: stat.stdout,
-    diff: diff.stdout
-  };
+  const validated = await execa("git", gitArgs(cwd, ["rev-parse", "--verify", base]), {
+    cwd,
+    reject: false
+  });
+  if (validated.exitCode !== 0) {
+    throw new Error(`Git diff capture failed for base ${base}: ${validated.stderr || `exit ${validated.exitCode}`}`);
+  }
+  try {
+    const [names, stat, diff] = await Promise.all([
+      execa("git", gitArgs(cwd, ["diff", "--name-only", base]), { cwd }),
+      execa("git", gitArgs(cwd, ["diff", "--stat", base]), { cwd }),
+      execa("git", gitArgs(cwd, ["diff", base]), { cwd })
+    ]);
+    return {
+      changedFiles: parseChangedFiles(names.stdout),
+      diffStat: stat.stdout,
+      diff: diff.stdout
+    };
+  } catch (error) {
+    throw new Error(
+      `Git diff capture failed for base ${base}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    );
+  }
 }
 
 export async function captureGitHead(cwd: string): Promise<GitHeadSnapshot> {

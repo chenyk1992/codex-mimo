@@ -82,12 +82,14 @@ describe("hook callback payload helpers", () => {
       event: "session.post",
       receivedAt: "2026-07-16T00:00:00.000Z",
       sessionId: "ses-1",
-      outcome: "completed"
+      outcome: "completed",
+      finalText: "Completed from callback."
     })).toEqual({
       invocationId: "hook-invocation",
       receivedAt: "2026-07-16T00:00:00.000Z",
       sessionId: "ses-1",
-      outcome: "completed"
+      outcome: "completed",
+      finalText: "Completed from callback."
     });
   });
 

@@ -42,6 +42,29 @@ const BLOCKED_PATTERNS = [
   /^(?:required\s+)?(?:permission|dependency|external\s+service)\s+(?:is\s+)?(?:missing|unavailable|required)\b[\s\S]*$/i
 ] as const;
 
+const UNACCEPTED_TASK_PATTERNS = [
+  /^(?:hello|hi|hey)[!.,\s]*(?:how|what|may|can|would)?[\s\S]{0,120}$/i,
+  /^how (?:can|may) i (?:help|assist)(?: you)?[?!.\s]*$/i,
+  /^what (?:can i help|would you like)(?: me)?[\s\S]{0,120}[?!.\s]*$/i,
+  /^please share (?:your|the) (?:task|objective|goal)[?!.\s]*$/i,
+  /^(?:i )?(?:do not|don't|cannot|can't) (?:see|find|have).*(?:task|objective|goal)[\s\S]{0,200}$/i,
+  /^(?:no|missing|without)\s+(?:an?\s+|the\s+|actual\s+|specific\s+|concrete\s+)*(?:task|objective|description|goal)\b[\s\S]*$/i,
+  /^(?:the )?(?:task|objective) is empty[?!.\s]*$/i,
+  /^it looks like (?:your )?message got cut off[\s\S]*$/i,
+  /^it looks like .*objective is empty[\s\S]*$/i,
+  /^[\s\S]*(?:have not|haven't|did not|didn't) (?:provide|receive|see)[\s\S]*(?:task|objective|goal)[\s\S]*$/i,
+  /^ready\.\s*what do you need[?!.\s]*$/i,
+  /^how (?:can|may) i help[?!.\s]+what task or problem[\s\S]*$/i,
+  /^the skill [\s\S]+ is not available\.[\s\S]*what are you trying to accomplish[?!.\s]*$/i,
+  /^[\s\S]*don't see (?:the )?(?:actual )?task description[\s\S]*$/i,
+  /^what task would you like me to plan\?[\s\S]*objective field appears to be empty[?!.\s]*$/i,
+  /^(?:您好|你好)[，,！!\s]*(?:有什么.*(?:帮|协助).*|请问.*)[?？!！。\s]*$/i,
+  /^[\s\S]*(?:消息.*空|尚未提供具体的?任务描述|没有提供具体的?任务目标)[\s\S]*$/i,
+  /^(?:想要我帮您规划什么|想要完成什么)[?？!！。\s]*$/i
+] as const;
+
+const UNACCEPTED_TASK_ERROR = "MiMoCode did not receive or accept the task objective.";
+
 export function classifyRunOutcome(evidence: RunEvidence): JobOutcome {
   const summary = evidence.finalText.trim();
   const common = commonOutcomeFields(evidence);
@@ -69,6 +92,11 @@ export function classifyRunOutcome(evidence: RunEvidence): JobOutcome {
       error: callbackError,
       errorCode: callbackCode
     };
+  }
+
+  const semanticFailure = detectUnacceptedTask(summary);
+  if (semanticFailure) {
+    return failureOutcome("failed", semanticFailure, "semantic_failure", common, semanticFailure);
   }
 
   if (matchesExplicitOutput(summary, NEEDS_INPUT_PATTERNS)) {
@@ -99,6 +127,14 @@ export function classifyRunOutcome(evidence: RunEvidence): JobOutcome {
     summary: summary || "Job completed.",
     ...common
   };
+}
+
+export function detectUnacceptedTask(finalText: string | undefined): string | undefined {
+  const text = finalText?.trim();
+  if (!text || text.length > 500 || text.includes("```")) return undefined;
+  return UNACCEPTED_TASK_PATTERNS.some((pattern) => pattern.test(text))
+    ? UNACCEPTED_TASK_ERROR
+    : undefined;
 }
 
 function commonOutcomeFields(evidence: RunEvidence): Pick<

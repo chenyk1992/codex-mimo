@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,12 +10,24 @@ import {
   type JobRequestByKind
 } from "../../../src/core/job-definitions.js";
 import type { ExecutionCallbackSummary, JobKind, JobRecord } from "../../../src/core/jobs.js";
+import { captureGitDiff } from "../../../src/git/diff.js";
 
 const tempDirs: string[] = [];
 
 function tempDir(): string {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-definitions-"));
   tempDirs.push(cwd);
+  return cwd;
+}
+
+function initGitRepo(): string {
+  const cwd = tempDir();
+  execFileSync("git", ["init"], { cwd, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+  execFileSync("git", ["config", "user.name", "Test User"], { cwd });
+  fs.writeFileSync(path.join(cwd, "app.ts"), "export const value = 1;\n", "utf-8");
+  execFileSync("git", ["add", "app.ts"], { cwd });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd, stdio: "ignore" });
   return cwd;
 }
 
@@ -57,7 +70,6 @@ describe("job definition registry", () => {
   it.each([
     ["plan", { cwd: "E:/project", task: "plan it" }, "plan"],
     ["implement", { cwd: "E:/project", task: "build it", allowWrite: true }, "build"],
-    ["review", { cwd: "E:/project", base: "HEAD" }, "plan"],
     ["fix-ci", { cwd: "E:/project", file: "ci.log", task: "fix it" }, "build"],
     ["resume", { cwd: "E:/project", jobId: "parent-1", task: "continue", sessionId: "ses_1" }, "build"],
     ["compose", { cwd: "E:/project", workflow: "dev", task: "build it" }, "compose"]
@@ -76,6 +88,39 @@ describe("job definition registry", () => {
     const prompt = await definition.buildPrompt(request);
 
     expect(definition.buildMimoArgs(request, prompt)).toContain("ses_1");
+  });
+
+  it("rejects an invalid review base before producing a prompt", async () => {
+    const cwd = initGitRepo();
+    await expect(getJobDefinition("review").buildPrompt({ cwd, base: "missing-ref" }))
+      .rejects.toThrow(/Git diff capture failed.*missing-ref/i);
+  });
+
+  it("describes an empty review diff without creating an attachment", async () => {
+    const cwd = initGitRepo();
+    const prompt = await getJobDefinition("review").buildPrompt({ cwd, base: "HEAD" });
+    const args = getJobDefinition("review").buildMimoArgs({ cwd, base: "HEAD" }, prompt);
+
+    expect(prompt.files).toEqual([]);
+    expect(prompt.message).toContain("No changes found against base HEAD");
+    expect(args).toEqual(expect.arrayContaining(["--agent", "plan"]));
+  });
+
+  it("freezes a large non-ASCII review diff as the exact prompt attachment", async () => {
+    const cwd = initGitRepo();
+    fs.writeFileSync(path.join(cwd, "app.ts"), `// 中文差异\n${"变更内容".repeat(3_000)}\n`, "utf-8");
+    const expected = await captureGitDiff(cwd, "HEAD");
+    const definition = getJobDefinition("review");
+    const prompt = await definition.buildPrompt({ cwd, base: "HEAD", model: "mimo-v2" });
+    const args = definition.buildMimoArgs({ cwd, base: "HEAD", model: "mimo-v2" }, prompt);
+
+    expect(prompt.files).toHaveLength(1);
+    expect(path.extname(prompt.files[0])).toBe(".diff");
+    expect(fs.readFileSync(prompt.files[0], "utf-8")).toBe(expected.diff);
+    expect(prompt.message).toContain("base HEAD");
+    expect(prompt.message).not.toContain(expected.diff);
+    expect(args).toEqual(expect.arrayContaining(["--model", "mimo-v2", "--file", prompt.files[0]]));
+    expect(args.filter((item) => item === "--file")).toHaveLength(1);
   });
 
   it("passes model, fixed attachments, and transported prompt files to MiMo", async () => {
@@ -212,5 +257,121 @@ describe("job finalization", () => {
     expect("callback" in report).toBe(false);
     expect(outcome).toMatchObject({ status: "completed", changedFiles: ["src/app.ts"] });
     expect(outcome.reportPaths).toMatchObject({ json: expect.any(String), markdown: expect.any(String) });
+  });
+
+  it.each([
+    ["How can I help you?", "failed", "semantic_failure"],
+    ["您好，有什么可以帮您？", "failed", "semantic_failure"],
+    ["The implementation preserves the normal question: How can I help users?", "completed", undefined]
+  ] as const)("classifies direct and Compose final text identically: %s", async (finalText, status, errorCode) => {
+    const cwd = tempDir();
+    const executionCallback: ExecutionCallbackSummary = { invocationId: "inv", outcome: "completed" };
+    const run = { stdout: `${JSON.stringify({ type: "message", text: finalText })}\n`, stderr: "", exitCode: 0, pid: 1 };
+    const events = [{ type: "message" as const, text: finalText, raw: { type: "message", text: finalText } }];
+    const directRequest: JobRequestByKind["implement"] = { cwd, task: "implement", allowWrite: true };
+    const composeRequest: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "implement" };
+    const direct = await getJobDefinition("implement").finalize({
+      job: makeJob("implement", directRequest), request: directRequest, run, events, executionCallback, verification: []
+    });
+    const compose = await getJobDefinition("compose").finalize({
+      job: makeJob("compose", composeRequest), request: composeRequest, run, events, executionCallback,
+      verification: [], deps: { runVerification: async () => [], writeComposeReport: () => undefined }
+    });
+
+    expect([direct.status, direct.errorCode]).toEqual([status, errorCode]);
+    expect([compose.status, compose.errorCode]).toEqual([status, errorCode]);
+  });
+
+  it("uses execution callback finalText when stdout contains no message text", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["plan"] = { cwd, task: "plan it" };
+    const outcome = await getJobDefinition("plan").finalize({
+      job: makeJob("plan", request),
+      request,
+      run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
+      events: [],
+      executionCallback: { invocationId: "inv", outcome: "completed", finalText: "Plan complete from callback." },
+      verification: []
+    });
+
+    expect(outcome).toMatchObject({ status: "completed", summary: "Plan complete from callback." });
+
+    const composeRequest: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "compose" };
+    const compose = await getJobDefinition("compose").finalize({
+      job: makeJob("compose", composeRequest),
+      request: composeRequest,
+      run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
+      events: [],
+      executionCallback: { invocationId: "inv", outcome: "completed", finalText: "Compose complete from callback." },
+      verification: [],
+      deps: { runVerification: async () => [], writeComposeReport: () => undefined }
+    });
+    expect(compose).toMatchObject({ status: "completed", summary: "Compose complete from callback." });
+  });
+
+  it("fails a read-only definition when HEAD changes without a dirty-file delta", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["plan"] = { cwd, task: "plan" };
+    const outcome = await getJobDefinition("plan").finalize({
+      job: makeJob("plan", request), request,
+      run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      gitHeadBefore: { oid: "aaa", short: "aaa", subject: "before" },
+      gitHeadAfter: { oid: "bbb", short: "bbb", subject: "after" },
+      gitStatusBefore: { short: "", dirty: false, fingerprints: {} },
+      gitStatusAfter: { short: "", dirty: false, fingerprints: {} },
+      verification: []
+    });
+
+    expect(outcome).toMatchObject({ status: "failed", errorCode: "read_only_violation" });
+    expect(outcome.error).toContain("changed HEAD from aaa to bbb");
+  });
+
+  it.each(["plan", "implement", "review", "fix-ci", "resume", "compose"] as const)(
+    "finalizes %s without mutating the stored job",
+    async (kind) => {
+      const cwd = kind === "review" ? initGitRepo() : tempDir();
+      const requests: JobRequestByKind = {
+        plan: { cwd, task: "plan" },
+        implement: { cwd, task: "implement", allowWrite: true },
+        review: { cwd, base: "HEAD" },
+        "fix-ci": { cwd, file: "ci.log", task: "fix" },
+        resume: { cwd, jobId: "parent", task: "resume", sessionId: "ses-parent" },
+        compose: { cwd, workflow: "dev", task: "compose" }
+      };
+      const request = requests[kind];
+      const job = makeJob(kind, request);
+      const before = structuredClone(job);
+      const bound = bindJobDefinition(job);
+      const outcome = await bound.finalize({
+        run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
+        events: [{ type: "message", text: "done", raw: {} }],
+        executionCallback: { invocationId: "inv", outcome: "completed" },
+        verification: [],
+        deps: { runVerification: async () => [], writeComposeReport: () => undefined }
+      });
+
+      expect(outcome.status).toBe("completed");
+      expect(job).toEqual(before);
+    }
+  );
+
+  it.each(["verification", "report"] as const)("propagates Compose %s writer failures", async (failure) => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "compose" };
+    const bound = bindJobDefinition(makeJob("compose", request));
+    const error = new Error(`${failure} exploded`);
+
+    await expect(bound.finalize({
+      run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      verification: [],
+      deps: {
+        runVerification: failure === "verification" ? async () => { throw error; } : async () => [],
+        writeComposeReport: failure === "report" ? () => { throw error; } : () => undefined
+      }
+    })).rejects.toThrow(`${failure} exploded`);
   });
 });

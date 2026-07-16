@@ -102,7 +102,8 @@ export function toExecutionCallback(
     outcome: callback.outcome ?? "error",
     sessionId: callback.sessionId ?? null,
     receivedAt: callback.receivedAt,
-    error: callback.error
+    ...(callback.error ? { error: callback.error } : {}),
+    ...(callback.finalText ? { finalText: callback.finalText } : {})
   };
 }
 

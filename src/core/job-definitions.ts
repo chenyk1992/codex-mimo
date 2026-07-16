@@ -9,7 +9,6 @@ import {
   buildReadOnlyReportDiff,
   detectNewFilesFromStatus,
   detectReadOnlyViolationFiles,
-  detectSemanticFailure,
   gitHeadChanged,
   mergeChangedFiles,
   readOnlyViolationError
@@ -27,13 +26,18 @@ import {
   type ComposeWorkflowName
 } from "../compose/workflow.js";
 import { extractFinalText, type NormalizedMimoEvent } from "../compose/events.js";
-import type {
-  GitCommitChangeSnapshot,
-  GitDiffSnapshot,
-  GitHeadSnapshot,
-  GitStatusSnapshot
+import {
+  captureGitDiff,
+  type GitCommitChangeSnapshot,
+  type GitDiffSnapshot,
+  type GitHeadSnapshot,
+  type GitStatusSnapshot
 } from "../git/diff.js";
-import { preparePromptTransport, type PromptTransportResult } from "../mimo/prompt-transport.js";
+import {
+  preparePromptTransport,
+  writePromptAttachment,
+  type PromptTransportResult
+} from "../mimo/prompt-transport.js";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
 import type { StreamingRunResult } from "../mimo/streaming-runner.js";
 import { implementPrompt, planPrompt, reviewPrompt } from "./prompt.js";
@@ -166,13 +170,37 @@ const implementDefinition: JobDefinition<"implement", ImplementJobRequest> = dir
   title: "codex-mimo implement"
 });
 
-const reviewDefinition: JobDefinition<"review", ReviewJobRequest> = directDefinition({
+const reviewDefinition: JobDefinition<"review", ReviewJobRequest> = {
   kind: "review",
-  agent: "plan",
   writesAllowed: false,
-  prompt: (request) => reviewPrompt(`Inspect and review the current diff against ${request.base}.`),
-  title: "codex-mimo review"
-});
+  async buildPrompt(request) {
+    const base = request.base ?? "HEAD";
+    const diff = await captureGitDiff(request.cwd, base);
+    const diffFile = diff.diff
+      ? writePromptAttachment(diff.diff, { cwd: request.cwd, label: `review-${base}`, extension: ".diff" })
+      : undefined;
+    const prompt = preparePromptTransport(reviewPrompt(diffFile
+      ? `Review the exact current diff against base ${base} attached as @${diffFile}.`
+      : `No changes found against base ${base}.`), { cwd: request.cwd });
+    return {
+      ...prompt,
+      files: mergeChangedFiles(prompt.files, diffFile ? [diffFile] : [])
+    };
+  },
+  buildMimoArgs(request, prompt) {
+    return buildMimoRunArgs({
+      cwd: request.cwd,
+      agent: "plan",
+      model: request.model,
+      message: prompt.message,
+      title: "codex-mimo review",
+      files: prompt.files
+    });
+  },
+  async finalize(context) {
+    return finalizeDirect(context, false);
+  }
+};
 
 const fixCiDefinition: JobDefinition<"fix-ci", FixCiJobRequest> = directDefinition({
   kind: "fix-ci",
@@ -314,7 +342,7 @@ async function finalizeDirect<Request extends { cwd: string }>(
     terminationReason: context.run.terminationReason,
     executionCallback: context.executionCallback,
     verification: compactVerification(verification),
-    finalText: extractFinalText(context.events)
+    finalText: finalTextFrom(context)
   });
 
   if (!writesAllowed && hasReadOnlyViolation(context, changedFiles)) {
@@ -342,22 +370,12 @@ async function finalizeDirect<Request extends { cwd: string }>(
 async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): Promise<JobOutcome> {
   const workflow = getComposeWorkflow(context.request.workflow);
   const runVerification = context.deps?.runVerification ?? runVerificationCommands;
-  let verification: VerificationResult[];
-  let processingError: { message: string; code: string } | undefined;
-  try {
-    const commands = normalizeVerificationCommands(
-      context.request.verification,
-      workflow.defaultVerification,
-      context.request.cwd
-    );
-    verification = await runVerification(context.request.cwd, commands);
-  } catch (error) {
-    verification = [];
-    processingError = {
-      message: `Verification execution failed: ${error instanceof Error ? error.message : String(error)}`,
-      code: "verification_execution_failed"
-    };
-  }
+  const commands = normalizeVerificationCommands(
+    context.request.verification,
+    workflow.defaultVerification,
+    context.request.cwd
+  );
+  const verification = await runVerification(context.request.cwd, commands);
 
   const changedFiles = collectChangedFiles(context, workflow.writesAllowed);
   let reportDiff = context.diff ?? emptyDiff();
@@ -372,7 +390,7 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     terminationReason: context.run.terminationReason,
     executionCallback: context.executionCallback,
     verification: compactVerification(verification),
-    finalText: extractFinalText(context.events)
+    finalText: finalTextFrom(context)
   });
 
   const readOnlyError = !workflow.writesAllowed && hasReadOnlyViolation(context, changedFiles)
@@ -383,12 +401,9 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
       context.gitHeadAfter
     )
     : undefined;
-  const semanticError = detectSemanticFailure(context.run.stdout);
-  const postCheckError = processingError ?? (readOnlyError
+  const postCheckError = readOnlyError
     ? { message: readOnlyError, code: "read_only_violation" }
-    : semanticError
-    ? { message: semanticError, code: "semantic_failure" }
-    : undefined);
+    : undefined;
   if (postCheckError && !outcome.errorCode?.startsWith("callback_")) {
     outcome = {
       ...outcome,
@@ -462,6 +477,10 @@ function collectChangedFiles(
 
 function hasReadOnlyViolation(context: JobExecutionFinalizeContext, changedFiles: string[]): boolean {
   return changedFiles.length > 0 || gitHeadChanged(context.gitHeadBefore, context.gitHeadAfter);
+}
+
+function finalTextFrom(context: JobExecutionFinalizeContext): string {
+  return context.executionCallback?.finalText?.trim() || extractFinalText(context.events);
 }
 
 function emptyDiff(): GitDiffSnapshot {

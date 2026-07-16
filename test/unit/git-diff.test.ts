@@ -30,17 +30,20 @@ describe("git diff helpers", () => {
   it("captures git status with the cwd trusted for this command", async () => {
     mockedExeca.mockResolvedValue({
       exitCode: 0,
-      stdout: " M src/a.ts\n",
+      stdout: " M src/a.ts\0",
       stderr: ""
     });
 
     await expect(captureGitStatus("E:/repo")).resolves.toEqual({
-      short: " M src/a.ts\n",
-      dirty: true
+      short: " M src/a.ts",
+      dirty: true,
+      fingerprints: {
+        "src/a.ts": { status: " M", contentHash: "missing" }
+      }
     });
     expect(mockedExeca).toHaveBeenCalledWith(
       "git",
-      ["-c", "safe.directory=E:/repo", "status", "--short"],
+      ["-c", "safe.directory=E:/repo", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
       { cwd: "E:/repo", reject: false }
     );
   });
@@ -59,6 +62,7 @@ describe("git diff helpers", () => {
 
   it("captures git diff with the cwd trusted for each git command", async () => {
     mockedExeca
+      .mockResolvedValueOnce({ stdout: "abc123", stderr: "", exitCode: 0 })
       .mockResolvedValueOnce({ stdout: "src/a.ts\n", stderr: "", exitCode: 0 })
       .mockResolvedValueOnce({ stdout: " src/a.ts | 1 +", stderr: "", exitCode: 0 })
       .mockResolvedValueOnce({ stdout: "diff --git a/src/a.ts b/src/a.ts", stderr: "", exitCode: 0 });
@@ -71,20 +75,39 @@ describe("git diff helpers", () => {
     expect(mockedExeca).toHaveBeenNthCalledWith(
       1,
       "git",
-      ["-c", "safe.directory=E:/repo", "diff", "--name-only", "HEAD~1"],
-      { cwd: "E:/repo" }
+      ["-c", "safe.directory=E:/repo", "rev-parse", "--verify", "HEAD~1"],
+      { cwd: "E:/repo", reject: false }
     );
     expect(mockedExeca).toHaveBeenNthCalledWith(
       2,
       "git",
-      ["-c", "safe.directory=E:/repo", "diff", "--stat", "HEAD~1"],
+      ["-c", "safe.directory=E:/repo", "diff", "--name-only", "HEAD~1"],
       { cwd: "E:/repo" }
     );
     expect(mockedExeca).toHaveBeenNthCalledWith(
       3,
       "git",
+      ["-c", "safe.directory=E:/repo", "diff", "--stat", "HEAD~1"],
+      { cwd: "E:/repo" }
+    );
+    expect(mockedExeca).toHaveBeenNthCalledWith(
+      4,
+      "git",
       ["-c", "safe.directory=E:/repo", "diff", "HEAD~1"],
       { cwd: "E:/repo" }
+    );
+  });
+
+  it("rejects an invalid diff base before starting diff capture", async () => {
+    mockedExeca.mockResolvedValue({ stdout: "", stderr: "fatal: bad revision", exitCode: 128 });
+
+    await expect(captureGitDiff("E:/repo", "missing-ref"))
+      .rejects.toThrow("Git diff capture failed for base missing-ref: fatal: bad revision");
+    expect(mockedExeca).toHaveBeenCalledTimes(1);
+    expect(mockedExeca).toHaveBeenCalledWith(
+      "git",
+      ["-c", "safe.directory=E:/repo", "rev-parse", "--verify", "missing-ref"],
+      { cwd: "E:/repo", reject: false }
     );
   });
 

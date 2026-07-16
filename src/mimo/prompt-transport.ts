@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 
 export interface PromptTransportResult {
   message: string;
@@ -17,10 +18,7 @@ export function preparePromptTransport(
     return { message, files: [], cleanupFiles: [] };
   }
 
-  const dir = path.join(options.cwd, ".codex-mimo", "inputs");
-  fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}-prompt.md`);
-  fs.writeFileSync(file, message, "utf-8");
+  const file = writePromptAttachment(message, { cwd: options.cwd, label: "prompt", extension: ".md" });
 
   return {
     message: [
@@ -31,6 +29,23 @@ export function preparePromptTransport(
     files: [file],
     cleanupFiles: []
   };
+}
+
+export function writePromptAttachment(
+  content: string,
+  options: { cwd: string; label: string; extension: string }
+): string {
+  const dir = path.join(options.cwd, ".codex-mimo", "inputs");
+  const label = options.label.replace(/[^a-zA-Z0-9_.-]/g, "-").replace(/^-+|-+$/g, "") || "input";
+  const extension = options.extension.startsWith(".") ? options.extension : `.${options.extension}`;
+  const unique = crypto.randomBytes(4).toString("hex");
+  const file = path.join(
+    dir,
+    `${new Date().toISOString().replace(/[:.]/g, "-")}-${unique}-${label}${extension}`
+  );
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, content, "utf-8");
+  return file;
 }
 
 function hasNonAscii(value: string): boolean {
