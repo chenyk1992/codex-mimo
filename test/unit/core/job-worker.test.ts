@@ -6,7 +6,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BoundJobDefinition } from "../../../src/core/job-definitions.js";
 import { runJobWorker, type JobWorkerDependencies } from "../../../src/core/job-worker.js";
 import { readJob, createJobStore, resolveJobStateFile } from "../../../src/core/job-store.js";
-import { transitionJob, updateRunningJobProcess } from "../../../src/core/job-transition.js";
+import {
+  requestJobCancellation,
+  transitionJob,
+  updateRunningJobProcess
+} from "../../../src/core/job-transition.js";
 import type { JobKind, JobRecord } from "../../../src/core/jobs.js";
 import { readJobSignals } from "../../../src/core/job-signals.js";
 import { readDeliveries } from "../../../src/notify/outbox.js";
@@ -251,6 +255,59 @@ describe("runJobWorker", () => {
     expect(deps.runMimoStreaming).not.toHaveBeenCalled();
   });
 
+  it.each([null, 808])(
+    "finalizes a restarted pending cancellation after confirming stored process %s inactive",
+    async (pid) => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement", true);
+    await transitionJob(cwd, job.id, {
+      status: "running",
+      phase: "starting",
+      summary: "started",
+      pid,
+      processIdentity: pid === null ? null : "start-808"
+    });
+    await requestJobCancellation(cwd, job.id);
+    const deps = workerDeps({
+      terminateOwnedProcess: vi.fn(() => ({ status: "terminated", evidence: "tree gone" }))
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)).toMatchObject({ status: "cancelled", pid: null });
+    expect(readJobSignals(job.signalsFile).signals.at(-1)?.kind).toBe("cancelled");
+    expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(1);
+    if (pid === null) expect(deps.terminateOwnedProcess).not.toHaveBeenCalled();
+  });
+
+  it("keeps restarted cancellation pending when owned termination is unconfirmed", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement", true);
+    await transitionJob(cwd, job.id, {
+      status: "running",
+      phase: "starting",
+      summary: "started",
+      pid: 808,
+      processIdentity: "start-808"
+    });
+    await requestJobCancellation(cwd, job.id);
+    const deps = workerDeps({
+      terminateOwnedProcess: vi.fn(() => ({ status: "unconfirmed", evidence: "tree live" }))
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "running",
+      pid: 808,
+      processIdentity: "start-808",
+      cancellationRequestedAt: expect.any(String)
+    });
+    expect(readJobSignals(job.signalsFile).signals.filter((signal) => signal.kind === "cancelled"))
+      .toHaveLength(0);
+    expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(0);
+  });
+
   it.each(["plan", "implement", "review", "fix-ci", "resume", "compose"] as const)(
     "runs %s through the same lifecycle",
     async (kind) => {
@@ -375,6 +432,85 @@ describe("runJobWorker", () => {
     });
   });
 
+  it("awaits production process termination before finalizing a cancellation intent", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement", true);
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    let releaseTermination!: () => void;
+    const termination = new Promise<void>((resolve) => { releaseTermination = resolve; });
+    let workerSettled = false;
+    let observedSignal: AbortSignal | undefined;
+    const bound = definition();
+    const deps = workerDeps({
+      bindJobDefinition: () => bound,
+      statusPollMs: 5,
+      runMimoStreaming: async (_cwd, _args, options) => {
+        observedSignal = options.signal;
+        await options.onStart?.(909);
+        started();
+        await new Promise<void>((resolve) => {
+          options.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        await termination;
+        return { ...completedRun, exitCode: 124, pid: 909, terminationReason: "host_abort" };
+      }
+    });
+
+    const worker = runJobWorker(cwd, job.id, deps).finally(() => { workerSettled = true; });
+    await running;
+    await requestJobCancellation(cwd, job.id);
+    await vi.waitFor(() => expect(observedSignal?.aborted).toBe(true));
+    expect(workerSettled).toBe(false);
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "running",
+      pid: 909,
+      cancellationRequestedAt: expect.any(String)
+    });
+
+    releaseTermination();
+    await worker;
+
+    expect(bound.finalize).not.toHaveBeenCalled();
+    const stored = readJob(cwd, job.id);
+    expect(stored).toMatchObject({ status: "cancelled", pid: null, processIdentity: null });
+    expect(stored).not.toHaveProperty("cancellationRequestedAt");
+    expect(readJobSignals(job.signalsFile).signals.at(-1)?.kind).toBe("cancelled");
+  });
+
+  it("leaves cancellation pending when production termination is unconfirmed", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement", true);
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    const failure = new Error("taskkill failed; tree still live");
+    const deps = workerDeps({
+      statusPollMs: 5,
+      runMimoStreaming: async (_cwd, _args, options) => {
+        await options.onStart?.(910);
+        started();
+        await new Promise<void>((resolve) => {
+          options.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        throw failure;
+      }
+    });
+
+    const worker = runJobWorker(cwd, job.id, deps);
+    await running;
+    await requestJobCancellation(cwd, job.id);
+    await worker;
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "running",
+      pid: 910,
+      cancellationRequestedAt: expect.any(String)
+    });
+    expect(readJobSignals(job.signalsFile).signals.filter((signal) => signal.kind === "cancelled"))
+      .toHaveLength(0);
+    expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(0);
+  });
+
   it("checks cancellation between every final Git capture", async () => {
     const cwd = tempWorkspace();
     const job = seedJob(cwd, "implement");
@@ -483,7 +619,6 @@ describe("runJobWorker", () => {
   it.each([
     "prompt",
     "hook",
-    "run",
     "event-write",
     "hook-close",
     "git-status",
@@ -508,10 +643,6 @@ describe("runJobWorker", () => {
       return pending;
     });
     if (stage === "hook") overrides.createHookCallbackController = () => {
-      entered();
-      return pending;
-    };
-    if (stage === "run") overrides.runMimoStreaming = () => {
       entered();
       return pending;
     };
@@ -563,7 +694,6 @@ describe("runJobWorker", () => {
       expect(deps.createHookCallbackController).not.toHaveBeenCalled();
     }
     if (stage === "hook") expect(deps.runMimoStreaming).not.toHaveBeenCalled();
-    if (stage === "run") expect(bound.finalize).not.toHaveBeenCalled();
     if (stage === "event-write") expect(bound.finalize).not.toHaveBeenCalled();
     if (stage === "hook-close") expect(bound.finalize).not.toHaveBeenCalled();
     if (stage === "git-status") expect(deps.captureHead).not.toHaveBeenCalled();

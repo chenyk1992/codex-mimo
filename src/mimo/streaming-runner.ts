@@ -5,7 +5,8 @@ import type { Readable } from "node:stream";
 import { withUtf8ProcessEnv } from "../core/encoding.js";
 import {
   terminatePosixProcessGroup,
-  type AsyncProcessGroupTerminationOptions
+  type AsyncProcessGroupTerminationOptions,
+  type ProcessGroupProbe
 } from "../core/job-process.js";
 import { resolveMimoCommand } from "./run-json.js";
 
@@ -54,6 +55,7 @@ function defaultSpawn(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Str
 export interface TerminateOptions extends AsyncProcessGroupTerminationOptions {
   platform?: NodeJS.Platform;
   spawnSync?: typeof spawnSync;
+  probeWindowsProcess?: (pid: number) => ProcessGroupProbe | PromiseLike<ProcessGroupProbe>;
 }
 
 export async function terminateProcessTree(
@@ -66,9 +68,9 @@ export async function terminateProcessTree(
 
   if (Number.isFinite(pid)) {
     if (platform === "win32") {
-      spawnSyncFn("taskkill", ["/PID", String(pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true
+      await terminateWindowsProcessTree(pid as number, {
+        ...options,
+        spawnSync: spawnSyncFn
       });
       return;
     }
@@ -84,6 +86,66 @@ export async function terminateProcessTree(
   }
 
   child.kill();
+}
+
+async function terminateWindowsProcessTree(
+  pid: number,
+  options: TerminateOptions
+): Promise<void> {
+  const probe = options.probeWindowsProcess ?? probeWindowsProcess;
+  const wait = options.wait ?? ((milliseconds: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  const checks = Number.isInteger(options.graceChecks) && (options.graceChecks as number) > 0
+    ? options.graceChecks as number
+    : 3;
+  const intervalMs = typeof options.graceIntervalMs === "number" &&
+      Number.isFinite(options.graceIntervalMs) && options.graceIntervalMs >= 0
+    ? options.graceIntervalMs
+    : 50;
+
+  const before = await probe(pid);
+  if (before.status === "not_running") return;
+
+  const result = (options.spawnSync ?? spawnSync)(
+    "taskkill",
+    ["/PID", String(pid), "/T", "/F"],
+    { encoding: "utf8", windowsHide: true }
+  );
+  const taskkillDetail = result.error?.message ??
+    (String(result.stderr).trim() || `exit ${String(result.status)}`);
+  const taskkillError = result.error || result.status !== 0
+    ? `taskkill failed: ${taskkillDetail}`
+    : undefined;
+
+  let last = before;
+  for (let check = 0; check < checks; check += 1) {
+    last = await probe(pid);
+    if (last.status === "not_running") return;
+    if (last.status === "unconfirmed") {
+      throw new Error(
+        `${taskkillError ? `${taskkillError}; ` : ""}Windows process termination is unconfirmed: ${last.evidence}`
+      );
+    }
+    if (check < checks - 1) await wait(intervalMs);
+  }
+  throw new Error(
+    `${taskkillError ? `${taskkillError}; ` : ""}Windows process termination could not be confirmed: ${last.evidence}`
+  );
+}
+
+function probeWindowsProcess(pid: number): ProcessGroupProbe {
+  try {
+    process.kill(pid, 0);
+    return { status: "running", evidence: `PID ${pid} is still running.` };
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH") {
+      return { status: "not_running", evidence: `PID ${pid} is not running.` };
+    }
+    return {
+      status: "unconfirmed",
+      evidence: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 export async function runMimoCliStreaming(

@@ -29,13 +29,14 @@ describe("job lifecycle", () => {
     expect(listJobs(cwd).map((entry) => entry.id)).toContain(job.id);
   });
 
-  it("5.17: listJobs calls failStaleJobs first", () => {
+  it("5.17: listJobs reads queued jobs without changing lifecycle state", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd);
-    store.create({ kind: "compose", task: "Old task", request: {} });
+    const job = store.create({ kind: "compose", task: "Old task", request: {} });
 
     const jobs = listJobs(cwd);
     expect(jobs).toHaveLength(1);
+    expect(readJob(cwd, job.id)?.status).toBe("queued");
   });
 
   it("5.18: readJob non-existent → undefined", () => {

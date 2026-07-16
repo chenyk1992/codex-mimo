@@ -19,7 +19,6 @@ interface ObservedStateRefresh {
   maxJobs: number;
   promise: Promise<void>;
 }
-
 const observedStateRefreshes = new Map<string, ObservedStateRefresh>();
 
 interface JobState {
@@ -119,7 +118,6 @@ export function createJobStore(cwd: string, options: JobStoreOptions = {}): {
 }
 
 export function listJobs(cwd: string): JobRecord[] {
-  failStaleJobs(cwd);
   const rebuilt = rebuildState(cwd);
   observeStateRefresh(cwd, DEFAULT_MAX_JOBS);
   return rebuilt
@@ -264,6 +262,7 @@ export async function finalizePendingJobTransition(
     updatedAt: nowIso()
   };
   if (pendingTransition.phase === undefined) delete updated.phase;
+  if (pendingTransition.status !== "running") delete updated.cancellationRequestedAt;
   return persistAuthoritativeRecord(cwd, updated);
 }
 
@@ -319,6 +318,7 @@ function isJobRecord(value: unknown, expectedJobId: string): value is JobRecord 
       value.pid,
       value.processIdentity
     ) &&
+    isCancellationRequestState(value.status, value.cancellationRequestedAt) &&
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string" &&
     Array.isArray(value.changedFiles) &&
@@ -629,6 +629,11 @@ function isOptionalTimestamp(value: unknown): boolean {
   return value === undefined || isTimestamp(value);
 }
 
+function isCancellationRequestState(status: JobRecord["status"], value: unknown): boolean {
+  if (value === undefined) return true;
+  return (status === "queued" || status === "running") && isTimestamp(value);
+}
+
 function isPositiveInteger(value: unknown): boolean {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
@@ -679,37 +684,4 @@ function rebuildState(cwd: string): JobState {
 
 function isMissingFileError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-
-const DEFAULT_STALE_THRESHOLD_MS = 300_000;
-
-export function failStaleJobs(
-  cwd: string,
-  options: { staleThresholdMs?: number } = {}
-): JobRecord[] {
-  const threshold = options.staleThresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
-  const cutoff = Date.now() - threshold;
-  const jobs = rebuildState(cwd)
-    .jobs.map((jobId) => readJobFile(cwd, jobId, { skipMalformed: true }))
-    .filter((job): job is JobRecord => job !== undefined);
-  const failed: JobRecord[] = [];
-
-  for (const job of jobs) {
-    if (job.status !== "queued") continue;
-    const createdAt = new Date(job.createdAt).getTime();
-    if (createdAt >= cutoff) continue;
-
-    const updated = updateJob(cwd, job.id, {
-      status: "failed",
-      phase: undefined,
-      pid: null,
-      processIdentity: null,
-      completedAt: nowIso(),
-      errorCode: "stale_queued",
-      error: `Job stuck in queued state for longer than ${Math.round(threshold / 1000)}s. Worker process may have failed to start.`
-    });
-    failed.push(updated);
-  }
-
-  return failed;
 }

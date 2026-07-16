@@ -560,20 +560,67 @@ describe("terminateProcessTree", () => {
     })).rejects.toThrow(/could not be confirmed.*still running/i);
   });
 
-  it("uses taskkill /T on Windows", async () => {
+  it("uses taskkill /T on Windows and waits for delayed process exit", async () => {
     const child = makeChild(400);
-    const spawnSync = vi.fn();
-    const isProcessAlive = vi.fn().mockReturnValue(false);
+    const spawnSync = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+    const probeWindowsProcess = vi.fn()
+      .mockReturnValueOnce({ status: "running", evidence: "alive before kill" })
+      .mockReturnValueOnce({ status: "running", evidence: "exit pending" })
+      .mockReturnValueOnce({ status: "not_running", evidence: "gone" });
+    const wait = vi.fn(async () => undefined);
 
     await terminateProcessTree(400, child, {
       platform: "win32",
-      spawnSync
+      spawnSync,
+      probeWindowsProcess,
+      wait,
+      graceChecks: 2
     });
 
     expect(spawnSync).toHaveBeenCalledWith("taskkill", ["/PID", "400", "/T", "/F"], {
-      stdio: "ignore",
+      encoding: "utf8",
       windowsHide: true
     });
+    expect(probeWindowsProcess).toHaveBeenCalledTimes(3);
+    expect(wait).toHaveBeenCalledOnce();
+  });
+
+  it("treats an already-gone Windows process as successful without taskkill", async () => {
+    const child = makeChild(401);
+    const spawnSync = vi.fn();
+
+    await terminateProcessTree(401, child, {
+      platform: "win32",
+      spawnSync,
+      probeWindowsProcess: vi.fn(() => ({ status: "not_running", evidence: "gone" }))
+    });
+
+    expect(spawnSync).not.toHaveBeenCalled();
+  });
+
+  it("rejects promptly when taskkill fails and the Windows child never closes", async () => {
+    const abort = new AbortController();
+    const child = makeChild(402);
+    child.stdout = new Readable({ read() {} });
+    child.stderr = new Readable({ read() {} });
+    const run = runMimoCliStreaming("E:/project/app", ["run"], {
+      signal: abort.signal,
+      spawnProcess: () => child,
+      terminateProcessTree: (pid, target) => terminateProcessTree(pid, target, {
+        platform: "win32",
+        spawnSync: vi.fn(() => ({ status: 1, stdout: "", stderr: "access denied" })),
+        probeWindowsProcess: vi.fn(() => ({ status: "running", evidence: "tree live" })),
+        graceChecks: 1
+      })
+    });
+
+    abort.abort();
+
+    await expect(Promise.race([
+      run,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("runner hung")), 150))
+    ])).rejects.toThrow(/taskkill.*access denied.*tree live/i);
+    expect(child.listenerCount("close")).toBe(0);
   });
 
   it("falls back to child.kill when pid is null", async () => {

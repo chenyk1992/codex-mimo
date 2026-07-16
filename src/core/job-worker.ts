@@ -109,18 +109,38 @@ async function runOwnedJobWorker(
   const transition = deps.transitionJob ?? transitionJob;
   if (initial.status === "running") {
     let termination: OwnedProcessTermination;
-    try {
-      termination = (deps.terminateOwnedProcess ?? terminateOwnedJobProcess)(
-        initial.pid ?? null,
-        initial.processIdentity
-      );
-    } catch (error) {
-      termination = {
-        status: "unconfirmed",
-        evidence: `Owned process recovery failed: ${errorMessage(error)}`
-      };
+    if (initial.cancellationRequestedAt && initial.pid === null) {
+      termination = { status: "not_running", evidence: "No MiMoCode process was recorded." };
+    } else {
+      try {
+        termination = (deps.terminateOwnedProcess ?? terminateOwnedJobProcess)(
+          initial.pid ?? null,
+          initial.processIdentity
+        );
+      } catch (error) {
+        termination = {
+          status: "unconfirmed",
+          evidence: `Owned process recovery failed: ${errorMessage(error)}`
+        };
+      }
     }
     const safe = termination.status !== "unconfirmed";
+    if (initial.cancellationRequestedAt) {
+      if (!safe) {
+        bestEffortLog(
+          initial.logFile,
+          `Cancellation remains pending because process termination was not confirmed: ${termination.evidence}`
+        );
+        return;
+      }
+      const cancelled = await transitionRecoverably(cwd, jobId, {
+        status: "cancelled",
+        summary: `Cancelled ${jobId}.`,
+        errorCode: "cancelled"
+      }, deps);
+      if (cancelled.deliveryCreated) startNotificationWorker(cwd, cancelled.job, deps);
+      return;
+    }
     const summary = safe
       ? `A previous worker exited; its MiMoCode process is confirmed inactive. ${termination.evidence}`
       : `MiMoCode process recovery could not be confirmed safely. ${termination.evidence}`;
@@ -209,9 +229,9 @@ async function runOwnedJobWorker(
 
     stage = "run";
     let run: StreamingRunResult;
+    let processTerminationConfirmed = false;
     try {
-      run = await awaitWithAbort(
-        (deps.runMimoStreaming ?? runMimoCliStreaming)(cwd, mimoArgs, {
+      run = await (deps.runMimoStreaming ?? runMimoCliStreaming)(cwd, mimoArgs, {
           timeoutMs: readTimeout(initial.request),
           env: hook.env,
           omitEnv: initial.notificationTarget?.type === "webhook"
@@ -236,14 +256,22 @@ async function runOwnedJobWorker(
           },
           onLine: (line) => queueEventWrite(async () =>
             (deps.appendRawAndNormalizedEvent ?? appendRawAndNormalizedEvent)(cwd, jobId, line))
-        }),
-        executionGuard.signal
-      );
+        });
+      processTerminationConfirmed = true;
     } finally {
-      await awaitWithAbort(
-        (deps.updateRunningJobProcess ?? updateRunningJobProcess)(cwd, jobId, null, null),
-        executionGuard.signal
-      );
+      if (processTerminationConfirmed) {
+        await (deps.updateRunningJobProcess ?? updateRunningJobProcess)(cwd, jobId, null, null);
+      }
+    }
+    if (requireJob(cwd, jobId).cancellationRequestedAt) {
+      executionGuard.stop();
+      const cancelled = await transitionRecoverably(cwd, jobId, {
+        status: "cancelled",
+        summary: `Cancelled ${jobId}.`,
+        errorCode: "cancelled"
+      }, deps);
+      if (cancelled.deliveryCreated) startNotificationWorker(cwd, cancelled.job, deps);
+      return;
     }
     await awaitWithAbort(eventWrites, executionGuard.signal);
     if (eventWriteError) throw eventWriteError;
@@ -391,7 +419,7 @@ async function awaitWithAbort<T>(
 
 interface JobExecutionGuard {
   signal: AbortSignal;
-  abort(status: JobStatus): void;
+  abort(reason: JobStatus | "cancellation_requested"): void;
   stop(): void;
 }
 
@@ -404,9 +432,9 @@ function startJobExecutionGuard(cwd: string, jobId: string, pollMs: number): Job
     if (timer) clearTimeout(timer);
     timer = undefined;
   };
-  const abort = (status: JobStatus) => {
+  const abort = (reason: JobStatus | "cancellation_requested") => {
     if (!controller.signal.aborted) {
-      controller.abort(new Error(`Job is no longer active (${status}).`));
+      controller.abort(new Error(`Job execution stopped (${reason}).`));
     }
     stop();
   };
@@ -414,6 +442,10 @@ function startJobExecutionGuard(cwd: string, jobId: string, pollMs: number): Job
     if (stopped) return;
     try {
       const job = requireJob(cwd, jobId);
+      if (job.cancellationRequestedAt) {
+        abort("cancellation_requested");
+        return;
+      }
       if (job.status !== "running") {
         abort(job.status);
         return;
@@ -465,6 +497,23 @@ async function failWorker(
   if (TERMINAL_STATUSES.has(existing.status)) {
     const recovered = await (deps.recoverPendingTransition ?? recoverPendingTransition)(cwd, jobId);
     if (recovered?.deliveryCreated) startNotificationWorker(cwd, recovered.job, deps);
+    return;
+  }
+
+  if (existing.cancellationRequestedAt) {
+    if (existing.pid !== null) {
+      bestEffortLog(
+        existing.logFile,
+        `Cancellation remains pending because process termination was not confirmed: ${errorMessage(error)}`
+      );
+      return;
+    }
+    const cancelled = await transitionRecoverably(cwd, jobId, {
+      status: "cancelled",
+      summary: `Cancelled ${jobId}.`,
+      errorCode: "cancelled"
+    }, deps);
+    if (cancelled.deliveryCreated) startNotificationWorker(cwd, cancelled.job, deps);
     return;
   }
 

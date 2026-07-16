@@ -25,15 +25,19 @@ function makeChild(pid: number, killFn?: () => boolean) {
 describe("process management - terminateProcessTree", () => {
   it("Windows: uses taskkill /PID /T /F", async () => {
     const child = makeChild(400);
-    const spawnSync = vi.fn();
+    const spawnSync = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+    const probeWindowsProcess = vi.fn()
+      .mockReturnValueOnce({ status: "running", evidence: "alive" })
+      .mockReturnValueOnce({ status: "not_running", evidence: "gone" });
 
     await terminateProcessTree(400, child, {
       platform: "win32",
-      spawnSync
+      spawnSync,
+      probeWindowsProcess
     });
 
     expect(spawnSync).toHaveBeenCalledWith("taskkill", ["/PID", "400", "/T", "/F"], {
-      stdio: "ignore",
+      encoding: "utf8",
       windowsHide: true
     });
   });

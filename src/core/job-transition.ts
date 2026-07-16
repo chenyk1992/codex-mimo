@@ -89,6 +89,9 @@ export async function transitionJob(
     if (!LEGAL[existing.status].includes(transition.status)) {
       throw new Error(`Illegal job transition ${existing.status} -> ${transition.status}`);
     }
+    if (existing.cancellationRequestedAt && transition.status !== "cancelled") {
+      throw new Error(`Job ${jobId} cancellation was requested; only cancellation may finalize it.`);
+    }
 
     const pending = buildPendingTransition(existing, transition);
     const intentJob = await savePendingJobTransition(cwd, jobId, pending);
@@ -124,6 +127,21 @@ export async function updateRunningJobProcess(
     const job = requireJob(cwd, jobId);
     if (job.status !== "running") return job;
     return updateJobAuthoritative(cwd, jobId, { pid, processIdentity });
+  });
+}
+
+export async function requestJobCancellation(
+  cwd: string,
+  jobId: string
+): Promise<JobRecord> {
+  return withProcessLock(resolveJobStateLock(cwd, jobId), async () => {
+    let job = requireJob(cwd, jobId);
+    if (job.pendingTransition) {
+      job = (await applyPendingTransition(cwd, job, job.pendingTransition, {})).job;
+    }
+    if (job.status !== "queued" && job.status !== "running") return job;
+    if (job.cancellationRequestedAt) return job;
+    return updateJobAuthoritative(cwd, jobId, { cancellationRequestedAt: nowIso() });
   });
 }
 

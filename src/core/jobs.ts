@@ -91,6 +91,7 @@ export interface JobRecord {
   phase?: JobPhase;
   pid?: number | null;
   processIdentity: string | null;
+  cancellationRequestedAt?: string;
   sessionId?: string | null;
   parentJobId?: string | null;
   createdAt: string;
@@ -122,6 +123,7 @@ export interface JobStatusResult {
   sessionId: string | null;
   summary: string;
   changedFiles: string[];
+  cancellationRequested?: true;
   executionCallback?: ExecutionCallbackSummary;
   progress: string[];
   notification?: JobNotificationStatus;

@@ -4,7 +4,6 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createJobStore,
-  failStaleJobs,
   listJobs,
   readJob,
   resolveJobPaths,
@@ -27,7 +26,6 @@ afterEach(() => {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
 });
-
 describe("job store", () => {
   it("rejects unsafe job ids before resolving paths", () => {
     const cwd = tempWorkspace();
@@ -454,42 +452,5 @@ describe("job store", () => {
     expect(fs.existsSync(firstPaths.logFile)).toBe(false);
     expect(fs.existsSync(firstPaths.eventsFile)).toBe(false);
     expect(fs.existsSync(firstPaths.signalsFile)).toBe(false);
-  });
-});
-
-describe("failStaleJobs", () => {
-  it("marks queued jobs older than threshold as failed", () => {
-    const cwd = tempWorkspace();
-    const store = createJobStore(cwd);
-    const job = store.create({ kind: "compose", task: "Stuck task", request: { workflow: "dev" } });
-
-    const failed = failStaleJobs(cwd, { staleThresholdMs: -1 });
-    expect(failed).toHaveLength(1);
-    expect(failed[0].id).toBe(job.id);
-
-    const updated = readJob(cwd, job.id);
-    expect(updated?.status).toBe("failed");
-    expect(updated?.errorCode).toBe("stale_queued");
-  });
-
-  it("does not affect running or completed jobs", () => {
-    const cwd = tempWorkspace();
-    const store = createJobStore(cwd);
-    const running = store.create({ kind: "compose", task: "Running", request: { workflow: "dev" } });
-    updateJob(cwd, running.id, { status: "running", phase: "starting" });
-    const completed = store.create({ kind: "compose", task: "Done", request: { workflow: "dev" } });
-    updateJob(cwd, completed.id, { status: "completed", phase: undefined });
-
-    const failed = failStaleJobs(cwd, { staleThresholdMs: 0 });
-    expect(failed).toHaveLength(0);
-  });
-
-  it("does not affect recent queued jobs", () => {
-    const cwd = tempWorkspace();
-    const store = createJobStore(cwd);
-    store.create({ kind: "compose", task: "Fresh", request: { workflow: "dev" } });
-
-    const failed = failStaleJobs(cwd, { staleThresholdMs: 300_000 });
-    expect(failed).toHaveLength(0);
   });
 });

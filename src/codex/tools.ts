@@ -16,7 +16,8 @@ import {
 } from "./tool-schemas.js";
 import { launchJob, type LaunchJobDependencies } from "../core/job-launcher.js";
 import { bindJobDefinition } from "../core/job-definitions.js";
-import { listJobs, readJob } from "../core/job-store.js";
+import { listJobs, readJob, resolveJobPaths } from "../core/job-store.js";
+import { recoverStaleQueuedJobs } from "../core/job-recovery.js";
 import {
   spawnNotificationWorker,
   terminateOwnedJobProcess,
@@ -30,7 +31,8 @@ import {
   readJobSignalPage,
   type JobSignalReadResult
 } from "../core/job-signals.js";
-import { transitionJob } from "../core/job-transition.js";
+import { requestJobCancellation, transitionJob } from "../core/job-transition.js";
+import { ProcessLockUnavailableError, withProcessLock } from "../core/process-lock.js";
 import { resolveMimoCommand } from "../mimo/run-json.js";
 import {
   readNotificationDeliveries,
@@ -199,8 +201,13 @@ export async function mimoResult(input: unknown) {
   return renderJobResult(job, notificationStatus(job));
 }
 
-export async function mimoJobs(input: unknown) {
+export interface MimoJobsDependencies {
+  recoverStaleQueuedJobs?: typeof recoverStaleQueuedJobs;
+}
+
+export async function mimoJobs(input: unknown, deps: MimoJobsDependencies = {}) {
   const parsed = JobListInput.parse(input);
+  await (deps.recoverStaleQueuedJobs ?? recoverStaleQueuedJobs)(parsed.cwd);
   const jobs = listJobs(parsed.cwd);
   const deliveries = readNotificationDeliveries(parsed.cwd);
   return (parsed.all ? jobs : jobs.slice(0, 8)).map((job) => renderJobStatus(job, {
@@ -216,6 +223,8 @@ export interface MimoCancelDependencies {
     processIdentity: string | null | undefined
   ) => OwnedProcessTermination;
   spawnNotificationWorker?: typeof spawnNotificationWorker;
+  requestJobCancellation?: typeof requestJobCancellation;
+  waitForCancellation?: (cwd: string, jobId: string) => Promise<JobRecord>;
 }
 
 export async function mimoCancel(input: unknown, deps: MimoCancelDependencies = {}) {
@@ -229,14 +238,61 @@ export async function mimoCancel(input: unknown, deps: MimoCancelDependencies = 
     throw new Error(`Job ${existing.id} cannot be cancelled while ${existing.status}.`);
   }
 
+  const requested = await (deps.requestJobCancellation ?? requestJobCancellation)(
+    parsed.cwd,
+    existing.id
+  );
+  if (requested.status === "cancelled") {
+    return renderJobResult(requested, notificationStatus(requested));
+  }
+  if (requested.status !== "queued" && requested.status !== "running") {
+    throw new Error(`Job ${requested.id} cannot be cancelled while ${requested.status}.`);
+  }
+
   let transitioned;
   try {
-    transitioned = await (deps.transitionJob ?? transitionJob)(parsed.cwd, existing.id, {
-      status: "cancelled",
-      summary: `Cancelled ${existing.id}.`,
-      errorCode: "cancelled"
-    });
+    transitioned = await withProcessLock(
+      `${resolveJobPaths(parsed.cwd, existing.id).jobFile}.worker-ownership`,
+      async () => {
+        const current = readJob(parsed.cwd, existing.id);
+        if (!current) throw new Error(`No job found for ${existing.id}.`);
+        if (current.status === "cancelled") return undefined;
+        if (current.status !== "queued" && current.status !== "running") {
+          throw new Error(`Job ${current.id} cannot be cancelled while ${current.status}.`);
+        }
+        if (current.status === "running" && current.pid !== null) {
+          const termination = (deps.terminateProcess ?? terminateOwnedJobProcess)(
+            current.pid,
+            current.processIdentity
+          );
+          if (termination.status === "unconfirmed") {
+            throw new Error(
+              `Cancellation could not be confirmed for ${current.id}: ${termination.evidence}`
+            );
+          }
+        }
+        return (deps.transitionJob ?? transitionJob)(parsed.cwd, current.id, {
+          status: "cancelled",
+          summary: `Cancelled ${current.id}.`,
+          errorCode: "cancelled"
+        });
+      },
+      { timeoutMs: 0 }
+    );
   } catch (error) {
+    if (error instanceof ProcessLockUnavailableError) {
+      const pending = await (deps.waitForCancellation ?? waitForCancellation)(
+        parsed.cwd,
+        existing.id
+      );
+      if (pending.status === "cancelled") {
+        return renderJobResult(pending, notificationStatus(pending));
+      }
+      return renderJobStatus(pending, {
+        progress: readRecentJobLogLines(pending.logFile, 3),
+        notification: notificationStatus(pending)
+      });
+    }
     const raced = readJob(parsed.cwd, existing.id);
     if (raced?.status === "cancelled") {
       return renderJobResult(raced, notificationStatus(raced));
@@ -244,7 +300,14 @@ export async function mimoCancel(input: unknown, deps: MimoCancelDependencies = 
     throw error;
   }
 
-  (deps.terminateProcess ?? terminateOwnedJobProcess)(existing.pid, existing.processIdentity);
+  if (!transitioned) {
+    const cancelled = readJob(parsed.cwd, existing.id);
+    if (!cancelled || cancelled.status !== "cancelled") {
+      throw new Error(`Cancellation did not finalize ${existing.id}.`);
+    }
+    return renderJobResult(cancelled, notificationStatus(cancelled));
+  }
+
   if (transitioned.deliveryCreated) {
     try {
       (deps.spawnNotificationWorker ?? spawnNotificationWorker)(parsed.cwd);
@@ -253,6 +316,18 @@ export async function mimoCancel(input: unknown, deps: MimoCancelDependencies = 
     }
   }
   return renderJobResult(transitioned.job, notificationStatus(transitioned.job));
+}
+
+async function waitForCancellation(cwd: string, jobId: string): Promise<JobRecord> {
+  const deadline = Date.now() + 250;
+  while (true) {
+    const job = readJob(cwd, jobId);
+    if (!job) throw new Error(`No job found for ${jobId}.`);
+    if (job.status !== "running" || !job.cancellationRequestedAt || Date.now() >= deadline) {
+      return job;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 function resolveJobForSignals(cwd: string, jobId?: string): JobRecord {

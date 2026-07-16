@@ -18,7 +18,7 @@ import type {
 } from "../../../src/core/jobs.js";
 import { claimDueDelivery, readDeliveries } from "../../../src/notify/outbox.js";
 
-const { appendJobProgress, recoverPendingTransition, transitionJob } = transitionApi;
+const { appendJobProgress, recoverPendingTransition, requestJobCancellation, transitionJob } = transitionApi;
 const tempDirs: string[] = [];
 
 afterEach(() => {
@@ -404,5 +404,21 @@ describe("job transitions", () => {
     const recovered = await transitionJob(cwd, jobId, transition);
     expect(recovered.job).toMatchObject(transition);
     expect(recovered.deliveryCreated).toBe(true);
+  });
+
+  it("prevents a normal terminal outcome after cancellation intent wins", async () => {
+    const { cwd, jobId } = seedJob("running", true);
+
+    await requestJobCancellation(cwd, jobId);
+
+    await expect(transitionJob(cwd, jobId, {
+      status: "completed",
+      summary: "late completion"
+    })).rejects.toThrow(/cancellation.*requested/i);
+    expect(readJob(cwd, jobId)).toMatchObject({
+      status: "running",
+      cancellationRequestedAt: expect.any(String)
+    });
+    expect(readJobSignals(resolveJobPaths(cwd, jobId).signalsFile).signals).toHaveLength(0);
   });
 });

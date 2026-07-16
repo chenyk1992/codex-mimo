@@ -30,6 +30,7 @@ export function renderJobStatus(
     sessionId: job.sessionId ?? null,
     summary: job.summary ?? `${job.kind} job ${job.status}.`,
     changedFiles: [...job.changedFiles],
+    ...(job.cancellationRequestedAt ? { cancellationRequested: true as const } : {}),
     ...(job.executionCallback ? { executionCallback: { ...job.executionCallback } } : {}),
     progress: options.progress ?? [],
     ...(options.notification ? { notification: options.notification } : {}),

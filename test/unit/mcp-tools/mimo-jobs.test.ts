@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createJobStore, updateJob } from "../../../src/core/job-store.js";
 import { mimoJobs } from "../../../src/codex/tools.js";
 
@@ -17,6 +17,16 @@ afterEach(() => {
 });
 
 describe("mimo_jobs", () => {
+  it("runs explicit stale-queued recovery before reading jobs", async () => {
+    const cwd = tempWorkspace();
+    const recoverStaleQueuedJobs = vi.fn(async () => []);
+
+    await mimoJobs({ cwd }, { recoverStaleQueuedJobs });
+
+    expect(recoverStaleQueuedJobs).toHaveBeenCalledOnce();
+    expect(recoverStaleQueuedJobs).toHaveBeenCalledWith(cwd);
+  });
+
   it("lists recent jobs (default limit)", async () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd);
