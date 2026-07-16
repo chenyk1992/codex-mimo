@@ -126,6 +126,29 @@ function workerDeps(overrides: Partial<JobWorkerDependencies> = {}): JobWorkerDe
 }
 
 describe("runJobWorker", () => {
+  it("passes its execution signal through prompt construction and every git capture", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    const bound = definition();
+    const deps = workerDeps({ bindJobDefinition: () => bound });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    const signal = vi.mocked(bound.buildPrompt).mock.calls[0]?.[0];
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(deps.captureStatus).toHaveBeenNthCalledWith(1, cwd, { signal });
+    expect(deps.captureStatus).toHaveBeenNthCalledWith(2, cwd, { signal });
+    expect(deps.captureHead).toHaveBeenNthCalledWith(1, cwd, { signal });
+    expect(deps.captureHead).toHaveBeenNthCalledWith(2, cwd, { signal });
+    expect(deps.captureDiff).toHaveBeenCalledWith(cwd, "HEAD", { signal });
+    expect(deps.captureCommitChanges).toHaveBeenCalledWith(
+      cwd,
+      { oid: "abc", short: "abc", subject: "base" },
+      { oid: "abc", short: "abc", subject: "base" },
+      { signal }
+    );
+  });
+
   it("allows only one concurrent worker to own a queued job", async () => {
     const cwd = tempWorkspace();
     const job = seedJob(cwd, "implement", true);

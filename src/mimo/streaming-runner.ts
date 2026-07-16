@@ -3,6 +3,10 @@ import { EventEmitter } from "node:events";
 import readline from "node:readline";
 import type { Readable } from "node:stream";
 import { withUtf8ProcessEnv } from "../core/encoding.js";
+import {
+  terminatePosixProcessGroup,
+  type AsyncProcessGroupTerminationOptions
+} from "../core/job-process.js";
 import { resolveMimoCommand } from "./run-json.js";
 
 export type TerminationReason = "process_timeout" | "host_abort" | "user_cancelled";
@@ -32,7 +36,7 @@ export interface StreamingRunOptions {
   onStderr?: (chunk: string) => void;
   onTimeoutWarning?: (pid: number | null) => void;
   spawnProcess?: (cwd: string, args: string[], env?: NodeJS.ProcessEnv) => StreamingChildProcess;
-  terminateProcessTree?: (pid: number | null, child: StreamingChildProcess) => void;
+  terminateProcessTree?: (pid: number | null, child: StreamingChildProcess) => Promise<void> | void;
 }
 
 function defaultSpawn(cwd: string, args: string[], env?: NodeJS.ProcessEnv): StreamingChildProcess {
@@ -46,29 +50,18 @@ function defaultSpawn(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Str
   });
 }
 
-export interface TerminateOptions {
+export interface TerminateOptions extends AsyncProcessGroupTerminationOptions {
   platform?: NodeJS.Platform;
-  killProcess?: (pid: number, signal?: string) => void;
   spawnSync?: typeof spawnSync;
-  isProcessAlive?: (pid: number) => boolean;
 }
 
-export function terminateProcessTree(
+export async function terminateProcessTree(
   pid: number | null,
   child: StreamingChildProcess,
   options: TerminateOptions = {}
-): void {
+): Promise<void> {
   const platform = options.platform ?? process.platform;
-  const killProcess = options.killProcess ?? ((targetPid: number, signal?: string) => process.kill(targetPid, signal));
   const spawnSyncFn = options.spawnSync ?? spawnSync;
-  const isProcessAlive = options.isProcessAlive ?? ((targetPid: number) => {
-    try {
-      process.kill(targetPid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  });
 
   if (Number.isFinite(pid)) {
     if (platform === "win32") {
@@ -78,29 +71,14 @@ export function terminateProcessTree(
       });
       return;
     }
-
-    try {
-      killProcess(-(pid as number), "SIGTERM");
-    } catch {
-      // Process group kill failed, fall through to direct kill.
+    if (platform === "linux" || platform === "darwin") {
+      const outcome = await terminatePosixProcessGroup(pid as number, options);
+      if (outcome.status === "unconfirmed") {
+        throw new Error(`Process-group termination could not be confirmed: ${outcome.evidence}`);
+      }
+      return;
     }
-
-    if (!isProcessAlive(pid as number)) return;
-
-    try {
-      killProcess(pid as number, "SIGTERM");
-    } catch {
-      // Best-effort.
-    }
-
-    if (!isProcessAlive(pid as number)) return;
-
-    try {
-      killProcess(pid as number, "SIGKILL");
-    } catch {
-      // Best-effort.
-    }
-
+    child.kill();
     return;
   }
 
@@ -117,37 +95,19 @@ export async function runMimoCliStreaming(
   const stdoutParts: string[] = [];
   const stderrParts: string[] = [];
   let terminationReason: TerminationReason | undefined;
+  let processClosed = false;
+  let timeout: NodeJS.Timeout | null = null;
+  let warningTimeout: NodeJS.Timeout | null = null;
+  let termination: Promise<void> | null = null;
+  const clearTerminationTimers = () => {
+    if (timeout) clearTimeout(timeout);
+    if (warningTimeout) clearTimeout(warningTimeout);
+    timeout = null;
+    warningTimeout = null;
+  };
 
-  const terminateTree = (options.terminateProcessTree ?? terminateProcessTree).bind(null);
-
-  const timeout = options.timeoutMs
-    ? setTimeout(() => {
-        terminationReason = "process_timeout";
-        terminateTree(child.pid ?? null, child);
-      }, options.timeoutMs)
-    : null;
-
-  const warningTimeout = options.timeoutMs && options.timeoutWarningMs && options.onTimeoutWarning
-    ? setTimeout(() => {
-        options.onTimeoutWarning!(child.pid ?? null);
-      }, Math.max(0, options.timeoutMs - options.timeoutWarningMs))
-    : null;
-
-  let abortCleanup: (() => void) | undefined;
-  if (options.signal) {
-    if (options.signal.aborted) {
-      terminationReason = "host_abort";
-      terminateTree(child.pid ?? null, child);
-    } else {
-      const onAbort = () => {
-        terminationReason = "host_abort";
-        terminateTree(child.pid ?? null, child);
-      };
-      options.signal.addEventListener("abort", onAbort, { once: true });
-      abortCleanup = () => options.signal!.removeEventListener("abort", onAbort);
-    }
-  }
-
+  let stdoutReader: readline.Interface | undefined;
+  let cleanupStdoutListeners = () => undefined;
   const stdoutDone = new Promise<void>((resolve) => {
     if (!child.stdout) {
       resolve();
@@ -156,13 +116,21 @@ export async function runMimoCliStreaming(
 
     child.stdout.setEncoding("utf-8");
     const reader = readline.createInterface({ input: child.stdout });
-    reader.on("line", (line) => {
+    stdoutReader = reader;
+    const onLine = (line: string) => {
       stdoutParts.push(`${line}\n`);
       options.onLine?.(line);
-    });
-    reader.on("close", resolve);
+    };
+    const onClose = () => resolve();
+    cleanupStdoutListeners = () => {
+      reader.off("line", onLine);
+      reader.off("close", onClose);
+    };
+    reader.on("line", onLine);
+    reader.once("close", onClose);
   });
 
+  let cleanupStderrListeners = () => undefined;
   const stderrDone = new Promise<void>((resolve) => {
     if (!child.stderr) {
       resolve();
@@ -170,20 +138,30 @@ export async function runMimoCliStreaming(
     }
 
     child.stderr.setEncoding("utf-8");
-    child.stderr.on("data", (chunk: string) => {
+    const onData = (chunk: string) => {
       stderrParts.push(chunk);
       options.onStderr?.(chunk);
-    });
-    child.stderr.on("end", resolve);
+    };
+    const onEnd = () => resolve();
+    cleanupStderrListeners = () => {
+      child.stderr?.off("data", onData);
+      child.stderr?.off("end", onEnd);
+    };
+    child.stderr.on("data", onData);
+    child.stderr.once("end", onEnd);
   });
 
   let cleanupExitListeners = () => undefined;
   const exitCodePromise = new Promise<number>((resolve, reject) => {
     const onError = (error: Error) => {
+      processClosed = true;
+      clearTerminationTimers();
       child.off("close", onClose);
       reject(error);
     };
     const onClose = (code: number | null) => {
+      processClosed = true;
+      clearTerminationTimers();
       child.off("error", onError);
       resolve(terminationReason ? 124 : code ?? 1);
     };
@@ -196,19 +174,64 @@ export async function runMimoCliStreaming(
   });
   void exitCodePromise.catch(() => undefined);
 
+  const terminateTree = (options.terminateProcessTree ?? terminateProcessTree).bind(null);
+  let resolveTerminationRequest!: (pending: Promise<void>) => void;
+  const terminationRequested = new Promise<Promise<void>>((resolve) => {
+    resolveTerminationRequest = resolve;
+  });
+  const requestTermination = (reason: TerminationReason): Promise<void> => {
+    if (termination) return termination;
+    if (processClosed) return Promise.resolve();
+    terminationReason = reason;
+    try {
+      termination = Promise.resolve(terminateTree(child.pid ?? null, child));
+    } catch (error) {
+      termination = Promise.reject(error);
+    }
+    void termination.catch(() => undefined);
+    resolveTerminationRequest(termination);
+    return termination;
+  };
+
+  timeout = options.timeoutMs
+    ? setTimeout(() => void requestTermination("process_timeout"), options.timeoutMs)
+    : null;
+  warningTimeout = options.timeoutMs && options.timeoutWarningMs && options.onTimeoutWarning
+    ? setTimeout(() => {
+        if (!processClosed) options.onTimeoutWarning!(child.pid ?? null);
+      }, Math.max(0, options.timeoutMs - options.timeoutWarningMs))
+    : null;
+
+  let abortCleanup: (() => void) | undefined;
+  if (options.signal) {
+    const onAbort = () => void requestTermination("host_abort");
+    if (options.signal.aborted) onAbort();
+    else {
+      options.signal.addEventListener("abort", onAbort, { once: true });
+      abortCleanup = () => options.signal!.removeEventListener("abort", onAbort);
+    }
+  }
+
+  let completed = false;
   try {
     try {
       await options.onStart?.(child.pid ?? null);
     } catch (error) {
-      terminateTree(child.pid ?? null, child);
-      cleanupExitListeners();
-      child.stdout?.destroy();
-      child.stderr?.destroy();
+      await requestTermination("host_abort");
       throw error;
     }
 
-    const exitCode = await exitCodePromise;
+    const completion = await Promise.race([
+      exitCodePromise.then((exitCode) => ({ type: "exit" as const, exitCode })),
+      terminationRequested.then(async (pending) => {
+        await pending;
+        return { type: "terminated" as const };
+      })
+    ]);
+    if (termination) await termination;
+    const exitCode = completion.type === "exit" ? completion.exitCode : await exitCodePromise;
     await Promise.all([stdoutDone, stderrDone]);
+    completed = true;
     return {
       stdout: stdoutParts.join(""),
       stderr: stderrParts.join(""),
@@ -217,9 +240,15 @@ export async function runMimoCliStreaming(
       terminationReason
     };
   } finally {
-    if (timeout) clearTimeout(timeout);
-    if (warningTimeout) clearTimeout(warningTimeout);
+    clearTerminationTimers();
     abortCleanup?.();
     cleanupExitListeners();
+    cleanupStdoutListeners();
+    cleanupStderrListeners();
+    if (!completed) {
+      stdoutReader?.close();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    }
   }
 }

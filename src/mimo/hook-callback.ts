@@ -319,6 +319,7 @@ function closeServer(server: http.Server): Promise<void> {
       if (error) reject(error);
       else resolve();
     });
+    server.closeAllConnections();
   });
 }
 

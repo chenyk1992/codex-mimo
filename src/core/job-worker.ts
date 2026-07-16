@@ -151,16 +151,25 @@ async function runOwnedJobWorker(
     assertJobActive(cwd, jobId, executionGuard.signal);
 
     stage = "prompt";
-    const prompt = await awaitWithAbort(definition.buildPrompt(), executionGuard.signal);
+    const prompt = await awaitWithAbort(
+      definition.buildPrompt(executionGuard.signal),
+      executionGuard.signal
+    );
     assertJobActive(cwd, jobId, executionGuard.signal);
     const mimoArgs = definition.buildMimoArgs(prompt);
     const captureStatus = deps.captureStatus ?? captureGitStatus;
     const captureHead = deps.captureHead ?? captureGitHead;
     const gitStatusBefore = withoutRuntimeStatus(
-      await awaitWithAbort(captureStatus(cwd), executionGuard.signal)
+      await awaitWithAbort(
+        captureStatus(cwd, { signal: executionGuard.signal }),
+        executionGuard.signal
+      )
     );
     assertJobActive(cwd, jobId, executionGuard.signal);
-    const gitHeadBefore = await awaitWithAbort(captureHead(cwd), executionGuard.signal);
+    const gitHeadBefore = await awaitWithAbort(
+      captureHead(cwd, { signal: executionGuard.signal }),
+      executionGuard.signal
+    );
     assertJobActive(cwd, jobId, executionGuard.signal);
 
     stage = "hook";
@@ -261,15 +270,24 @@ async function runOwnedJobWorker(
     const captureDiff = deps.captureDiff ?? captureGitDiff;
     const captureCommitChanges = deps.captureCommitChanges ?? captureGitCommitChanges;
     const gitStatusAfter = withoutRuntimeStatus(
-      await awaitWithAbort(captureStatus(cwd), executionGuard.signal)
+      await awaitWithAbort(
+        captureStatus(cwd, { signal: executionGuard.signal }),
+        executionGuard.signal
+      )
     );
     assertJobActive(cwd, jobId, executionGuard.signal);
-    const gitHeadAfter = await awaitWithAbort(captureHead(cwd), executionGuard.signal);
+    const gitHeadAfter = await awaitWithAbort(
+      captureHead(cwd, { signal: executionGuard.signal }),
+      executionGuard.signal
+    );
     assertJobActive(cwd, jobId, executionGuard.signal);
-    const capturedDiff = await awaitWithAbort(captureDiff(cwd), executionGuard.signal);
+    const capturedDiff = await awaitWithAbort(
+      captureDiff(cwd, "HEAD", { signal: executionGuard.signal }),
+      executionGuard.signal
+    );
     assertJobActive(cwd, jobId, executionGuard.signal);
     const capturedCommitChanges = await awaitWithAbort(
-      captureCommitChanges(cwd, gitHeadBefore, gitHeadAfter),
+      captureCommitChanges(cwd, gitHeadBefore, gitHeadAfter, { signal: executionGuard.signal }),
       executionGuard.signal
     );
     assertJobActive(cwd, jobId, executionGuard.signal);

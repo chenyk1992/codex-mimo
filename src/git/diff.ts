@@ -25,11 +25,18 @@ export interface GitCommitChangeSnapshot {
   changedFiles: string[];
 }
 
-export async function captureGitStatus(cwd: string): Promise<GitStatusSnapshot> {
+export interface GitCaptureOptions {
+  signal?: AbortSignal;
+}
+
+export async function captureGitStatus(
+  cwd: string,
+  options: GitCaptureOptions = {}
+): Promise<GitStatusSnapshot> {
   const result = await execa(
     "git",
     gitArgs(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
-    { cwd, reject: false }
+    gitCommandOptions(cwd, options, false)
   );
   if (result.exitCode !== 0) {
     throw new Error(`Git status capture failed: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`);
@@ -112,19 +119,24 @@ export function parseChangedFiles(output: string): string[] {
     .filter(Boolean);
 }
 
-export async function captureGitDiff(cwd: string, base = "HEAD"): Promise<GitDiffSnapshot> {
-  const validated = await execa("git", gitArgs(cwd, ["rev-parse", "--verify", base]), {
-    cwd,
-    reject: false
-  });
+export async function captureGitDiff(
+  cwd: string,
+  base = "HEAD",
+  options: GitCaptureOptions = {}
+): Promise<GitDiffSnapshot> {
+  const validated = await execa(
+    "git",
+    gitArgs(cwd, ["rev-parse", "--verify", base]),
+    gitCommandOptions(cwd, options, false)
+  );
   if (validated.exitCode !== 0) {
     throw new Error(`Git diff capture failed for base ${base}: ${validated.stderr || `exit ${validated.exitCode}`}`);
   }
   try {
     const [names, stat, diff] = await Promise.all([
-      execa("git", gitArgs(cwd, ["diff", "--name-only", base]), { cwd }),
-      execa("git", gitArgs(cwd, ["diff", "--stat", base]), { cwd }),
-      execa("git", gitArgs(cwd, ["diff", base]), { cwd })
+      execa("git", gitArgs(cwd, ["diff", "--name-only", base]), gitCommandOptions(cwd, options)),
+      execa("git", gitArgs(cwd, ["diff", "--stat", base]), gitCommandOptions(cwd, options)),
+      execa("git", gitArgs(cwd, ["diff", base]), gitCommandOptions(cwd, options))
     ]);
     return {
       changedFiles: parseChangedFiles(names.stdout),
@@ -139,12 +151,23 @@ export async function captureGitDiff(cwd: string, base = "HEAD"): Promise<GitDif
   }
 }
 
-export async function captureGitHead(cwd: string): Promise<GitHeadSnapshot> {
-  const oid = await execa("git", gitArgs(cwd, ["rev-parse", "--verify", "HEAD"]), { cwd, reject: false });
+export async function captureGitHead(
+  cwd: string,
+  options: GitCaptureOptions = {}
+): Promise<GitHeadSnapshot> {
+  const oid = await execa(
+    "git",
+    gitArgs(cwd, ["rev-parse", "--verify", "HEAD"]),
+    gitCommandOptions(cwd, options, false)
+  );
   if (oid.exitCode !== 0) {
     throw new Error(`Git HEAD capture failed: ${oid.stderr || oid.stdout || `exit ${oid.exitCode}`}`);
   }
-  const summary = await execa("git", gitArgs(cwd, ["log", "-1", "--format=%h %s"]), { cwd });
+  const summary = await execa(
+    "git",
+    gitArgs(cwd, ["log", "-1", "--format=%h %s"]),
+    gitCommandOptions(cwd, options)
+  );
   const { short, subject } = parseHeadSummary(summary.stdout);
   return {
     oid: oid.stdout.trim(),
@@ -156,18 +179,35 @@ export async function captureGitHead(cwd: string): Promise<GitHeadSnapshot> {
 export async function captureGitCommitChanges(
   cwd: string,
   before: GitHeadSnapshot | undefined,
-  after: GitHeadSnapshot | undefined
+  after: GitHeadSnapshot | undefined,
+  options: GitCaptureOptions = {}
 ): Promise<GitCommitChangeSnapshot> {
   if (!before || !after || before.oid === after.oid) {
     return { commits: [], changedFiles: [] };
   }
   const [commits, files] = await Promise.all([
-    execa("git", gitArgs(cwd, ["log", "--oneline", "--reverse", `${before.oid}..${after.oid}`]), { cwd }),
-    execa("git", gitArgs(cwd, ["diff", "--name-only", before.oid, after.oid]), { cwd })
+    execa(
+      "git",
+      gitArgs(cwd, ["log", "--oneline", "--reverse", `${before.oid}..${after.oid}`]),
+      gitCommandOptions(cwd, options)
+    ),
+    execa(
+      "git",
+      gitArgs(cwd, ["diff", "--name-only", before.oid, after.oid]),
+      gitCommandOptions(cwd, options)
+    )
   ]);
   return {
     commits: parseChangedFiles(commits.stdout),
     changedFiles: parseChangedFiles(files.stdout)
+  };
+}
+
+function gitCommandOptions(cwd: string, options: GitCaptureOptions, reject = true) {
+  return {
+    cwd,
+    ...(reject ? {} : { reject: false as const }),
+    ...(options.signal ? { cancelSignal: options.signal } : {})
   };
 }
 

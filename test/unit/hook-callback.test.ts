@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { once } from "node:events";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -413,5 +414,34 @@ describe("hook callback controller", () => {
     const wait = controller.waitForCallback();
     await controller.close();
     await expect(wait).resolves.toBeNull();
+  });
+
+  it("force-closes an active HTTP connection without blocking controller shutdown", async () => {
+    const cwd = tempWorkspace();
+    const controller = await createHookCallbackController({
+      cwd,
+      kind: "plan",
+      now: () => 1768040303616,
+      random: () => "socket1"
+    });
+    const endpoint = new URL(controller.endpoint);
+    const socket = net.createConnection(Number(endpoint.port), endpoint.hostname);
+    socket.on("error", () => undefined);
+    await once(socket, "connect");
+    socket.write("POST /mimo-hook HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+    const socketClosed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    const closing = controller.close();
+
+    try {
+      const outcome = await Promise.race([
+        closing.then(() => "closed" as const),
+        new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 150))
+      ]);
+      expect(outcome).toBe("closed");
+      await socketClosed;
+    } finally {
+      socket.destroy();
+      await closing;
+    }
   });
 });

@@ -144,7 +144,7 @@ export interface JobFinalizeContext<Request extends { cwd: string }> extends Job
 export interface JobDefinition<Kind extends JobKind, Request extends { cwd: string }> {
   kind: Kind;
   writesAllowed: boolean;
-  buildPrompt(request: Request): Promise<PromptTransportResult>;
+  buildPrompt(request: Request, signal: AbortSignal): Promise<PromptTransportResult>;
   buildMimoArgs(request: Request, prompt: PromptTransportResult): string[];
   finalize(context: JobFinalizeContext<Request>): Promise<JobOutcome>;
 }
@@ -156,7 +156,7 @@ export type JobDefinitionRegistry = {
 export interface BoundJobDefinition {
   kind: JobKind;
   writesAllowed: boolean;
-  buildPrompt(): Promise<PromptTransportResult>;
+  buildPrompt(signal: AbortSignal): Promise<PromptTransportResult>;
   buildMimoArgs(prompt: PromptTransportResult): string[];
   finalize(context: JobExecutionFinalizeContext): Promise<JobOutcome>;
 }
@@ -180,9 +180,9 @@ const implementDefinition: JobDefinition<"implement", ImplementJobRequest> = dir
 const reviewDefinition: JobDefinition<"review", ReviewJobRequest> = {
   kind: "review",
   writesAllowed: false,
-  async buildPrompt(request) {
+  async buildPrompt(request, signal) {
     const base = request.base ?? "HEAD";
-    const diff = await captureGitDiff(request.cwd, base);
+    const diff = await captureGitDiff(request.cwd, base, { signal });
     const diffFile = diff.diff
       ? writePromptAttachment(diff.diff, { cwd: request.cwd, label: `review-${base}`, extension: ".diff" })
       : undefined;
@@ -296,7 +296,7 @@ function bind<Kind extends JobKind, Request extends { cwd: string }>(
   return {
     kind: definition.kind,
     writesAllowed: definition.writesAllowed,
-    buildPrompt: () => definition.buildPrompt(request),
+    buildPrompt: (signal) => definition.buildPrompt(request, signal),
     buildMimoArgs: (prompt) => definition.buildMimoArgs(request, prompt),
     finalize: (context) => definition.finalize({ ...context, job, request })
   };

@@ -27,6 +27,26 @@ describe("git diff helpers", () => {
     expect(parseChangedFiles("\n")).toEqual([]);
   });
 
+  it("passes one cancellation signal to every git child process", async () => {
+    const controller = new AbortController();
+    mockedExeca.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
+
+    await captureGitStatus("E:/repo", { signal: controller.signal });
+    await captureGitDiff("E:/repo", "HEAD", { signal: controller.signal });
+    await captureGitHead("E:/repo", { signal: controller.signal });
+    await captureGitCommitChanges(
+      "E:/repo",
+      { oid: "before", short: "before", subject: "before" },
+      { oid: "after", short: "after", subject: "after" },
+      { signal: controller.signal }
+    );
+
+    expect(mockedExeca).toHaveBeenCalledTimes(9);
+    for (const call of mockedExeca.mock.calls) {
+      expect(call[2]).toMatchObject({ cancelSignal: controller.signal });
+    }
+  });
+
   it("captures git status with the cwd trusted for this command", async () => {
     mockedExeca.mockResolvedValue({
       exitCode: 0,

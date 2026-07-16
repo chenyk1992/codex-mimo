@@ -27,6 +27,35 @@ export type ProcessGroupProbe =
 
 export type ProcessGroupSignal = "SIGTERM" | "SIGKILL";
 
+export type ProcessGroupSignalResult =
+  | { status: "sent"; evidence: string }
+  | { status: "not_running"; evidence: string }
+  | { status: "unconfirmed"; evidence: string };
+
+export interface ProcessGroupTerminationOptions {
+  signalProcessGroup?: (
+    pid: number,
+    signal: ProcessGroupSignal
+  ) => ProcessGroupSignalResult;
+  probeProcessGroup?: (pid: number) => ProcessGroupProbe;
+  wait?: (milliseconds: number) => void;
+  graceChecks?: number;
+  graceIntervalMs?: number;
+  killProcess?: (pid: number, signal?: string) => unknown;
+}
+
+export interface AsyncProcessGroupTerminationOptions {
+  signalProcessGroup?: (
+    pid: number,
+    signal: ProcessGroupSignal
+  ) => ProcessGroupSignalResult | PromiseLike<ProcessGroupSignalResult>;
+  probeProcessGroup?: (pid: number) => ProcessGroupProbe | PromiseLike<ProcessGroupProbe>;
+  wait?: (milliseconds: number) => void | PromiseLike<void>;
+  graceChecks?: number;
+  graceIntervalMs?: number;
+  killProcess?: (pid: number, signal?: string) => unknown;
+}
+
 export interface ProcessIdentityCaptureOptions {
   query?: (pid: number) => ProcessIdentityCapture;
   platform?: NodeJS.Platform;
@@ -40,7 +69,7 @@ export interface OwnedProcessTerminationOptions {
   signalProcessGroup?: (
     pid: number,
     signal: ProcessGroupSignal
-  ) => { ok: boolean; evidence: string };
+  ) => ProcessGroupSignalResult;
   probeProcessGroup?: (pid: number) => ProcessGroupProbe;
   wait?: (milliseconds: number) => void;
   graceChecks?: number;
@@ -131,7 +160,7 @@ export function terminateOwnedJobProcess(
 
   const platform = options.platform ?? process.platform;
   if (platform === "linux" || platform === "darwin") {
-    return terminateOwnedPosixProcessGroup(pid as number, options);
+    return terminatePosixProcessGroupSync(pid as number, options);
   }
   if (platform !== "win32") {
     return {
@@ -266,9 +295,9 @@ function capturePosixIdentity(
   }
 }
 
-function terminateOwnedPosixProcessGroup(
+export function terminatePosixProcessGroupSync(
   pid: number,
-  options: OwnedProcessTerminationOptions
+  options: ProcessGroupTerminationOptions = {}
 ): OwnedProcessTermination {
   const signalGroup = options.signalProcessGroup ?? ((targetPid, signal) =>
     signalPosixProcessGroup(targetPid, signal, options.killProcess));
@@ -277,46 +306,118 @@ function terminateOwnedPosixProcessGroup(
   const checks = positiveIntegerOr(options.graceChecks, 3);
   const intervalMs = nonNegativeNumberOr(options.graceIntervalMs, 50);
 
-  const terminated = signalGroup(pid, "SIGTERM");
-  if (!terminated.ok) return { status: "unconfirmed", evidence: terminated.evidence };
-  const afterTerm = waitForProcessGroupExit(pid, probeGroup, wait, checks, intervalMs);
-  if (afterTerm.status === "not_running") {
-    return { status: "terminated", evidence: afterTerm.evidence };
+  return driveProcessGroupTermination(
+    createProcessGroupTermination(pid, checks, intervalMs),
+    (step) => executeProcessGroupStep(step, signalGroup, probeGroup, wait) as ProcessGroupTerminationStepResult
+  );
+}
+
+export async function terminatePosixProcessGroup(
+  pid: number,
+  options: AsyncProcessGroupTerminationOptions = {}
+): Promise<OwnedProcessTermination> {
+  const signalGroup = options.signalProcessGroup ?? ((targetPid, signal) =>
+    signalPosixProcessGroup(targetPid, signal, options.killProcess));
+  const probeGroup = options.probeProcessGroup ?? probePosixProcessGroup;
+  const wait = options.wait ?? waitAsynchronously;
+  const checks = positiveIntegerOr(options.graceChecks, 3);
+  const intervalMs = nonNegativeNumberOr(options.graceIntervalMs, 50);
+  const sequence = createProcessGroupTermination(pid, checks, intervalMs);
+  let next = sequence.next();
+  while (!next.done) {
+    try {
+      next = sequence.next(await executeProcessGroupStep(next.value, signalGroup, probeGroup, wait));
+    } catch (error) {
+      next = sequence.next({
+        status: "unconfirmed",
+        evidence: `Process-group operation failed: ${errorMessage(error)}`
+      });
+    }
   }
+  return next.value;
+}
+
+type ProcessGroupTerminationStep =
+  | { type: "signal"; pid: number; signal: ProcessGroupSignal }
+  | { type: "probe"; pid: number }
+  | { type: "wait"; milliseconds: number };
+
+type ProcessGroupTerminationStepResult = ProcessGroupSignalResult | ProcessGroupProbe | void;
+
+function* createProcessGroupTermination(
+  pid: number,
+  checks: number,
+  intervalMs: number
+): Generator<ProcessGroupTerminationStep, OwnedProcessTermination, ProcessGroupTerminationStepResult> {
+  const afterTermSignal = yield { type: "signal", pid, signal: "SIGTERM" };
+  if (isGroupGone(afterTermSignal)) return terminatedGroup(afterTermSignal.evidence);
+  if (!isSignalSent(afterTermSignal)) return unconfirmedGroup(afterTermSignal);
+
+  const afterTerm = yield* probeProcessGroupExit(pid, checks, intervalMs);
+  if (afterTerm.status === "not_running") return terminatedGroup(afterTerm.evidence);
   if (afterTerm.status === "unconfirmed") return afterTerm;
 
-  const killed = signalGroup(pid, "SIGKILL");
-  if (!killed.ok) return { status: "unconfirmed", evidence: killed.evidence };
-  const afterKill = waitForProcessGroupExit(pid, probeGroup, wait, checks, intervalMs);
+  const afterKillSignal = yield { type: "signal", pid, signal: "SIGKILL" };
+  if (isGroupGone(afterKillSignal)) return terminatedGroup(afterKillSignal.evidence);
+  if (!isSignalSent(afterKillSignal)) return unconfirmedGroup(afterKillSignal);
+
+  const afterKill = yield* probeProcessGroupExit(pid, checks, intervalMs);
   return afterKill.status === "not_running"
-    ? { status: "terminated", evidence: afterKill.evidence }
+    ? terminatedGroup(afterKill.evidence)
     : { status: "unconfirmed", evidence: afterKill.evidence };
 }
 
-function waitForProcessGroupExit(
+function* probeProcessGroupExit(
   pid: number,
-  probe: (pid: number) => ProcessGroupProbe,
-  wait: (milliseconds: number) => void,
   checks: number,
   intervalMs: number
-): ProcessGroupProbe {
+): Generator<ProcessGroupTerminationStep, ProcessGroupProbe, ProcessGroupTerminationStepResult> {
   let lastRunning: ProcessGroupProbe = {
     status: "running",
     evidence: `Process group ${pid} is still running.`
   };
   for (let check = 0; check < checks; check += 1) {
-    const result = probe(pid);
+    const result = yield { type: "probe", pid };
+    if (!isProcessGroupProbe(result)) {
+      return { status: "unconfirmed", evidence: "Process-group probe returned no result." };
+    }
     if (result.status !== "running") return result;
     lastRunning = result;
     if (check < checks - 1) {
-      try {
-        wait(intervalMs);
-      } catch (error) {
-        return { status: "unconfirmed", evidence: `Process-group wait failed: ${errorMessage(error)}` };
-      }
+      const waited = yield { type: "wait", milliseconds: intervalMs };
+      if (isUnconfirmedResult(waited)) return waited;
     }
   }
   return lastRunning;
+}
+
+function driveProcessGroupTermination(
+  sequence: Generator<ProcessGroupTerminationStep, OwnedProcessTermination, ProcessGroupTerminationStepResult>,
+  execute: (step: ProcessGroupTerminationStep) => ProcessGroupTerminationStepResult
+): OwnedProcessTermination {
+  let next = sequence.next();
+  while (!next.done) {
+    try {
+      next = sequence.next(execute(next.value));
+    } catch (error) {
+      next = sequence.next({
+        status: "unconfirmed",
+        evidence: `Process-group operation failed: ${errorMessage(error)}`
+      });
+    }
+  }
+  return next.value;
+}
+
+function executeProcessGroupStep(
+  step: ProcessGroupTerminationStep,
+  signal: (pid: number, signal: ProcessGroupSignal) => ProcessGroupSignalResult | PromiseLike<ProcessGroupSignalResult>,
+  probe: (pid: number) => ProcessGroupProbe | PromiseLike<ProcessGroupProbe>,
+  wait: (milliseconds: number) => void | PromiseLike<void>
+): ProcessGroupTerminationStepResult | PromiseLike<ProcessGroupTerminationStepResult> {
+  if (step.type === "signal") return signal(step.pid, step.signal);
+  if (step.type === "probe") return probe(step.pid);
+  return wait(step.milliseconds);
 }
 
 function signalPosixProcessGroup(
@@ -324,13 +425,19 @@ function signalPosixProcessGroup(
   signal: ProcessGroupSignal,
   killProcess: (targetPid: number, targetSignal?: string) => unknown =
     (targetPid, targetSignal) => process.kill(targetPid, targetSignal)
-): { ok: boolean; evidence: string } {
+): ProcessGroupSignalResult {
   try {
     killProcess(-pid, signal);
-    return { ok: true, evidence: `${signal} sent to process group ${pid}.` };
+    return { status: "sent", evidence: `${signal} sent to process group ${pid}.` };
   } catch (error) {
+    if (isErrorWithCode(error, "ESRCH")) {
+      return {
+        status: "not_running",
+        evidence: `Process group ${pid} exited before ${signal}.`
+      };
+    }
     return {
-      ok: false,
+      status: "unconfirmed",
       evidence: `${signal} failed for process group ${pid}: ${errorMessage(error)}`
     };
   }
@@ -354,6 +461,50 @@ function probePosixProcessGroup(pid: number): ProcessGroupProbe {
 function waitSynchronously(milliseconds: number): void {
   if (milliseconds <= 0) return;
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function waitAsynchronously(milliseconds: number): Promise<void> {
+  if (milliseconds <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function isGroupGone(
+  result: ProcessGroupTerminationStepResult
+): result is Extract<ProcessGroupSignalResult, { status: "not_running" }> {
+  return isProcessGroupResult(result) && result.status === "not_running";
+}
+
+function isSignalSent(
+  result: ProcessGroupTerminationStepResult
+): result is Extract<ProcessGroupSignalResult, { status: "sent" }> {
+  return isProcessGroupResult(result) && result.status === "sent";
+}
+
+function isProcessGroupProbe(result: ProcessGroupTerminationStepResult): result is ProcessGroupProbe {
+  return isProcessGroupResult(result) && result.status !== "sent";
+}
+
+function isProcessGroupResult(
+  result: ProcessGroupTerminationStepResult
+): result is ProcessGroupSignalResult | ProcessGroupProbe {
+  return typeof result === "object" && result !== null && "status" in result && "evidence" in result;
+}
+
+function isUnconfirmedResult(
+  result: ProcessGroupTerminationStepResult
+): result is Extract<ProcessGroupSignalResult | ProcessGroupProbe, { status: "unconfirmed" }> {
+  return isProcessGroupResult(result) && result.status === "unconfirmed";
+}
+
+function terminatedGroup(evidence: string): OwnedProcessTermination {
+  return { status: "terminated", evidence };
+}
+
+function unconfirmedGroup(result: ProcessGroupTerminationStepResult): OwnedProcessTermination {
+  return {
+    status: "unconfirmed",
+    evidence: isProcessGroupResult(result) ? result.evidence : "Process-group signal returned no result."
+  };
 }
 
 function positiveIntegerOr(value: number | undefined, fallback: number): number {

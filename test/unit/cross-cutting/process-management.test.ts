@@ -23,14 +23,13 @@ function makeChild(pid: number, killFn?: () => boolean) {
 }
 
 describe("process management - terminateProcessTree", () => {
-  it("Windows: uses taskkill /PID /T /F", () => {
+  it("Windows: uses taskkill /PID /T /F", async () => {
     const child = makeChild(400);
     const spawnSync = vi.fn();
 
-    terminateProcessTree(400, child, {
+    await terminateProcessTree(400, child, {
       platform: "win32",
-      spawnSync,
-      isProcessAlive: () => false
+      spawnSync
     });
 
     expect(spawnSync).toHaveBeenCalledWith("taskkill", ["/PID", "400", "/T", "/F"], {
@@ -39,62 +38,53 @@ describe("process management - terminateProcessTree", () => {
     });
   });
 
-  it("Unix: SIGTERM group then SIGKILL fallback when process survives", () => {
-    const child = makeChild(500, () => true);
-    const killProcess = vi.fn();
-    let aliveCalls = 0;
-    const isProcessAlive = vi.fn().mockImplementation(() => {
-      aliveCalls++;
-      return aliveCalls <= 2;
-    });
+  it("Unix: SIGTERM group then SIGKILL fallback when the group survives", async () => {
+    const child = makeChild(500);
+    const signalProcessGroup = vi.fn(() => ({ status: "sent" as const, evidence: "sent" }));
+    const probeProcessGroup = vi.fn()
+      .mockReturnValueOnce({ status: "running", evidence: "survived TERM" })
+      .mockReturnValueOnce({ status: "not_running", evidence: "group gone" });
 
-    terminateProcessTree(500, child, {
+    await terminateProcessTree(500, child, {
       platform: "linux",
-      killProcess,
-      isProcessAlive
+      signalProcessGroup,
+      probeProcessGroup,
+      graceChecks: 1
     });
 
-    expect(killProcess).toHaveBeenNthCalledWith(1, -500, "SIGTERM");
-    expect(killProcess).toHaveBeenNthCalledWith(2, 500, "SIGTERM");
-    expect(killProcess).toHaveBeenNthCalledWith(3, 500, "SIGKILL");
+    expect(signalProcessGroup.mock.calls).toEqual([[500, "SIGTERM"], [500, "SIGKILL"]]);
   });
 
-  it("already-exited process does not throw", () => {
+  it("already-exited process does not throw", async () => {
     const child = makeChild(600, () => true);
-    const killProcess = vi.fn().mockImplementation(() => {
-      throw new Error("ESRCH: no such process");
+    const killProcess = vi.fn(() => {
+      throw Object.assign(new Error("no such process"), { code: "ESRCH" });
     });
-    const isProcessAlive = vi.fn().mockReturnValue(false);
 
-    expect(() => {
-      terminateProcessTree(600, child, {
-        platform: "linux",
-        killProcess,
-        isProcessAlive
-      });
-    }).not.toThrow();
+    await expect(terminateProcessTree(600, child, {
+      platform: "linux",
+      killProcess
+    })).resolves.toBeUndefined();
 
     expect(killProcess).toHaveBeenCalledWith(-600, "SIGTERM");
   });
 
-  it("shell:true child survival detected via isProcessAlive", () => {
-    const child = makeChild(700, () => true);
-    const killProcess = vi.fn();
-    let aliveCalls = 0;
-    const isProcessAlive = vi.fn().mockImplementation(() => {
-      aliveCalls++;
-      return aliveCalls === 1;
-    });
+  it("root exit does not hide a surviving process-group descendant", async () => {
+    const child = makeChild(700);
+    const signalProcessGroup = vi.fn(() => ({ status: "sent" as const, evidence: "TERM sent" }));
+    const probeProcessGroup = vi.fn()
+      .mockReturnValueOnce({ status: "running", evidence: "descendant alive" })
+      .mockReturnValueOnce({ status: "not_running", evidence: "group gone" });
 
-    terminateProcessTree(700, child, {
+    await terminateProcessTree(700, child, {
       platform: "linux",
-      killProcess,
-      isProcessAlive
+      signalProcessGroup,
+      probeProcessGroup,
+      wait: async () => undefined
     });
 
-    expect(killProcess).toHaveBeenNthCalledWith(1, -700, "SIGTERM");
-    expect(killProcess).toHaveBeenNthCalledWith(2, 700, "SIGTERM");
-    expect(killProcess).toHaveBeenCalledTimes(2);
+    expect(signalProcessGroup).toHaveBeenCalledOnce();
+    expect(probeProcessGroup).toHaveBeenCalledTimes(2);
   });
 });
 

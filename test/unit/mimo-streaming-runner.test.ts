@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
@@ -277,73 +278,271 @@ describe("streaming MiMo CLI runner", () => {
     expect(result.exitCode).toBe(124);
     expect(result.terminationReason).toBe("host_abort");
   });
+
+  it("does not resolve cancellation before asynchronous process-group termination completes", async () => {
+    const abort = new AbortController();
+    const child = makeChild(1011);
+    let releaseTermination!: () => void;
+    const terminationHeld = new Promise<void>((resolve) => { releaseTermination = resolve; });
+    let settled = false;
+    const run = runMimoCliStreaming("E:/project/app", ["run"], {
+      signal: abort.signal,
+      spawnProcess: () => child,
+      terminateProcessTree: async (_pid, target) => {
+        target.emit("close", null);
+        await terminationHeld;
+      }
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    abort.abort();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+
+    releaseTermination();
+    await expect(run).resolves.toMatchObject({ exitCode: 124, terminationReason: "host_abort" });
+  });
+
+  it("rejects promptly when process-group termination cannot be confirmed and root stays alive", async () => {
+    const abort = new AbortController();
+    const child = makeChild(1012);
+    const failure = new Error("process group unconfirmed");
+    const run = runMimoCliStreaming("E:/project/app", ["run"], {
+      signal: abort.signal,
+      spawnProcess: () => child,
+      terminateProcessTree: async () => { throw failure; }
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    abort.abort();
+    const outcome = await Promise.race([
+      run.then(() => "resolved" as const, (error) => error),
+      new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 150))
+    ]);
+    child.emit("close", null);
+
+    expect(outcome).toBe(failure);
+  });
+
+  it("observes close when an already-aborted signal terminates synchronously", async () => {
+    const abort = new AbortController();
+    abort.abort();
+    const child = makeChild(1013);
+    const run = runMimoCliStreaming("E:/project/app", ["run"], {
+      signal: abort.signal,
+      spawnProcess: () => child,
+      terminateProcessTree: (_pid, target) => { target.emit("close", null); }
+    });
+
+    const outcome = await Promise.race([
+      run,
+      new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 150))
+    ]);
+    if (outcome === "timed_out") child.emit("close", null);
+
+    expect(outcome).not.toBe("timed_out");
+    await run;
+  });
+
+  it("keeps the first termination reason when timeout and abort race", async () => {
+    const abort = new AbortController();
+    const child = makeChild(1014);
+    let releaseTermination!: () => void;
+    const held = new Promise<void>((resolve) => { releaseTermination = resolve; });
+    const run = runMimoCliStreaming("E:/project/app", ["run"], {
+      signal: abort.signal,
+      timeoutMs: 1,
+      spawnProcess: () => child,
+      terminateProcessTree: async () => held
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    abort.abort();
+    releaseTermination();
+    child.emit("close", null);
+
+    await expect(run).resolves.toMatchObject({ terminationReason: "process_timeout" });
+  });
+
+  it("disarms timeout as soon as the root closes while output is still draining", async () => {
+    const child = makeChild(1015);
+    child.stdout = new Readable({ read() {} });
+    child.stderr = new Readable({ read() {} });
+    const terminate = vi.fn();
+    const run = runMimoCliStreaming("E:/project/app", ["run"], {
+      timeoutMs: 20,
+      spawnProcess: () => child,
+      terminateProcessTree: terminate
+    });
+
+    child.emit("close", 0);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    child.stdout.push(null);
+    child.stderr.push(null);
+
+    await expect(run).resolves.toMatchObject({ exitCode: 0, terminationReason: undefined });
+    expect(terminate).not.toHaveBeenCalled();
+  });
+
+  it("destroys stream resources when termination fails before root exit", async () => {
+    const abort = new AbortController();
+    const child = makeChild(1016);
+    child.stdout = new Readable({ read() {} });
+    child.stderr = new Readable({ read() {} });
+    const failure = new Error("termination failed");
+    const run = runMimoCliStreaming("E:/project/app", ["run"], {
+      signal: abort.signal,
+      spawnProcess: () => child,
+      terminateProcessTree: async () => { throw failure; }
+    });
+
+    abort.abort();
+    await expect(run).rejects.toBe(failure);
+
+    expect(child.stdout.destroyed).toBe(true);
+    expect(child.stderr.destroyed).toBe(true);
+    expect(child.listenerCount("error")).toBe(0);
+    expect(child.listenerCount("close")).toBe(0);
+    expect(child.stderr.listenerCount("data")).toBe(0);
+    expect(child.stderr.listenerCount("end")).toBe(0);
+  });
+
+  (process.platform === "win32" ? it.skip : it)(
+    "removes a real detached process group even when the root exits before its descendant",
+    async () => {
+      const abort = new AbortController();
+      const childSource = "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)";
+      const rootSource = [
+        "const {spawn}=require('node:child_process')",
+        `const child=spawn(process.execPath,['-e',${JSON.stringify(childSource)}],{stdio:'ignore'})`,
+        "console.log(child.pid)",
+        "process.on('SIGTERM',()=>process.exit(0))",
+        "setInterval(()=>{},1000)"
+      ].join(";");
+      let groupPid: number | undefined;
+      let descendantPid: number | undefined;
+
+      try {
+        const result = await runMimoCliStreaming(process.cwd(), [], {
+          signal: abort.signal,
+          spawnProcess: () => {
+            const processGroup = spawn(process.execPath, ["-e", rootSource], {
+              detached: true,
+              stdio: ["ignore", "pipe", "pipe"]
+            });
+            groupPid = processGroup.pid;
+            return processGroup;
+          },
+          onLine: (line) => {
+            descendantPid = Number(line);
+            abort.abort();
+          }
+        });
+
+        expect(result).toMatchObject({ exitCode: 124, terminationReason: "host_abort" });
+        expect(groupPid).toBeTypeOf("number");
+        expect(descendantPid).toBeTypeOf("number");
+        expect(isProcessRunning(-(groupPid as number))).toBe(false);
+        expect(isProcessRunning(descendantPid as number)).toBe(false);
+      } finally {
+        if (groupPid) bestEffortKill(-groupPid);
+        if (descendantPid) bestEffortKill(descendantPid);
+      }
+    }
+  );
 });
 
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function bestEffortKill(pid: number): void {
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // Test cleanup only.
+  }
+}
+
 describe("terminateProcessTree", () => {
-  it("kills the process group on POSIX", () => {
+  it("kills the process group on POSIX", async () => {
     const child = makeChild(100);
-    const killProcess = vi.fn();
-    const isProcessAlive = vi.fn().mockReturnValue(false);
+    const signalProcessGroup = vi.fn(() => ({ status: "sent" as const, evidence: "TERM sent" }));
+    const probeProcessGroup = vi.fn(() => ({ status: "not_running" as const, evidence: "group gone" }));
 
-    terminateProcessTree(100, child, {
+    await terminateProcessTree(100, child, {
       platform: "linux",
-      killProcess,
-      isProcessAlive
+      signalProcessGroup,
+      probeProcessGroup
     });
 
-    expect(killProcess).toHaveBeenCalledWith(-100, "SIGTERM");
+    expect(signalProcessGroup).toHaveBeenCalledWith(100, "SIGTERM");
   });
 
-  it("falls back to direct child kill when process group kill fails", () => {
-    const child = makeChild(200, () => true);
-    const killProcess = vi.fn()
-      .mockImplementationOnce(() => { throw new Error("ESRCH"); })
-      .mockReturnValueOnce(true);
-    let aliveCheckCount = 0;
-    const isProcessAlive = vi.fn().mockImplementation(() => {
-      aliveCheckCount++;
-      return aliveCheckCount === 1;
-    });
+  it("keeps probing the process group when the root exits but a descendant remains", async () => {
+    const child = makeChild(200);
+    const signalProcessGroup = vi.fn(() => ({ status: "sent" as const, evidence: "TERM sent" }));
+    const probeProcessGroup = vi.fn()
+      .mockReturnValueOnce({ status: "running", evidence: "descendant alive" })
+      .mockReturnValueOnce({ status: "not_running", evidence: "group gone" });
+    const wait = vi.fn(async () => undefined);
 
-    terminateProcessTree(200, child, {
+    await terminateProcessTree(200, child, {
       platform: "linux",
-      killProcess,
-      isProcessAlive
+      signalProcessGroup,
+      probeProcessGroup,
+      wait
     });
 
-    expect(killProcess).toHaveBeenNthCalledWith(1, -200, "SIGTERM");
-    expect(killProcess).toHaveBeenNthCalledWith(2, 200, "SIGTERM");
+    expect(probeProcessGroup).toHaveBeenCalledTimes(2);
+    expect(wait).toHaveBeenCalledOnce();
+    expect(signalProcessGroup).toHaveBeenCalledTimes(1);
   });
 
-  it("verifies the process is dead after kill and retries if still alive", () => {
-    const child = makeChild(300, () => true);
-    const killProcess = vi.fn().mockReturnValue(true);
-    let aliveCalls = 0;
-    const isProcessAlive = vi.fn().mockImplementation(() => {
-      aliveCalls++;
-      return aliveCalls <= 1;
-    });
+  it("escalates the whole process group to SIGKILL after bounded TERM probes", async () => {
+    const child = makeChild(300);
+    const signalProcessGroup = vi.fn(() => ({ status: "sent" as const, evidence: "sent" }));
+    const probeProcessGroup = vi.fn()
+      .mockReturnValueOnce({ status: "running", evidence: "ignored TERM" })
+      .mockReturnValueOnce({ status: "not_running", evidence: "killed" });
 
-    terminateProcessTree(300, child, {
+    await terminateProcessTree(300, child, {
       platform: "linux",
-      killProcess,
-      isProcessAlive
+      signalProcessGroup,
+      probeProcessGroup,
+      graceChecks: 1
     });
 
-    expect(killProcess).toHaveBeenCalledTimes(2);
-    expect(killProcess).toHaveBeenNthCalledWith(1, -300, "SIGTERM");
-    expect(killProcess).toHaveBeenNthCalledWith(2, 300, "SIGTERM");
+    expect(signalProcessGroup.mock.calls).toEqual([[300, "SIGTERM"], [300, "SIGKILL"]]);
   });
 
-  it("uses taskkill /T on Windows", () => {
+  it("rejects when bounded TERM and KILL probes cannot confirm process-group exit", async () => {
+    const child = makeChild(301);
+
+    await expect(terminateProcessTree(301, child, {
+      platform: "linux",
+      signalProcessGroup: vi.fn(() => ({ status: "sent" as const, evidence: "sent" })),
+      probeProcessGroup: vi.fn(() => ({ status: "running" as const, evidence: "still running" })),
+      graceChecks: 1
+    })).rejects.toThrow(/could not be confirmed.*still running/i);
+  });
+
+  it("uses taskkill /T on Windows", async () => {
     const child = makeChild(400);
     const spawnSync = vi.fn();
     const isProcessAlive = vi.fn().mockReturnValue(false);
 
-    terminateProcessTree(400, child, {
+    await terminateProcessTree(400, child, {
       platform: "win32",
-      spawnSync,
-      isProcessAlive
+      spawnSync
     });
 
     expect(spawnSync).toHaveBeenCalledWith("taskkill", ["/PID", "400", "/T", "/F"], {
@@ -352,15 +551,12 @@ describe("terminateProcessTree", () => {
     });
   });
 
-  it("falls back to child.kill when pid is null", () => {
+  it("falls back to child.kill when pid is null", async () => {
     const child = makeChild(500, () => true);
     const killProcess = vi.fn();
     const killSpy = vi.spyOn(child, "kill");
 
-    terminateProcessTree(null, child, {
-      platform: "linux",
-      killProcess
-    });
+    await terminateProcessTree(null, child, { platform: "linux", killProcess });
 
     expect(killProcess).not.toHaveBeenCalled();
     expect(killSpy).toHaveBeenCalled();

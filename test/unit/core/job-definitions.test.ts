@@ -76,7 +76,7 @@ describe("job definition registry", () => {
     ["compose", { cwd: "E:/project", workflow: "dev", task: "build it" }, "compose"]
   ] as const)("uses the fixed MiMo agent for %s", async (kind, request, agent) => {
     const definition = getJobDefinition(kind);
-    const prompt = await definition.buildPrompt(request);
+    const prompt = await definition.buildPrompt(request, ACTIVE_SIGNAL);
     const args = definition.buildMimoArgs(request, prompt);
 
     expect(args).toContain("--agent");
@@ -86,20 +86,29 @@ describe("job definition registry", () => {
   it("resumes from the parent session", async () => {
     const definition = getJobDefinition("resume");
     const request = { cwd: "E:/project", jobId: "parent-1", task: "continue", sessionId: "ses_1" };
-    const prompt = await definition.buildPrompt(request);
+    const prompt = await definition.buildPrompt(request, ACTIVE_SIGNAL);
 
     expect(definition.buildMimoArgs(request, prompt)).toContain("ses_1");
   });
 
   it("rejects an invalid review base before producing a prompt", async () => {
     const cwd = initGitRepo();
-    await expect(getJobDefinition("review").buildPrompt({ cwd, base: "missing-ref" }))
+    await expect(getJobDefinition("review").buildPrompt({ cwd, base: "missing-ref" }, ACTIVE_SIGNAL))
       .rejects.toThrow(/Git diff capture failed.*missing-ref/i);
+  });
+
+  it("cancels review diff capture through its explicit prompt signal", async () => {
+    const cwd = initGitRepo();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(getJobDefinition("review").buildPrompt({ cwd, base: "HEAD" }, controller.signal))
+      .rejects.toThrow();
   });
 
   it("describes an empty review diff without creating an attachment", async () => {
     const cwd = initGitRepo();
-    const prompt = await getJobDefinition("review").buildPrompt({ cwd, base: "HEAD" });
+    const prompt = await getJobDefinition("review").buildPrompt({ cwd, base: "HEAD" }, ACTIVE_SIGNAL);
     const args = getJobDefinition("review").buildMimoArgs({ cwd, base: "HEAD" }, prompt);
 
     expect(prompt.files).toEqual([]);
@@ -112,7 +121,10 @@ describe("job definition registry", () => {
     fs.writeFileSync(path.join(cwd, "app.ts"), `// 中文差异\n${"变更内容".repeat(3_000)}\n`, "utf-8");
     const expected = await captureGitDiff(cwd, "HEAD");
     const definition = getJobDefinition("review");
-    const prompt = await definition.buildPrompt({ cwd, base: "HEAD", model: "mimo-v2" });
+    const prompt = await definition.buildPrompt(
+      { cwd, base: "HEAD", model: "mimo-v2" },
+      ACTIVE_SIGNAL
+    );
     const args = definition.buildMimoArgs({ cwd, base: "HEAD", model: "mimo-v2" }, prompt);
 
     expect(prompt.files).toHaveLength(1);
@@ -134,7 +146,7 @@ describe("job definition registry", () => {
       model: "mimo-v2",
       timeoutMs: 42_000
     };
-    const prompt = await definition.buildPrompt(request);
+    const prompt = await definition.buildPrompt(request, ACTIVE_SIGNAL);
     const args = definition.buildMimoArgs(request, prompt);
 
     expect(prompt.files).toHaveLength(1);
@@ -150,7 +162,7 @@ describe("job definition registry", () => {
       file: "approved-plan.md",
       task: "execute the approved plan"
     };
-    const prompt = await definition.buildPrompt(request);
+    const prompt = await definition.buildPrompt(request, ACTIVE_SIGNAL);
     const args = definition.buildMimoArgs(request, prompt);
 
     expect(prompt.message).toContain("compose:execute -> compose:tdd -> compose:verify -> compose:review");
@@ -164,7 +176,7 @@ describe("job definition registry", () => {
     const bound = bindJobDefinition(job);
     job.request = { cwd, task: "", unexpected: true };
 
-    const prompt = await bound.buildPrompt();
+    const prompt = await bound.buildPrompt(ACTIVE_SIGNAL);
     expect(bound.kind).toBe("plan");
     expect(bound.buildMimoArgs(prompt)).toEqual(expect.arrayContaining(["--agent", "plan", "--model", "mimo-v2"]));
   });
