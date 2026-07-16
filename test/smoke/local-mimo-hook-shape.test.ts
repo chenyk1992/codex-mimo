@@ -10,10 +10,10 @@ const runSmoke = process.env.RUN_LOCAL_MIMO_HOOK_SMOKE === "1";
 const describeSmoke = runSmoke ? describe : describe.skip;
 
 function writeFullHookProject(root: string, markerPath: string): void {
-  const hookDir = path.join(root, ".mimocode", "hooks");
-  fs.mkdirSync(hookDir, { recursive: true });
+  const pluginDir = path.join(root, ".mimocode", "plugin");
+  fs.mkdirSync(pluginDir, { recursive: true });
   fs.writeFileSync(
-    path.join(hookDir, "capture.js"),
+    path.join(pluginDir, "capture.js"),
     `
 import fs from "node:fs/promises";
 
@@ -27,14 +27,16 @@ async function dump(stage, input) {
   }
 }
 
-export default {
-  "session.pre": async (input, output) => {
-    await dump("pre", { input, output });
-  },
-  "session.post": async (input) => {
-    await dump("post", input);
-  }
-};
+export default async function capturePlugin() {
+  return {
+    "session.pre": async (input, output) => {
+      await dump("pre", { input, output });
+    },
+    "session.post": async (input) => {
+      await dump("post", input);
+    }
+  };
+}
 `,
     "utf-8"
   );

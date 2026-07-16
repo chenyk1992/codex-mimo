@@ -1,262 +1,122 @@
 # Operations Guide
 
-## Enable The Bridge
+## Enable and Validate
 
-1. Install dependencies and build:
+Build before starting the plugin because `.mcp.json` points to `dist/codex/mcp-server.js`:
 
-```bash
+```powershell
 npm install
 npm run build
-```
-
-2. Verify MiMoCode is available:
-
-```bash
-node dist/cli/main.js healthcheck
-```
-
-If the package bin is linked or installed, this is equivalent:
-
-```bash
-codex-mimo healthcheck
-```
-
-3. Run full bridge diagnostics when installing, refreshing, or debugging missing tools:
-
-```bash
-codex-mimo doctor
-```
-
-`doctor` checks MiMoCode availability, plugin files, `.mcp.json`, and whether the packaged MCP server can list the expected `mimo_*` tools. It does not run automatically during normal CLI commands, and it cannot prove that the current Codex thread has injected those tools or that Codex is loading the same plugin directory you probed.
-
-4. Validate plugin metadata:
-
-```bash
 npm run validate:plugin
+codex-mimo doctor --cwd E:\project
 ```
 
-5. Confirm the plugin files are present:
-
-```text
-.codex-plugin/plugin.json
-.mcp.json
-skills/mimocode/SKILL.md
-dist/codex/mcp-server.js
-```
-
-The MCP server is discovered through `.mcp.json` and runs `node dist/codex/mcp-server.js`.
+The validator starts the built MCP server, calls `tools/list`, requires the canonical 13 tools, rejects removed work fields, and checks the packaged skill for repeated-wait guidance.
 
 ## Runtime Model
 
-The active implementation uses `mimo run --format json`:
+Every `plan`, `implement`, `review`, `fix-ci`, `resume`, and `compose` request follows the same path:
 
-- direct CLI and MCP tools use `src/mimo/mimo-runner.ts`;
-- foreground Compose uses `src/compose/runner.ts`;
-- background Compose uses `src/compose/job-worker.ts`, launched by `src/core/job-process.ts`;
-- reports are written by `src/compose/report.ts`;
-- job status and high-signal progress are stored under `.codex-mimo/jobs/`.
+1. Validate the request and resolve one notification target.
+2. Persist an authoritative `queued` job and immutable target.
+3. Start `codex-mimo job-worker --job-id <id>` and return a receipt.
+4. Transition to `running`, capture process identity, and execute `mimo run --format json`.
+5. Persist JSONL events and wait for the internal `session.post` callback.
+6. Capture Git evidence, run any verification, write reports, and classify the outcome.
+7. Atomically persist the new status, attention signal, and outbox delivery.
+8. Start `codex-mimo notify-worker`; the job worker does not wait for delivery.
 
-ACP is not part of the current runtime path. `doc/acp-message-flow.md` is reference material only.
+The eight statuses are `queued`, `running`, `needs_input`, `blocked`, `completed`, `failed`, `cancelled`, and `timeout`. Only `queued` and `running` are active. `needs_input` and `blocked` are paused results with no PID and may retain `sessionId`.
 
-## Dependency Checks
+## Codex Task Target
 
-If `node dist/cli/main.js healthcheck` or the MCP server fails with `ERR_MODULE_NOT_FOUND`, the plugin copy cannot resolve runtime dependencies. From the plugin project root, run:
+Codex Desktop injects `CODEX_THREAD_ID` into the plugin process for the current task. It is resolved once when the job is created. It is not a machine configuration setting.
 
-```bash
-npm install
-npm run build
-```
+Do not add `CODEX_THREAD_ID` to Windows system or user environment variables. A global value outlives its task and can misroute later completions. Use an explicit `notify: { type: "codex", threadId: "..." }` only when a caller must override the current task.
 
-For packaged plugin installs, verify the plugin cache contains runtime dependencies or a bundled build. A partial cache containing only `dist/` is not enough because generated JavaScript imports packages such as `execa`, `zod`, `minimatch`, and the MCP SDK.
+On delivery, the adapter performs `initialize`, `initialized`, `thread/resume`, waits for an idle thread, and accepts one `turn/start`. Busy or temporarily unavailable tasks retry in the notification worker. Missing or forbidden tasks are permanent delivery failures.
 
-## Plugin Validation Before Cache Sync
+## Webhook Contract
 
-Before syncing this repository into an installed Codex plugin cache, run:
-
-```bash
-npm run build
-npm run validate:plugin
-```
-
-`validate:plugin` checks `.codex-plugin/plugin.json`, `.mcp.json`, `skills/*/SKILL.md` frontmatter, and the built MCP entrypoint referenced by `.mcp.json`.
-
-## Compose Run Supervision
-
-Use `mimo_compose.timeoutMs` or CLI `--timeout-ms` when the caller has its own timeout. Set the bridge timeout lower than the outer timeout so `codex-mimo` can stop MiMoCode and write a failure report.
-
-Example:
-
-```bash
-codex-mimo compose --workflow plan --timeout-ms 110000 "Create a validation plan"
-```
-
-Foreground Compose writes reports under:
-
-```text
-.codex-mimo/reports/
-.codex-mimo/events/
-.codex-mimo/diffs/
-```
-
-If a foreground MCP call is likely to exceed the host's tool-call timeout, use `mimo_compose` with `background: true`.
-
-## Background Jobs
-
-Long Compose workflows can run as persisted jobs.
-
-Start a background job through MCP:
+Configure a webhook with an HTTP(S) URL and the name of a secret environment variable:
 
 ```json
 {
-  "tool": "mimo_compose",
-  "arguments": {
-    "cwd": "/path/to/repo",
-    "workflow": "dev",
-    "task": "Implement login throttling",
-    "background": true,
-    "wait": false,
-    "timeoutMs": 1800000
+  "notify": {
+    "type": "webhook",
+    "url": "https://receiver.example/jobs",
+    "secretEnv": "MIMO_NOTIFY_SECRET"
   }
 }
 ```
 
-The launch response includes `jobId`, `signals`, `wake`, and actions for `mimo_status`, `mimo_result`, and `mimo_cancel`.
+The request body is compact versioned JSON. Headers are:
 
-Job artifacts are stored under `.codex-mimo/jobs`:
+- `X-Codex-Mimo-Event-Id`: stable `jobId:signalCursor:targetKind` idempotency key
+- `X-Codex-Mimo-Signature`: lowercase hex HMAC-SHA256 of the exact request bytes
 
-```text
-state.json
-<jobId>.json
-<jobId>.log
-<jobId>.events.jsonl
-<jobId>.signals.jsonl
-```
+The receiver must deduplicate using the event ID. Only the variable name is persisted; the secret value is read immediately before delivery and never written below `.codex-mimo`. Missing/empty secrets and ordinary 4xx responses are permanent failures. Connection errors, 408, 429, and 5xx retry.
 
-Compose reports continue to be written under `.codex-mimo/reports`, `.codex-mimo/events`, and `.codex-mimo/diffs`.
+## Retry Isolation
 
-## Progress APIs
+Retries occur immediately after creation, then after 10 seconds, 1 minute, and 5 minutes; later attempts remain 5 minutes apart. Delivery stops after 30 minutes. A delivery lease prevents two workers from owning the same attempt, renews during slow calls, and is reclaimed after expiry.
 
-Use `mimo_wait` when Codex can keep one MCP call open. It polls inside the MCP server until new high-signal progress appears, the job becomes terminal, or `timeoutMs` expires:
+Notification state is auxiliary. Delivery failure records `failed`, attempts, and a sanitized last error in the outbox, but does not mutate job status. Use `mimo_status` or `mimo_result` to inspect both states.
 
-```json
-{
-  "tool": "mimo_wait",
-  "arguments": {
-    "cwd": "/path/to/repo",
-    "jobId": "compose-example",
-    "sinceCursor": 0,
-    "minLevel": "info",
-    "timeoutMs": 1800000
-  }
-}
-```
+## Controls
 
-Store the returned `nextCursor` and pass it as `sinceCursor` on the next call.
+- `mimo_status`: current job, phase, recent progress, and notification summary
+- `mimo_events`: cursor-based progress for explicit diagnosis
+- `mimo_wait`: one attention-event wait for an explicit diagnostic request
+- `mimo_result`: partial result for paused jobs or final result for terminal jobs
+- `mimo_cancel`: cancel queued/running work and terminate only its confirmed owned process
+- `mimo_jobs`: list recent authoritative records
 
-Use `mimo_events` for non-blocking incremental reads. It returns the same cursor-addressed signal shape without waiting.
+Normal Codex operation uses none of these until the callback turn; that turn calls `mimo_result`. Ordinary phase and milestone signals do not create a caller notification.
 
-Use `mimo_status` for a compact snapshot and recent log lines. Do not use it as a tight polling loop when `mimo_wait` or `mimo_events` is a better fit.
+## Parent-Job Continuation
 
-Use `mimo_result` after terminal signals such as `completed`, `failed`, `cancelled`, or `timeout`.
+Call `mimo_resume` with a `needs_input` or `blocked` parent `jobId` and the additional task text. The parent must have a saved `sessionId`. The launcher creates a new `resume` child job, copies the parent session internally, and inherits the parent target unless the request explicitly supplies another target. Parent and child records remain independently auditable.
 
-## Codex Heartbeat Operating Path
+## Recovery
 
-Use `mimo_wake` when Codex should not hold one long tool call open:
+Authoritative records live at `.codex-mimo/jobs/<jobId>.json`; `state.json` is only a cache and is rebuilt from records. Writes use temporary files plus rename. Pending transition metadata allows an interrupted signal/job/outbox sequence to finish without duplicating the attention event.
 
-```json
-{
-  "tool": "mimo_wake",
-  "arguments": {
-    "cwd": "/path/to/repo",
-    "jobId": "compose-example",
-    "sinceCursor": 0,
-    "minLevel": "info",
-    "timeoutMs": 1800000
-  }
-}
-```
+If a job worker restarts while a record says `running`, it verifies the PID and OS process identity. A confirmed inactive or terminated process becomes `failed` with restart evidence. Uncertain ownership becomes `blocked`; the worker does not kill or rerun an unverified process.
 
-For active jobs, `mimo_wake` returns a compact prompt and `heartbeat.arguments` draft. The heartbeat should call `mimo_wait` with those arguments, then call `mimo_result` only after an attention or terminal signal. If the wait times out and the job remains active, create another heartbeat from a fresh `mimo_wake`.
+The notification worker scans unfinished outbox entries. It reclaims expired `delivering` leases, preserves attempt generation ownership, and deduplicates each delivery by event ID.
 
-For terminal jobs, `mimo_wake` returns a `result.arguments` hint instead of `heartbeat.arguments`. Codex should call `mimo_result` directly and not create another heartbeat.
-
-## Hook Callback And Prompt Transport
-
-Each direct or Compose run creates a temporary MiMoCode config directory under:
+## Files
 
 ```text
-.codex-mimo/runtime-hooks/<invocationId>/
+.codex-mimo/
+  jobs/<jobId>.json
+  jobs/<jobId>.log
+  jobs/<jobId>.events.jsonl
+  jobs/<jobId>.signals.jsonl
+  jobs/notifications.jsonl
+  reports/
+  events/
+  diffs/
+  inputs/
+  runtime-hooks/
 ```
 
-The generated hook posts `session.post` back to a local `127.0.0.1` HTTP endpoint. The bridge records callback summaries and treats missing, error, or cancelled callbacks as failure signals.
-
-Prompts longer than 8 KB or containing non-ASCII are written as UTF-8 files under:
-
-```text
-.codex-mimo/inputs/
-```
-
-The MiMoCode message then references that file. This avoids command-line encoding issues for Chinese, Japanese, or other non-ASCII task descriptions.
-
-## Direct Tools Are Foreground-Only
-
-`mimo_plan`, `mimo_implement`, `mimo_review`, `mimo_fix_ci`, and `mimo_resume` run synchronously and do not accept `background` or `wait` fields. For long-running work, use `mimo_compose` with `background: true`.
-
-`mimo_implement` requires `allowWrite: true`; otherwise it rejects before invoking MiMoCode.
-
-## Resume Paths
-
-`mimo_result` includes resume hints when a job has a session ID:
-
-- `resumeHint` uses `mimo_resume_job` to create a follow-up job from a previous job.
-- `directResumeHint` uses `mimo_resume` with the saved session ID.
-
-`mimo_result` also saves finished job session metadata into `.codex-mimo/sessions.json`.
-
-List known direct sessions:
-
-```bash
-codex-mimo sessions
-```
-
-## Disable The Bridge
-
-### Remove The Plugin
-
-Remove the plugin through Codex plugin management, or delete the installed plugin directory.
-
-### Disable The MCP Server
-
-Rename or remove `.mcp.json` to prevent the MCP server from starting:
-
-```bash
-mv .mcp.json .mcp.json.disabled
-```
-
-## Rollback
-
-If the bridge causes problems:
-
-1. Stop the MCP server by disabling `.mcp.json`.
-2. Inspect `.codex-mimo/jobs/` for active job state.
-3. Inspect `.codex-mimo/reports/`, `.codex-mimo/events/`, and `.codex-mimo/diffs/` for the latest Compose run.
-4. Inspect `.codex-mimo/sessions.json` for saved sessions.
-5. Cancel active jobs through `mimo_cancel` when possible.
-
-There is no active `codex-mimo.config.json` loader in the current source tree, so deleting that file does not change runtime behavior unless a downstream wrapper has added its own config layer.
+The internal callback endpoint is temporary and authenticated. Missing, error, or cancelled `session.post` evidence affects execution success; it is separate from caller delivery.
 
 ## Troubleshooting
 
-| Problem | Action |
+| Symptom | Action |
 | --- | --- |
-| `mimo not found` | Install and authenticate the MiMoCode CLI, or set `CODEX_MIMO_COMMAND` / `MIMO_COMMAND`. |
-| `ERR_MODULE_NOT_FOUND` | Install runtime dependencies or use a bundled plugin build. |
-| MCP tools are not visible | Run `codex-mimo doctor` in the plugin directory Codex should load. If it passes there, restart Codex or start a new thread, and check for stale or different plugin cache directories. |
-| `mimo_implement requires allowWrite=true` | Pass `allowWrite: true` only when Codex is allowed to edit the workspace. |
-| Compose plan or review modified files | Treat it as a failed read-only workflow and inspect the report diff. |
-| Child process remains after timeout | Use `--timeout-ms` or `mimo_compose.timeoutMs` lower than the outer timeout; cancel active jobs with `mimo_cancel`. |
-| `terminationReason: host_abort` | The Codex/MCP host stopped waiting before MiMoCode completed. Re-run with `background: true`, then use `mimo_wait` or `mimo_wake`. |
-| `terminationReason: process_timeout` | `codex-mimo` reached its configured MiMoCode timeout. Increase `timeoutMs` or split the task. |
-| `callback_missing` or missing callback text | MiMoCode exited before the generated `session.post` hook called back. Inspect report paths and `.codex-mimo/runtime-hooks/`. |
-| `eventSummary.progress > 0` but no final message | MiMoCode was active but did not finish. Inspect `eventsJsonl` and resume if a session ID exists. |
-| Background job timed out, need to resume | Call `mimo_result`; use `resumeHint` or `directResumeHint` if a session ID is available. |
+| Work remains `queued` | Inspect the job log and worker spawn permissions; stale queued records become failed |
+| Restarted work is `blocked` | Read recovery evidence; process ownership could not be proved safely |
+| Job completed but notification failed | Inspect `notification.lastError`; job result remains valid |
+| Webhook gets duplicates | Deduplicate by `X-Codex-Mimo-Event-Id` |
+| Webhook signature mismatch | Compute HMAC over the exact raw body and verify the named environment secret |
+| Codex target is wrong | Remove any globally configured `CODEX_THREAD_ID`; let the current task inject it |
+| Need progress for diagnosis | Read `mimo_status` or `mimo_events`; use a single `mimo_wait` only when requested |
+| Job asks for information | Call `mimo_result`, collect the answer, then create a child with `mimo_resume` |
+
+## Disable or Roll Back
+
+Disable the MCP entry in the Codex plugin configuration or remove the installed plugin directory. Existing `.codex-mimo` records are ordinary workspace files and remain available for audit. Do not delete active job state until its owned processes have been checked.

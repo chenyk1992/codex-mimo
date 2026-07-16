@@ -4,7 +4,16 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
-function createPluginFixture(skillFrontmatter: string): string {
+const EXPECTED_TOOLS = [
+  "mimo_healthcheck", "mimo_plan", "mimo_implement", "mimo_review", "mimo_fix_ci",
+  "mimo_resume", "mimo_compose", "mimo_status", "mimo_events", "mimo_wait",
+  "mimo_result", "mimo_cancel", "mimo_jobs"
+] as const;
+
+function createPluginFixture(
+  skillFrontmatter: string,
+  options: { toolNames?: readonly string[]; oldWorkField?: string; skillBody?: string } = {}
+): string {
   const root = mkdtempSync(path.join(tmpdir(), "codex-mimo-plugin-"));
 
   mkdirSync(path.join(root, ".codex-plugin"), { recursive: true });
@@ -57,9 +66,34 @@ function createPluginFixture(skillFrontmatter: string): string {
 
   writeFileSync(
     path.join(root, "skills", "mimocode", "SKILL.md"),
-    `${skillFrontmatter}\n\n# MiMoCode\n\nUse MiMoCode as a specialist coding agent.\n`
+    `${skillFrontmatter}\n\n# MiMoCode\n\n${options.skillBody ?? "Use MiMoCode as a specialist coding agent."}\n`
   );
-  writeFileSync(path.join(root, "dist", "codex", "mcp-server.js"), "export {};\n");
+  const tools = (options.toolNames ?? EXPECTED_TOOLS).map((name) => ({
+    name,
+    inputSchema: {
+      type: "object",
+      properties: {
+        ...(name.startsWith("mimo_") && ["mimo_plan", "mimo_implement", "mimo_review", "mimo_fix_ci", "mimo_resume", "mimo_compose"].includes(name)
+          ? { cwd: { type: "string" }, ...(options.oldWorkField ? { [options.oldWorkField]: { type: "boolean" } } : {}) }
+          : {})
+      }
+    }
+  }));
+  writeFileSync(path.join(root, "dist", "codex", "mcp-server.js"), `
+import readline from "node:readline";
+const tools = ${JSON.stringify(tools)};
+const lines = readline.createInterface({ input: process.stdin });
+lines.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") {
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {
+      protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" }
+    } }) + "\\n");
+  } else if (request.method === "tools/list") {
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { tools } }) + "\\n");
+  }
+});
+`);
 
   return root;
 }
@@ -89,5 +123,39 @@ describe("lightweight plugin validator", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("skills/mimocode/SKILL.md frontmatter must define description");
+  });
+
+  it("rejects a built MCP tool list that contains a removed tool", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      toolNames: [...EXPECTED_TOOLS.slice(0, -1), "mimo_wake"]
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("exactly the 13 supported tools");
+    expect(result.stderr).toContain("mimo_wake");
+  });
+
+  it.each(["background", "wait"])("rejects the removed %s work-tool field", (field) => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      oldWorkField: field
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`must not expose removed field ${field}`);
+  });
+
+  it("rejects skill guidance that tells Codex to loop on mimo_wait", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      skillBody: "Loop and call mimo_wait frequently until the work finishes."
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("must not instruct Codex to poll or loop on mimo_wait");
   });
 });

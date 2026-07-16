@@ -41,8 +41,7 @@ export interface MimoHookCallbackSummary {
 
 export interface HookConfigPaths {
   configDir: string;
-  hookDir: string;
-  hooksDir: string;
+  pluginDir: string;
   hookFile: string;
 }
 
@@ -123,13 +122,13 @@ export function writeHookConfig(input: {
   token: string;
 }): HookConfigPaths {
   const configDir = path.join(input.cwd, ".codex-mimo", "runtime-hooks", input.invocationId);
-  const hooksDir = path.join(configDir, "hooks");
-  const hookFile = path.join(hooksDir, "codex-mimo-callback.js");
+  const pluginDir = path.join(configDir, "plugin");
+  const hookFile = path.join(pluginDir, "codex-mimo-callback.js");
 
-  fs.mkdirSync(hooksDir, { recursive: true });
+  fs.mkdirSync(pluginDir, { recursive: true });
   fs.writeFileSync(hookFile, buildHookSource(), "utf-8");
 
-  return { configDir, hookDir: hooksDir, hooksDir, hookFile };
+  return { configDir, pluginDir, hookFile };
 }
 
 function buildHookSource(): string {
@@ -142,8 +141,9 @@ function pick(input, ...keys) {
   return undefined;
 }
 
-export default {
-  "session.post": async (input = {}) => {
+export default async function codexMimoCallbackPlugin() {
+  return {
+    "session.post": async (input = {}) => {
     const endpoint = process.env.CODEX_MIMO_CALLBACK_ENDPOINT;
     const token = process.env.CODEX_MIMO_CALLBACK_TOKEN;
     const invocationId = process.env.CODEX_MIMO_INVOCATION_ID;
@@ -173,8 +173,9 @@ export default {
       },
       body: JSON.stringify(payload)
     });
-  }
-};
+    }
+  };
+}
 `;
 }
 

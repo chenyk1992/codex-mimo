@@ -110,7 +110,7 @@ describe("hook callback payload helpers", () => {
     expect(CALLBACK_HEADER).toBe("x-codex-mimo-callback-token");
   });
 
-  it("writes a MiMoCode file-hook object under a runtime config directory", () => {
+  it("writes a callable MiMoCode plugin under a runtime config directory", () => {
     const cwd = tempWorkspace();
     const paths = writeHookConfig({
       cwd,
@@ -120,16 +120,17 @@ describe("hook callback payload helpers", () => {
     });
 
     expect(paths.configDir).toBe(path.join(cwd, ".codex-mimo", "runtime-hooks", "implement-mk85jpc0-abc123"));
-    expect(paths.hookDir).toBe(path.join(paths.configDir, "hooks"));
-    expect(paths.hookFile).toBe(path.join(paths.hookDir, "codex-mimo-callback.js"));
+    expect(paths.pluginDir).toBe(path.join(paths.configDir, "plugin"));
+    expect(paths.hookFile).toBe(path.join(paths.pluginDir, "codex-mimo-callback.js"));
     expect(fs.existsSync(paths.hookFile)).toBe(true);
 
     const source = fs.readFileSync(paths.hookFile, "utf-8");
-    expect(source).toContain("export default {");
+    expect(source).toContain("export default async function codexMimoCallbackPlugin()");
+    expect(source).toContain("return {");
     expect(source).toContain("\"session.post\"");
     expect(source).toContain(CALLBACK_HEADER);
     expect(source).toContain("Array.isArray(input.trajectory)");
-    expect(source).not.toContain("export default async");
+    expect(source).not.toContain("export default {");
   });
 });
 

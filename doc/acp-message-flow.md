@@ -4,7 +4,7 @@ This document describes the ACP protocol shape that `codex-mimo` could use if a 
 
 ## Current Status
 
-The active implementation in this repository does not call `mimo acp`, and the current source tree does not contain `src/mimo/acp-*` files. Direct tools, foreground Compose, and background Compose call `mimo run --format json` and consume JSONL output plus `session.post` hook callbacks.
+The active implementation in this repository does not call `mimo acp`, and the current source tree does not contain `src/mimo/acp-*` files. All work kinds use the unified job worker, which calls `mimo run --format json` and consumes JSONL output plus `session.post` hook callbacks.
 
 Treat this ACP document as a protocol reference for a future or experimental ACP path, not as the currently exercised runtime path.
 
