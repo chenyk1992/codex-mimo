@@ -38,6 +38,13 @@ interface ResultMarker {
   summary: string;
 }
 
+interface AppServerAuditRecord {
+  timestamp: string;
+  pid: number;
+  method: "initialize" | "thread/resume" | "turn/start";
+  threadId?: string;
+}
+
 describeSmoke("local Codex notification", () => {
   it("observes a completed packaged job through the resumed Codex task", async () => {
     const threadId = process.env.CODEX_THREAD_ID?.trim();
@@ -47,6 +54,7 @@ describeSmoke("local Codex notification", () => {
     const mimoHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-codex-notify-home-"));
     const markerFile = path.join(workspace, "codex-notification-result.json");
     const auditFile = path.join(mimoHome, "mcp-tools.jsonl");
+    const appServerAuditFile = path.join(mimoHome, "app-server-rpc.jsonl");
     let transport: StdioClientTransport | undefined;
     let client: Client | undefined;
     let receipt: JobReceipt | undefined;
@@ -63,7 +71,8 @@ describeSmoke("local Codex notification", () => {
           ...server.env,
           CODEX_THREAD_ID: threadId,
           MIMOCODE_HOME: mimoHome,
-          CODEX_MIMO_TOOL_AUDIT_FILE: auditFile
+          CODEX_MIMO_TOOL_AUDIT_FILE: auditFile,
+          CODEX_MIMO_APP_SERVER_AUDIT_FILE: appServerAuditFile
         },
         stderr: "pipe"
       });
@@ -97,6 +106,15 @@ describeSmoke("local Codex notification", () => {
         .filter((record) => record.jobId === receipt.jobId);
       expect(callbackRecords.filter((record) => record.toolName === "mimo_result")).toHaveLength(1);
       expect(callbackRecords.filter((record) => record.toolName === "mimo_wait")).toHaveLength(0);
+
+      const appServerRecords = readAppServerAudit(appServerAuditFile);
+      expect(appServerRecords.filter((record) => record.method === "initialize")).toHaveLength(1);
+      expect(appServerRecords.filter((record) => record.method === "thread/resume")).toEqual([
+        expect.objectContaining({ threadId })
+      ]);
+      expect(appServerRecords.filter((record) => record.method === "turn/start")).toEqual([
+        expect.objectContaining({ threadId })
+      ]);
     } finally {
       if (client && receipt) await cancelIfActive(client, workspace, receipt.jobId);
       await client?.close().catch(() => undefined);
@@ -261,4 +279,42 @@ function isValidToolAuditRecord(value: unknown): value is Record<string, unknown
     Number.isInteger(record.pid) && (record.pid as number) > 0 &&
     typeof record.toolName === "string" &&
     (record.jobId === undefined || typeof record.jobId === "string");
+}
+
+function readAppServerAudit(file: string): AppServerAuditRecord[] {
+  if (!fs.existsSync(file)) throw new Error(`Packaged App Server RPC audit is missing: ${file}`);
+  const content = fs.readFileSync(file, "utf8");
+  if (content === "" || !content.endsWith("\n")) {
+    throw new Error(`Packaged App Server RPC audit is malformed: ${file}`);
+  }
+  return content.trim().split(/\r?\n/).map((line) => {
+    let record: unknown;
+    try {
+      record = JSON.parse(line) as unknown;
+    } catch {
+      throw new Error(`Packaged App Server RPC audit record is malformed: ${line}`);
+    }
+    if (!isValidAppServerAuditRecord(record)) {
+      throw new Error(`Packaged App Server RPC audit record is malformed: ${line}`);
+    }
+    return record;
+  });
+}
+
+function isValidAppServerAuditRecord(value: unknown): value is AppServerAuditRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(["timestamp", "pid", "method", "threadId"]);
+  const keys = Object.keys(record);
+  if (!keys.every((key) => allowed.has(key)) ||
+      typeof record.timestamp !== "string" || Number.isNaN(Date.parse(record.timestamp)) ||
+      !Number.isInteger(record.pid) || (record.pid as number) <= 0 ||
+      (record.method !== "initialize" &&
+        record.method !== "thread/resume" &&
+        record.method !== "turn/start")) {
+    return false;
+  }
+  return record.method === "initialize"
+    ? keys.length === 3 && record.threadId === undefined
+    : keys.length === 4 && typeof record.threadId === "string" && record.threadId.trim() !== "";
 }

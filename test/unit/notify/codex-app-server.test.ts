@@ -1,4 +1,7 @@
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -126,10 +129,19 @@ async function initializeClient(process: FakeAppServerProcess) {
   return client;
 }
 
+function readRpcAudit(file: string): Array<Record<string, unknown>> {
+  return fs.readFileSync(file, "utf8")
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
 describe("Codex App Server client", () => {
   let process: FakeAppServerProcess;
+  let auditRoot: string;
 
   beforeEach(() => {
+    auditRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-app-server-audit-"));
     process = new FakeAppServerProcess();
     spawnMock.mockReset();
     spawnMock.mockReturnValue(process);
@@ -137,6 +149,8 @@ describe("Codex App Server client", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
+    fs.rmSync(auditRoot, { recursive: true, force: true });
   });
 
   it("spawns the stdio App Server hidden with piped streams and a UTF-8 environment", async () => {
@@ -156,6 +170,90 @@ describe("Codex App Server client", () => {
     );
     expect(process.stderr.readableFlowing).toBe(true);
     await client.close();
+  });
+
+  it("writes no RPC audit when the opt-in path is absent or blank", async () => {
+    delete globalThis.process.env.CODEX_MIMO_APP_SERVER_AUDIT_FILE;
+    const absent = await initializeClient(process);
+    await absent.close();
+
+    process = new FakeAppServerProcess();
+    spawnMock.mockReturnValue(process);
+    vi.stubEnv("CODEX_MIMO_APP_SERVER_AUDIT_FILE", "   ");
+    const blank = await initializeClient(process);
+    await blank.close();
+
+    expect(fs.readdirSync(auditRoot)).toEqual([]);
+  });
+
+  it("audits only allowlisted RPC metadata and never request payloads", async () => {
+    const auditFile = path.join(auditRoot, "rpc.jsonl");
+    vi.stubEnv("CODEX_MIMO_APP_SERVER_AUDIT_FILE", auditFile);
+    const client = await initializeClient(process);
+
+    const started = client.startTurn(
+      "thread-private",
+      "private prompt input reason job task payload secret"
+    );
+    const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
+    respond(process, { id, result: turnStartResult() });
+    await started;
+    await client.close();
+
+    const records = readRpcAudit(auditFile);
+    expect(records).toHaveLength(2);
+    expect(Object.keys(records[0]).sort()).toEqual(["method", "pid", "timestamp"]);
+    expect(Object.keys(records[1]).sort()).toEqual(["method", "pid", "threadId", "timestamp"]);
+    expect(records[1]).toMatchObject({
+      pid: globalThis.process.pid,
+      method: "turn/start",
+      threadId: "thread-private"
+    });
+    const raw = fs.readFileSync(auditFile, "utf8");
+    for (const sensitive of ["private prompt", "input", "reason", "job", "task", "payload", "secret"]) {
+      expect(raw).not.toContain(sensitive);
+    }
+  });
+
+  it("keeps App Server delivery behavior unchanged when the RPC audit write fails", async () => {
+    vi.stubEnv("CODEX_MIMO_APP_SERVER_AUDIT_FILE", auditRoot);
+    const client = await initializeClient(process);
+
+    const resume = client.resumeThread("thread-1");
+    const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
+    respond(process, { id, result: threadResumeResult("thread-1", { type: "idle" }) });
+
+    await expect(resume).resolves.toEqual({ exists: true, busy: false });
+    await client.close();
+  });
+
+  it("records exactly one resume and start request for their validated thread", async () => {
+    const auditFile = path.join(auditRoot, "rpc.jsonl");
+    vi.stubEnv("CODEX_MIMO_APP_SERVER_AUDIT_FILE", auditFile);
+    const client = await initializeClient(process);
+
+    const resume = client.resumeThread("thread-injected");
+    const [{ id: resumeId }] = messagesFrom(process) as Array<{ id: number }>;
+    respond(process, {
+      id: resumeId,
+      result: threadResumeResult("thread-injected", { type: "idle" })
+    });
+    await resume;
+
+    const start = client.startTurn("thread-injected", "continue");
+    const [{ id: startId }] = messagesFrom(process) as Array<{ id: number }>;
+    respond(process, { id: startId, result: turnStartResult() });
+    await start;
+    await client.close();
+
+    const records = readRpcAudit(auditFile);
+    expect(records.filter((record) => record.method === "initialize")).toHaveLength(1);
+    expect(records.filter((record) => record.method === "thread/resume")).toEqual([
+      expect.objectContaining({ threadId: "thread-injected" })
+    ]);
+    expect(records.filter((record) => record.method === "turn/start")).toEqual([
+      expect.objectContaining({ threadId: "thread-injected" })
+    ]);
   });
 
   it("times out a silent JSON-RPC request and releases the child resources", async () => {

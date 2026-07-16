@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import fs from "node:fs";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { withUtf8ProcessEnv } from "../core/encoding.js";
 
@@ -207,6 +208,7 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
       timer = this.scheduleRequestTimeout(() => this.failTransport(), this.requestTimeoutMs);
       this.pending.set(id, { method, resolve, reject, cleanup });
       try {
+        appendRpcAudit(method, params);
         this.write({ method, id, params });
       } catch {
         this.failTransport();
@@ -371,6 +373,33 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
       } catch {}
     }
   }
+}
+
+function appendRpcAudit(
+  method: string,
+  params: unknown,
+  env: NodeJS.ProcessEnv = process.env
+): void {
+  const file = env.CODEX_MIMO_APP_SERVER_AUDIT_FILE?.trim();
+  if (!file) return;
+
+  const threadId = readAuditableThreadId(method, params);
+  const record = {
+    timestamp: new Date().toISOString(),
+    pid: process.pid,
+    method,
+    ...(threadId === undefined ? {} : { threadId })
+  };
+  try {
+    fs.appendFileSync(file, `${JSON.stringify(record)}\n`, { encoding: "utf8", flag: "a" });
+  } catch {}
+}
+
+function readAuditableThreadId(method: string, params: unknown): string | undefined {
+  if (method !== "thread/resume" && method !== "turn/start") return undefined;
+  if (!isRecord(params)) return undefined;
+  const threadId = params.threadId;
+  return typeof threadId === "string" && threadId.trim() !== "" ? threadId : undefined;
 }
 
 function readThreadStatus(result: unknown): "active" | "idle" | "notLoaded" | "systemError" {
