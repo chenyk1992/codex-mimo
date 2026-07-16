@@ -46,6 +46,7 @@ describeSmoke("local Codex notification", () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-codex-notify-smoke-"));
     const mimoHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-codex-notify-home-"));
     const markerFile = path.join(workspace, "codex-notification-result.json");
+    const auditFile = path.join(mimoHome, "mcp-tools.jsonl");
     let transport: StdioClientTransport | undefined;
     let client: Client | undefined;
     let receipt: JobReceipt | undefined;
@@ -61,7 +62,8 @@ describeSmoke("local Codex notification", () => {
           ...stringEnvironment(process.env),
           ...server.env,
           CODEX_THREAD_ID: threadId,
-          MIMOCODE_HOME: mimoHome
+          MIMOCODE_HOME: mimoHome,
+          CODEX_MIMO_TOOL_AUDIT_FILE: auditFile
         },
         stderr: "pipe"
       });
@@ -90,6 +92,11 @@ describeSmoke("local Codex notification", () => {
         resultType: "final"
       });
       expect(marker.summary.trim()).not.toBe("");
+
+      const callbackRecords = readToolAudit(auditFile)
+        .filter((record) => record.jobId === receipt.jobId);
+      expect(callbackRecords.filter((record) => record.toolName === "mimo_result")).toHaveLength(1);
+      expect(callbackRecords.filter((record) => record.toolName === "mimo_wait")).toHaveLength(0);
     } finally {
       if (client && receipt) await cancelIfActive(client, workspace, receipt.jobId);
       await client?.close().catch(() => undefined);
@@ -227,4 +234,31 @@ function removeTemporaryDirectory(directory: string): void {
     maxRetries: 50,
     retryDelay: 100
   });
+}
+
+function readToolAudit(file: string): Array<Record<string, unknown>> {
+  if (!fs.existsSync(file)) throw new Error(`Packaged MCP tool audit is missing: ${file}`);
+  const content = fs.readFileSync(file, "utf8");
+  if (!content.endsWith("\n")) throw new Error(`Packaged MCP tool audit is malformed: ${file}`);
+  return content.trim().split(/\r?\n/).map((line) => {
+    const record = JSON.parse(line) as unknown;
+    if (!isValidToolAuditRecord(record)) {
+      throw new Error(`Packaged MCP tool audit record is malformed: ${line}`);
+    }
+    return record;
+  });
+}
+
+function isValidToolAuditRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(["timestamp", "pid", "toolName", "jobId"]);
+  const keys = Object.keys(record);
+  return keys.every((key) => allowed.has(key)) &&
+    keys.length === (record.jobId === undefined ? 3 : 4) &&
+    typeof record.timestamp === "string" &&
+    !Number.isNaN(Date.parse(record.timestamp)) &&
+    Number.isInteger(record.pid) && (record.pid as number) > 0 &&
+    typeof record.toolName === "string" &&
+    (record.jobId === undefined || typeof record.jobId === "string");
 }

@@ -30,6 +30,7 @@ import {
   ResumeInput,
   ReviewInput
 } from "./tool-schemas.js";
+import { appendMcpToolAudit } from "./tool-audit.js";
 export { MIMO_TOOL_NAMES } from "./tool-names.js";
 
 function textResult(result: unknown) {
@@ -73,46 +74,50 @@ const DEFAULT_HANDLERS: McpToolHandlers = {
 export function createMcpServer(overrides: Partial<McpToolHandlers> = {}): McpServer {
   const server = new McpServer({ name: "codex-mimocode", version: "0.1.0" });
   const handlers = { ...DEFAULT_HANDLERS, ...overrides };
+  const handle = (toolName: string, handler: McpToolHandler) => async (args: unknown) => {
+    appendMcpToolAudit(toolName, args);
+    return textResult(await handler(args));
+  };
 
   server.registerTool("mimo_healthcheck", {
     description: "Check MiMoCode installation and auth state", inputSchema: HealthcheckInput
-  }, async (args) => textResult(await handlers.mimoHealthcheck(args)));
+  }, handle("mimo_healthcheck", handlers.mimoHealthcheck));
   server.registerTool("mimo_plan", {
     description: "Create an implementation plan in a background job", inputSchema: PlanInput
-  }, async (args) => textResult(await handlers.mimoPlan(args)));
+  }, handle("mimo_plan", handlers.mimoPlan));
   server.registerTool("mimo_implement", {
     description: "Implement code changes in a background job", inputSchema: ImplementInput
-  }, async (args) => textResult(await handlers.mimoImplement(args)));
+  }, handle("mimo_implement", handlers.mimoImplement));
   server.registerTool("mimo_review", {
     description: "Review the current diff in a background job", inputSchema: ReviewInput
-  }, async (args) => textResult(await handlers.mimoReview(args)));
+  }, handle("mimo_review", handlers.mimoReview));
   server.registerTool("mimo_fix_ci", {
     description: "Fix CI failures in a background job", inputSchema: FixCiInput
-  }, async (args) => textResult(await handlers.mimoFixCi(args)));
+  }, handle("mimo_fix_ci", handlers.mimoFixCi));
   server.registerTool("mimo_resume", {
     description: "Resume a paused job through its parent job ID", inputSchema: ResumeInput
-  }, async (args) => textResult(await handlers.mimoResume(args)));
+  }, handle("mimo_resume", handlers.mimoResume));
   server.registerTool("mimo_compose", {
     description: "Run a Compose workflow in a background job", inputSchema: ComposeInput
-  }, async (args) => textResult(await handlers.mimoCompose(args)));
+  }, handle("mimo_compose", handlers.mimoCompose));
   server.registerTool("mimo_status", {
     description: "Show compact status for an active or recent job", inputSchema: JobStatusInput
-  }, async (args) => textResult(await handlers.mimoStatus(args)));
+  }, handle("mimo_status", handlers.mimoStatus));
   server.registerTool("mimo_events", {
     description: "Return incremental compact job signals", inputSchema: JobEventsInput
-  }, async (args) => textResult(await handlers.mimoEvents(args)));
+  }, handle("mimo_events", handlers.mimoEvents));
   server.registerTool("mimo_wait", {
     description: "Wait for a job event that requires caller attention", inputSchema: JobWaitInput
-  }, async (args) => textResult(await handlers.mimoWait(args)));
+  }, handle("mimo_wait", handlers.mimoWait));
   server.registerTool("mimo_result", {
     description: "Return a compact partial or final job result", inputSchema: JobResultInput
-  }, async (args) => textResult(await handlers.mimoResult(args)));
+  }, handle("mimo_result", handlers.mimoResult));
   server.registerTool("mimo_cancel", {
     description: "Cancel a queued or running job", inputSchema: JobCancelInput
-  }, async (args) => textResult(await handlers.mimoCancel(args)));
+  }, handle("mimo_cancel", handlers.mimoCancel));
   server.registerTool("mimo_jobs", {
     description: "List recent compact job statuses", inputSchema: JobListInput
-  }, async (args) => textResult(await handlers.mimoJobs(args)));
+  }, handle("mimo_jobs", handlers.mimoJobs));
 
   return server;
 }
