@@ -243,7 +243,9 @@ function startLeaseHeartbeat(
       leaseMs
     )).then(
       () => undefined,
-      () => { lost = true; }
+      (error: unknown) => {
+        if (error instanceof StaleDeliveryGenerationError) lost = true;
+      }
     );
     inFlight = current;
     await current;

@@ -15,7 +15,11 @@ import {
   readDeliveries,
   renewDeliveryLease
 } from "../../../src/notify/outbox.js";
-import type { DeliveryAttemptResult, NotificationDelivery } from "../../../src/notify/types.js";
+import {
+  StaleDeliveryGenerationError,
+  type DeliveryAttemptResult,
+  type NotificationDelivery
+} from "../../../src/notify/types.js";
 
 const roots: string[] = [];
 const createdAt = "2026-07-16T00:00:00.000Z";
@@ -351,6 +355,127 @@ describe("notification dispatcher", () => {
     });
     expect(fs.readFileSync(job.notificationOutboxFile, "utf8"))
       .not.toContain("actual-super-secret-value");
+    expect(timers.timers.every((timer) => !timer.active)).toBe(true);
+  });
+
+  it("settles a delivered adapter result after an ordinary lease-renewal failure", async () => {
+    const cwd = makeCwd();
+    const { job } = await makeDelivery(cwd);
+    const adapter = deferred<DeliveryAttemptResult>();
+    const timers = manualLeaseTimers();
+    const renewDeliveryLease = vi.fn(async () => {
+      throw new Error("disk failed with actual-super-secret-value");
+    });
+
+    const dispatch = dispatchNextDelivery(cwd, {
+      now: () => new Date(createdAt),
+      deliver: () => adapter.promise,
+      renewDeliveryLease,
+      scheduleLeaseRenewal: timers.scheduleLeaseRenewal,
+      cancelLeaseRenewal: timers.cancelLeaseRenewal
+    });
+    await vi.waitFor(() => expect(timers.scheduleLeaseRenewal).toHaveBeenCalledOnce());
+    await timers.fireNext();
+    adapter.resolve({ outcome: "delivered" });
+
+    await expect(dispatch).resolves.toMatchObject({ outcome: "settled" });
+    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+      status: "delivered",
+      attempts: 1,
+      deliveredAt: createdAt
+    });
+    expect(fs.readFileSync(job.notificationOutboxFile, "utf8"))
+      .not.toContain("actual-super-secret-value");
+    expect(timers.timers.every((timer) => !timer.active)).toBe(true);
+  });
+
+  it("reschedules a retry from fresh settlement time after an ordinary lease-renewal failure", async () => {
+    const cwd = makeCwd();
+    const { job } = await makeDelivery(cwd);
+    const adapter = deferred<DeliveryAttemptResult>();
+    const timers = manualLeaseTimers();
+    let nowMs = Date.parse(createdAt);
+
+    const dispatch = dispatchNextDelivery(cwd, {
+      now: () => new Date(nowMs),
+      deliver: () => adapter.promise,
+      renewDeliveryLease: async () => {
+        throw new Error("temporary lock failure");
+      },
+      scheduleLeaseRenewal: timers.scheduleLeaseRenewal,
+      cancelLeaseRenewal: timers.cancelLeaseRenewal
+    });
+    await vi.waitFor(() => expect(timers.scheduleLeaseRenewal).toHaveBeenCalledOnce());
+    nowMs += 5_000;
+    await timers.fireNext();
+    nowMs += 2_000;
+    adapter.resolve({ outcome: "retry", error: "offline" });
+
+    await expect(dispatch).resolves.toMatchObject({ outcome: "settled" });
+    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+      status: "pending",
+      attempts: 1,
+      nextAttemptAt: "2026-07-16T00:00:17.000Z",
+      lastError: "offline"
+    });
+    expect(timers.timers.every((timer) => !timer.active)).toBe(true);
+  });
+
+  it("returns stale when settlement finds a newer generation after an ordinary renewal failure", async () => {
+    const cwd = makeCwd();
+    const { job } = await makeDelivery(cwd);
+    const adapter = deferred<DeliveryAttemptResult>();
+    const timers = manualLeaseTimers();
+    let nowMs = Date.parse(createdAt);
+
+    const dispatch = dispatchNextDelivery(cwd, {
+      now: () => new Date(nowMs),
+      leaseMs: 30_000,
+      deliver: () => adapter.promise,
+      renewDeliveryLease: async () => {
+        throw new Error("temporary parse failure");
+      },
+      scheduleLeaseRenewal: timers.scheduleLeaseRenewal,
+      cancelLeaseRenewal: timers.cancelLeaseRenewal
+    });
+    await vi.waitFor(() => expect(timers.scheduleLeaseRenewal).toHaveBeenCalledOnce());
+    await timers.fireNext();
+    nowMs += 31_000;
+    await claimDueDelivery(job.notificationOutboxFile, new Date(nowMs), 30_000);
+    adapter.resolve({ outcome: "delivered" });
+
+    await expect(dispatch).resolves.toMatchObject({ outcome: "stale" });
+    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+      status: "delivering",
+      attempts: 2
+    });
+    expect(timers.timers.every((timer) => !timer.active)).toBe(true);
+  });
+
+  it("does not settle an old generation after an explicit stale renewal rejection", async () => {
+    const cwd = makeCwd();
+    const { job } = await makeDelivery(cwd);
+    const adapter = deferred<DeliveryAttemptResult>();
+    const timers = manualLeaseTimers();
+
+    const dispatch = dispatchNextDelivery(cwd, {
+      now: () => new Date(createdAt),
+      deliver: () => adapter.promise,
+      renewDeliveryLease: async () => {
+        throw new StaleDeliveryGenerationError("superseded");
+      },
+      scheduleLeaseRenewal: timers.scheduleLeaseRenewal,
+      cancelLeaseRenewal: timers.cancelLeaseRenewal
+    });
+    await vi.waitFor(() => expect(timers.scheduleLeaseRenewal).toHaveBeenCalledOnce());
+    await timers.fireNext();
+    adapter.resolve({ outcome: "delivered" });
+
+    await expect(dispatch).resolves.toMatchObject({ outcome: "stale" });
+    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+      status: "delivering",
+      attempts: 1
+    });
     expect(timers.timers.every((timer) => !timer.active)).toBe(true);
   });
 
