@@ -42,7 +42,9 @@ describe("job stale detection", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd);
     const job = store.create({ kind: "compose", workflow: "dev", task: "Running task", request: {} });
-    updateJob(cwd, job.id, { status: "running", phase: "editing", pid: 42 });
+    updateJob(cwd, job.id, {
+      status: "running", phase: "editing", pid: 42, processIdentity: "start-42"
+    });
 
     const failed = failStaleJobs(cwd, { staleThresholdMs: 0 });
 

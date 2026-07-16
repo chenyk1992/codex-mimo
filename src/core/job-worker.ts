@@ -151,21 +151,39 @@ async function runOwnedJobWorker(
     assertJobActive(cwd, jobId, executionGuard.signal);
 
     stage = "prompt";
-    const prompt = await definition.buildPrompt();
+    const prompt = await awaitWithAbort(definition.buildPrompt(), executionGuard.signal);
     assertJobActive(cwd, jobId, executionGuard.signal);
     const mimoArgs = definition.buildMimoArgs(prompt);
     const captureStatus = deps.captureStatus ?? captureGitStatus;
     const captureHead = deps.captureHead ?? captureGitHead;
-    const gitStatusBefore = withoutRuntimeStatus(await captureStatus(cwd));
+    const gitStatusBefore = withoutRuntimeStatus(
+      await awaitWithAbort(captureStatus(cwd), executionGuard.signal)
+    );
     assertJobActive(cwd, jobId, executionGuard.signal);
-    const gitHeadBefore = await captureHead(cwd);
+    const gitHeadBefore = await awaitWithAbort(captureHead(cwd), executionGuard.signal);
     assertJobActive(cwd, jobId, executionGuard.signal);
 
     stage = "hook";
-    hook = await (deps.createHookCallbackController ?? createHookCallbackController)({
-      cwd,
-      kind: initial.kind
-    });
+    hook = await awaitWithAbort(
+      (deps.createHookCallbackController ?? createHookCallbackController)({
+        cwd,
+        kind: initial.kind
+      }),
+      executionGuard.signal,
+      {
+        onAbandonedResolve: async (lateHook) => {
+          try {
+            await lateHook.close();
+          } catch (error) {
+            bestEffortJobLog(
+              cwd,
+              jobId,
+              `Failed to close late MiMoCode callback controller: ${errorMessage(error)}`
+            );
+          }
+        }
+      }
+    );
     assertJobActive(cwd, jobId, executionGuard.signal);
 
     const events: NormalizedMimoEvent[] = [];
@@ -183,30 +201,39 @@ async function runOwnedJobWorker(
     stage = "run";
     let run: StreamingRunResult;
     try {
-      run = await (deps.runMimoStreaming ?? runMimoCliStreaming)(cwd, mimoArgs, {
-        timeoutMs: readTimeout(initial.request),
-        env: hook.env,
-        signal: executionGuard.signal,
-        onStart: async (pid) => {
-          const captured = (deps.captureProcessIdentity ?? captureProcessIdentity)(pid);
-          if (captured.status !== "running") {
-            throw new Error(`MiMoCode process identity unavailable: ${captured.evidence}`);
-          }
-          const updated = await (deps.updateRunningJobProcess ?? updateRunningJobProcess)(
-            cwd,
-            jobId,
-            pid,
-            captured.identity
-          );
-          if (updated.status !== "running") executionGuard!.abort(updated.status);
-        },
-        onLine: (line) => queueEventWrite(async () =>
-          (deps.appendRawAndNormalizedEvent ?? appendRawAndNormalizedEvent)(cwd, jobId, line))
-      });
+      run = await awaitWithAbort(
+        (deps.runMimoStreaming ?? runMimoCliStreaming)(cwd, mimoArgs, {
+          timeoutMs: readTimeout(initial.request),
+          env: hook.env,
+          signal: executionGuard.signal,
+          onStart: async (pid) => {
+            const captured = (deps.captureProcessIdentity ?? captureProcessIdentity)(pid);
+            if (captured.status !== "running") {
+              throw new Error(`MiMoCode process identity unavailable: ${captured.evidence}`);
+            }
+            const updated = await awaitWithAbort(
+              (deps.updateRunningJobProcess ?? updateRunningJobProcess)(
+                cwd,
+                jobId,
+                pid,
+                captured.identity
+              ),
+              executionGuard!.signal
+            );
+            if (updated.status !== "running") executionGuard!.abort(updated.status);
+          },
+          onLine: (line) => queueEventWrite(async () =>
+            (deps.appendRawAndNormalizedEvent ?? appendRawAndNormalizedEvent)(cwd, jobId, line))
+        }),
+        executionGuard.signal
+      );
     } finally {
-      await (deps.updateRunningJobProcess ?? updateRunningJobProcess)(cwd, jobId, null, null);
+      await awaitWithAbort(
+        (deps.updateRunningJobProcess ?? updateRunningJobProcess)(cwd, jobId, null, null),
+        executionGuard.signal
+      );
     }
-    await eventWrites;
+    await awaitWithAbort(eventWrites, executionGuard.signal);
     if (eventWriteError) throw eventWriteError;
 
     assertJobActive(cwd, jobId, executionGuard.signal);
@@ -216,18 +243,35 @@ async function runOwnedJobWorker(
       hook.invocationId,
       await waitForExecutionCallback(hook, executionGuard.signal)
     );
+    const completedHook = hook;
+    hook = undefined;
+    try {
+      await awaitWithAbort(completedHook.close(), executionGuard.signal);
+    } catch (error) {
+      executionGuard.signal.throwIfAborted();
+      bestEffortJobLog(
+        cwd,
+        jobId,
+        `Failed to close MiMoCode callback controller: ${errorMessage(error)}`
+      );
+    }
     assertJobActive(cwd, jobId, executionGuard.signal);
 
     stage = "finalize";
     const captureDiff = deps.captureDiff ?? captureGitDiff;
     const captureCommitChanges = deps.captureCommitChanges ?? captureGitCommitChanges;
-    const gitStatusAfter = withoutRuntimeStatus(await captureStatus(cwd));
+    const gitStatusAfter = withoutRuntimeStatus(
+      await awaitWithAbort(captureStatus(cwd), executionGuard.signal)
+    );
     assertJobActive(cwd, jobId, executionGuard.signal);
-    const gitHeadAfter = await captureHead(cwd);
+    const gitHeadAfter = await awaitWithAbort(captureHead(cwd), executionGuard.signal);
     assertJobActive(cwd, jobId, executionGuard.signal);
-    const capturedDiff = await captureDiff(cwd);
+    const capturedDiff = await awaitWithAbort(captureDiff(cwd), executionGuard.signal);
     assertJobActive(cwd, jobId, executionGuard.signal);
-    const capturedCommitChanges = await captureCommitChanges(cwd, gitHeadBefore, gitHeadAfter);
+    const capturedCommitChanges = await awaitWithAbort(
+      captureCommitChanges(cwd, gitHeadBefore, gitHeadAfter),
+      executionGuard.signal
+    );
     assertJobActive(cwd, jobId, executionGuard.signal);
     const diff = withoutRuntimeDiff(capturedDiff);
     const commitChanges = withoutRuntimeCommitChanges(capturedCommitChanges);
@@ -245,26 +289,40 @@ async function runOwnedJobWorker(
       commitChanges,
       signal: executionGuard.signal
     };
-    const outcome = await definition.finalize(context);
+    const outcome = await awaitWithAbort(definition.finalize(context), executionGuard.signal);
 
     assertJobActive(cwd, jobId, executionGuard.signal);
+    executionGuard.stop();
     const result = await transition(cwd, jobId, outcome);
     bestEffortLog(result.job.logFile, outcome.summary);
     if (result.deliveryCreated) startNotificationWorker(cwd, result.job, deps);
   } catch (error) {
-    await eventWrites;
+    if (executionGuard) {
+      try {
+        await awaitWithAbort(eventWrites, executionGuard.signal);
+      } catch {
+        // Cancellation abandons auxiliary event persistence without holding worker ownership.
+      }
+    } else {
+      await eventWrites;
+    }
     await failWorker(cwd, jobId, stage, error, deps);
   } finally {
     executionGuard?.stop();
     if (hook) {
       try {
-        await hook.close();
-      } catch (error) {
-        bestEffortJobLog(
-          cwd,
-          jobId,
-          `Failed to close MiMoCode callback controller: ${errorMessage(error)}`
+        await awaitWithAbort(
+          hook.close(),
+          executionGuard?.signal ?? new AbortController().signal
         );
+      } catch (error) {
+        if (!executionGuard?.signal.aborted) {
+          bestEffortJobLog(
+            cwd,
+            jobId,
+            `Failed to close MiMoCode callback controller: ${errorMessage(error)}`
+          );
+        }
       }
     }
   }
@@ -274,16 +332,38 @@ async function waitForExecutionCallback(
   hook: HookCallbackController,
   signal: AbortSignal
 ): Promise<Awaited<ReturnType<HookCallbackController["waitForCallback"]>>> {
-  signal.throwIfAborted();
+  return awaitWithAbort(hook.waitForCallback(), signal);
+}
+
+interface AbortAwareAwaitOptions<T> {
+  onAbandonedResolve?: (value: T) => Promise<void> | void;
+}
+
+async function awaitWithAbort<T>(
+  operation: PromiseLike<T> | T,
+  signal: AbortSignal,
+  options: AbortAwareAwaitOptions<T> = {}
+): Promise<T> {
+  let abandoned = signal.aborted;
+  const observed = Promise.resolve(operation).then((value) => {
+    if (abandoned && options.onAbandonedResolve) {
+      void Promise.resolve()
+        .then(() => options.onAbandonedResolve!(value))
+        .catch(() => undefined);
+    }
+    return value;
+  });
   let rejectAbort!: (reason: unknown) => void;
   const aborted = new Promise<never>((_resolve, reject) => {
     rejectAbort = reject;
   });
   const onAbort = () => rejectAbort(signal.reason ?? new Error("Job execution aborted."));
   signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) onAbort();
   try {
-    return await Promise.race([hook.waitForCallback(), aborted]);
+    return await Promise.race([observed, aborted]);
   } finally {
+    abandoned = signal.aborted;
     signal.removeEventListener("abort", onAbort);
   }
 }

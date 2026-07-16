@@ -19,7 +19,7 @@ describe("job runtime lifecycle", () => {
       request: { workflow: "dev" }
     });
 
-    startRuntimeJob(cwd, job.id, { pid: 321 });
+    startRuntimeJob(cwd, job.id, { pid: 321, processIdentity: "start-321" });
     appendRuntimeEvent(cwd, job.id, "{\"type\":\"message\",\"text\":\"Inspecting files\"}");
     appendRuntimeEvent(cwd, job.id, "{\"type\":\"message\",\"text\":\"Still inspecting\"}");
 

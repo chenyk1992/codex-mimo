@@ -76,7 +76,7 @@ describe("job lifecycle", () => {
     const store = createJobStore(cwd);
     const job = store.create({ kind: "compose", task: "Test", request: {} });
 
-    const started = startRuntimeJob(cwd, job.id, { pid: 123 });
+    const started = startRuntimeJob(cwd, job.id, { pid: 123, processIdentity: "start-123" });
 
     expect(started.status).toBe("running");
     expect(started.phase).toBe("starting");

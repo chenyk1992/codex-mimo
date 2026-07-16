@@ -41,6 +41,7 @@ describe("compose job worker", () => {
     let finishRun!: () => void;
     const worker = runComposeJobWorker(cwd, job.id, {
       ...completedWorkerHook,
+      captureProcessIdentity: () => ({ status: "running", identity: "start-999", evidence: "test" }),
       runMimoStreaming: async (_cwd, _args, options) => {
         options.onStart?.(999);
         await new Promise<void>((resolve) => {
@@ -58,7 +59,8 @@ describe("compose job worker", () => {
     await new Promise((resolve) => setImmediate(resolve));
     expect(readJob(cwd, job.id)).toMatchObject({
       status: "running",
-      pid: 999
+      pid: 999,
+      processIdentity: "start-999"
     });
 
     finishRun();

@@ -22,7 +22,9 @@ describe("mimo_wait", () => {
   it("returns immediately when signals are already available", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
-    updateJob(cwd, job.id, { status: "running", phase: "investigating", pid: 100 });
+    updateJob(cwd, job.id, {
+      status: "running", phase: "investigating", pid: 100, processIdentity: "start-100"
+    });
     appendJobSignal(job.signalsFile, {
       jobId: job.id,
       kind: "milestone",
@@ -42,7 +44,9 @@ describe("mimo_wait", () => {
   it("waits until a new signal arrives", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
-    updateJob(cwd, job.id, { status: "running", phase: "starting", pid: 100 });
+    updateJob(cwd, job.id, {
+      status: "running", phase: "starting", pid: 100, processIdentity: "start-100"
+    });
 
     setTimeout(() => {
       appendJobSignal(job.signalsFile, {
@@ -64,7 +68,9 @@ describe("mimo_wait", () => {
   it("returns a timeout marker without loading verbose status output", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
-    updateJob(cwd, job.id, { status: "running", phase: "editing", pid: 100 });
+    updateJob(cwd, job.id, {
+      status: "running", phase: "editing", pid: 100, processIdentity: "start-100"
+    });
 
     const result = await mimoWait({ cwd, jobId: job.id, timeoutMs: 25, pollMs: 5 });
 

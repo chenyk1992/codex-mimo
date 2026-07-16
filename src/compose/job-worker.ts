@@ -18,6 +18,7 @@ import { runMimoCliStreaming, type StreamingRunResult } from "../mimo/streaming-
 import { appendRuntimeEvent, completeRuntimeJob, failRuntimeJob, startRuntimeJob } from "../core/job-runtime.js";
 import { readJob, updateJob } from "../core/job-store.js";
 import { isActiveJobStatus, type JobCallbackSummary } from "../core/jobs.js";
+import { captureProcessIdentity, type ProcessIdentityCapture } from "../core/job-process.js";
 import { preparePromptTransport } from "../mimo/prompt-transport.js";
 import {
   createHookCallbackController,
@@ -55,6 +56,7 @@ interface ComposeWorkerDeps {
   captureCommitChanges?: (cwd: string, before?: GitHeadSnapshot, after?: GitHeadSnapshot) => Promise<GitCommitChangeSnapshot>;
   runVerification?: (cwd: string, commands: string[]) => Promise<VerificationResult[]>;
   createHookCallbackController?: typeof createHookCallbackController;
+  captureProcessIdentity?: (pid: number | null) => ProcessIdentityCapture;
   now?: () => Date;
 }
 
@@ -127,7 +129,7 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
     runResult = await (deps.runMimoStreaming ?? runMimoCliStreaming)(input.cwd, mimoArgs, {
       timeoutMs: input.timeoutMs,
       env: hook.env,
-      onStart: (pid) => recordActiveJobPid(cwd, jobId, pid),
+      onStart: (pid) => recordActiveJobPid(cwd, jobId, pid, deps.captureProcessIdentity ?? captureProcessIdentity),
       onLine: (line) => appendRuntimeEvent(cwd, jobId, line)
     });
     updateJob(cwd, jobId, {
@@ -381,10 +383,17 @@ export async function runComposeJobWorker(cwd: string, jobId: string, deps: Comp
   }
 }
 
-function recordActiveJobPid(cwd: string, jobId: string, pid: number | null): void {
+function recordActiveJobPid(
+  cwd: string,
+  jobId: string,
+  pid: number | null,
+  captureIdentity: (pid: number | null) => ProcessIdentityCapture
+): void {
   const job = readJob(cwd, jobId);
   if (!job || !isActiveJobStatus(job.status)) return;
-  updateJob(cwd, jobId, { pid });
+  const captured = captureIdentity(pid);
+  if (captured.status !== "running") return;
+  updateJob(cwd, jobId, { pid, processIdentity: captured.identity });
 }
 
 async function createComposeWorkerHook(

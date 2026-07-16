@@ -90,6 +90,7 @@ describe("owned process identity", () => {
     const killProcessTree = vi.fn();
 
     const result = terminateOwnedJobProcess(123, "start-1", {
+      platform: "win32",
       captureIdentity: vi.fn(() => ({
         status: "running" as const,
         identity: "start-2",
@@ -104,6 +105,7 @@ describe("owned process identity", () => {
 
   it("does not claim safe termination when killing fails", () => {
     const result = terminateOwnedJobProcess(123, "start-1", {
+      platform: "win32",
       captureIdentity: vi.fn(() => ({
         status: "running" as const,
         identity: "start-1",
@@ -123,6 +125,7 @@ describe("owned process identity", () => {
     }));
 
     const result = terminateOwnedJobProcess(123, "start-1", {
+      platform: "win32",
       captureIdentity,
       killProcessTree: vi.fn(() => ({ ok: true, evidence: "kill sent" }))
     });
@@ -138,6 +141,7 @@ describe("owned process identity", () => {
     const killProcessTree = vi.fn(() => ({ ok: true, evidence: "kill sent" }));
 
     const result = terminateOwnedJobProcess(123, "start-1", {
+      platform: "win32",
       captureIdentity,
       killProcessTree
     });
@@ -189,5 +193,131 @@ describe("owned process identity", () => {
       evidence: "Process identity is unsupported on platform aix."
     });
     expect(spawnSync).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a dead root as termination while its POSIX process group remains alive", () => {
+    const captureIdentity = vi.fn()
+      .mockReturnValueOnce({ status: "running", identity: "start-1", evidence: "matched" })
+      .mockReturnValue({ status: "not_running", evidence: "root exited" });
+    const signalProcessGroup = vi.fn(() => ({ ok: true, evidence: "sent" }));
+    const probeProcessGroup = vi.fn()
+      .mockReturnValueOnce({ status: "running", evidence: "child remains" })
+      .mockReturnValueOnce({ status: "running", evidence: "child remains" })
+      .mockReturnValueOnce({ status: "not_running", evidence: "group gone" });
+
+    const result = terminateOwnedJobProcess(123, "start-1", {
+      platform: "linux",
+      captureIdentity,
+      killProcessTree: vi.fn(() => ({ ok: true, evidence: "legacy kill" })),
+      signalProcessGroup,
+      probeProcessGroup,
+      wait: vi.fn(),
+      graceChecks: 2
+    });
+
+    expect(result).toEqual({ status: "terminated", evidence: "group gone" });
+    expect(signalProcessGroup.mock.calls).toEqual([[123, "SIGTERM"], [123, "SIGKILL"]]);
+  });
+
+  it("waits a bounded grace period for a POSIX process group to exit after TERM", () => {
+    const wait = vi.fn();
+    const signalProcessGroup = vi.fn(() => ({ ok: true, evidence: "sent" }));
+    const probeProcessGroup = vi.fn()
+      .mockReturnValueOnce({ status: "running", evidence: "still running" })
+      .mockReturnValueOnce({ status: "not_running", evidence: "exited after grace" });
+
+    const result = terminateOwnedJobProcess(123, "start-1", {
+      platform: "darwin",
+      captureIdentity: vi.fn(() => ({ status: "running", identity: "start-1", evidence: "matched" })),
+      killProcessTree: vi.fn(() => ({ ok: true, evidence: "legacy kill" })),
+      signalProcessGroup,
+      probeProcessGroup,
+      wait,
+      graceChecks: 3,
+      graceIntervalMs: 7
+    });
+
+    expect(result).toEqual({ status: "terminated", evidence: "exited after grace" });
+    expect(signalProcessGroup).toHaveBeenCalledOnce();
+    expect(signalProcessGroup).toHaveBeenCalledWith(123, "SIGTERM");
+    expect(wait).toHaveBeenCalledWith(7);
+  });
+
+  it("escalates a POSIX process group that ignores TERM to SIGKILL", () => {
+    const signalProcessGroup = vi.fn(() => ({ ok: true, evidence: "sent" }));
+    const probeProcessGroup = vi.fn()
+      .mockReturnValueOnce({ status: "running", evidence: "running" })
+      .mockReturnValueOnce({ status: "running", evidence: "ignored TERM" })
+      .mockReturnValueOnce({ status: "not_running", evidence: "killed" });
+
+    const result = terminateOwnedJobProcess(123, "start-1", {
+      platform: "linux",
+      captureIdentity: vi.fn(() => ({ status: "running", identity: "start-1", evidence: "matched" })),
+      killProcessTree: vi.fn(() => ({ ok: true, evidence: "legacy kill" })),
+      signalProcessGroup,
+      probeProcessGroup,
+      wait: vi.fn(),
+      graceChecks: 2
+    });
+
+    expect(result).toEqual({ status: "terminated", evidence: "killed" });
+    expect(signalProcessGroup.mock.calls).toEqual([[123, "SIGTERM"], [123, "SIGKILL"]]);
+  });
+
+  it("returns unconfirmed after bounded TERM and KILL checks cannot prove group exit", () => {
+    const wait = vi.fn();
+    const signalProcessGroup = vi.fn(() => ({ ok: true, evidence: "sent" }));
+    const probeProcessGroup = vi.fn(() => ({ status: "running" as const, evidence: "still alive" }));
+
+    const result = terminateOwnedJobProcess(123, "start-1", {
+      platform: "linux",
+      captureIdentity: vi.fn(() => ({ status: "running", identity: "start-1", evidence: "matched" })),
+      killProcessTree: vi.fn(() => ({ ok: true, evidence: "legacy kill" })),
+      signalProcessGroup,
+      probeProcessGroup,
+      wait,
+      graceChecks: 2,
+      graceIntervalMs: 3
+    });
+
+    expect(result).toEqual({ status: "unconfirmed", evidence: "still alive" });
+    expect(signalProcessGroup.mock.calls).toEqual([[123, "SIGTERM"], [123, "SIGKILL"]]);
+    expect(probeProcessGroup).toHaveBeenCalledTimes(4);
+    expect(wait).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not escalate when a POSIX group probe loses permission", () => {
+    const signalProcessGroup = vi.fn(() => ({ ok: true, evidence: "TERM sent" }));
+
+    const result = terminateOwnedJobProcess(123, "start-1", {
+      platform: "linux",
+      captureIdentity: vi.fn(() => ({ status: "running", identity: "start-1", evidence: "matched" })),
+      signalProcessGroup,
+      probeProcessGroup: vi.fn(() => ({ status: "unconfirmed", evidence: "EPERM" })),
+      wait: vi.fn()
+    });
+
+    expect(result).toEqual({ status: "unconfirmed", evidence: "EPERM" });
+    expect(signalProcessGroup).toHaveBeenCalledTimes(1);
+    expect(signalProcessGroup).toHaveBeenCalledWith(123, "SIGTERM");
+  });
+
+  it("does not signal an unsupported platform even when identity capture is injected", () => {
+    const signalProcessGroup = vi.fn();
+    const killProcessTree = vi.fn();
+
+    const result = terminateOwnedJobProcess(123, "start-1", {
+      platform: "aix",
+      captureIdentity: vi.fn(() => ({ status: "running", identity: "start-1", evidence: "matched" })),
+      signalProcessGroup,
+      killProcessTree
+    });
+
+    expect(result).toEqual({
+      status: "unconfirmed",
+      evidence: "Owned process termination is unsupported on platform aix."
+    });
+    expect(signalProcessGroup).not.toHaveBeenCalled();
+    expect(killProcessTree).not.toHaveBeenCalled();
   });
 });

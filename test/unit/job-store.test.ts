@@ -70,7 +70,9 @@ describe("job store", () => {
       request: { workflow: "dev" }
     });
 
-    const updated = updateJob(cwd, job.id, { status: "running", phase: "starting", pid: 123 });
+    const updated = updateJob(cwd, job.id, {
+      status: "running", phase: "starting", pid: 123, processIdentity: "start-123"
+    });
 
     expect(updated.id).toBe(job.id);
     expect(updated.kind).toBe(job.kind);
@@ -165,6 +167,50 @@ describe("job store", () => {
     }), "utf-8");
 
     expect(() => readJob(cwd, job.id)).toThrow(/malformed job/i);
+  });
+
+  it.each([
+    ["queued with a process", { status: "queued", pid: 42, processIdentity: "start-42" }],
+    ["completed with an identity", { status: "completed", pid: null, processIdentity: "start-42" }],
+    ["running with only a pid", { status: "running", pid: 42, processIdentity: null }],
+    ["running with only an identity", { status: "running", pid: null, processIdentity: "start-42" }],
+    ["running with an empty identity", { status: "running", pid: 42, processIdentity: "" }],
+    ["running with a zero pid", { status: "running", pid: 0, processIdentity: "start-42" }],
+    ["running with a negative pid", { status: "running", pid: -1, processIdentity: "start-42" }],
+    ["running with a fractional pid", { status: "running", pid: 1.5, processIdentity: "start-42" }],
+    ["running with a string pid", { status: "running", pid: "42", processIdentity: "start-42" }]
+  ])("rejects persisted process state: %s", (_label, patch) => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "validate process state",
+      request: { cwd }
+    });
+    fs.writeFileSync(resolveJobPaths(cwd, job.id).jobFile, JSON.stringify({
+      ...job,
+      ...patch
+    }), "utf8");
+
+    expect(() => readJob(cwd, job.id)).toThrow(/malformed job/i);
+  });
+
+  it.each([
+    ["running before spawn", { status: "running", pid: null, processIdentity: null }],
+    ["running with owned process", { status: "running", pid: 42, processIdentity: "start-42" }],
+    ["completed", { status: "completed", pid: null, processIdentity: null }]
+  ])("reads valid persisted process state: %s", (_label, patch) => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "validate process state",
+      request: { cwd }
+    });
+    fs.writeFileSync(resolveJobPaths(cwd, job.id).jobFile, JSON.stringify({
+      ...job,
+      ...patch
+    }), "utf8");
+
+    expect(readJob(cwd, job.id)).toMatchObject(patch);
   });
 
   it("does not prune active jobs", () => {

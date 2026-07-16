@@ -21,7 +21,9 @@ describe("mimo_wake", () => {
   it("returns a Codex heartbeat wake hint for an active job", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
-    updateJob(cwd, job.id, { status: "running", phase: "editing", pid: 100 });
+    updateJob(cwd, job.id, {
+      status: "running", phase: "editing", pid: 100, processIdentity: "start-100"
+    });
 
     const result = await mimoWake({ cwd, jobId: job.id, sinceCursor: 3, minLevel: "info" });
 

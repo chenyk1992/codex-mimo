@@ -20,7 +20,9 @@ describe("mimo_status", () => {
   it("returns status for a specific jobId", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
-    updateJob(cwd, job.id, { status: "running", phase: "investigating", pid: 100 });
+    updateJob(cwd, job.id, {
+      status: "running", phase: "investigating", pid: 100, processIdentity: "start-100"
+    });
     const result = await mimoStatus({ cwd, jobId: job.id });
     expect(result.jobId).toBe(job.id);
     expect(result.status).toBe("running");

@@ -21,7 +21,9 @@ describe("mimo_cancel", () => {
   it("cancels an active job and calls killProcess", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
-    updateJob(cwd, job.id, { status: "running", phase: "investigating", pid: 456 });
+    updateJob(cwd, job.id, {
+      status: "running", phase: "investigating", pid: 456, processIdentity: "start-456"
+    });
     const killProcess = vi.fn();
     const result = await mimoCancel({ cwd, jobId: job.id }, { killProcess });
     expect(result.status).toBe("cancelled");

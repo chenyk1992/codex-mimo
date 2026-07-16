@@ -51,8 +51,12 @@ describe("concurrent access", () => {
     const store = createJobStore(cwd);
     const job = store.create({ kind: "compose", workflow: "dev", task: "Shared", request: {} });
 
-    const updated1 = updateJob(cwd, job.id, { status: "running", phase: "starting", pid: 100 });
-    const updated2 = updateJob(cwd, job.id, { status: "running", phase: "editing", pid: 200 });
+    const updated1 = updateJob(cwd, job.id, {
+      status: "running", phase: "starting", pid: 100, processIdentity: "start-100"
+    });
+    const updated2 = updateJob(cwd, job.id, {
+      status: "running", phase: "editing", pid: 200, processIdentity: "start-200"
+    });
 
     const stored = readJob(cwd, job.id);
     expect(stored?.phase).toBe("editing");
@@ -187,7 +191,9 @@ describe("concurrent access", () => {
       request: {},
       notificationTarget: { type: "codex", threadId: "thread-1" }
     });
-    updateJob(cwd, job.id, { status: "running", phase: "editing", pid: 100 });
+    updateJob(cwd, job.id, {
+      status: "running", phase: "editing", pid: 100, processIdentity: "start-100"
+    });
 
     const transitionModule = pathToFileURL(path.resolve("src/core/job-transition.ts")).href;
     const script = `
@@ -241,7 +247,9 @@ describe("concurrent access", () => {
       task: "Shared progress",
       request: {}
     });
-    updateJob(cwd, job.id, { status: "running", phase: "editing", pid: 100 });
+    updateJob(cwd, job.id, {
+      status: "running", phase: "editing", pid: 100, processIdentity: "start-100"
+    });
 
     const transitionModule = pathToFileURL(path.resolve("src/core/job-transition.ts")).href;
     const script = `

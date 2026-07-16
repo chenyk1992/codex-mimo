@@ -42,7 +42,9 @@ function seedJob(status: JobStatus, notification = false): { cwd: string; jobId:
   if (status !== "queued") {
     updateJob(cwd, job.id, {
       status,
-      ...(status === "running" ? { phase: "editing", pid: 123 } : {})
+      ...(status === "running"
+        ? { phase: "editing", pid: 123, processIdentity: "start-123" }
+        : {})
     });
   }
   return { cwd, jobId: job.id };
@@ -138,6 +140,7 @@ describe("job transitions", () => {
       status: "running",
       phase: "starting",
       pid: 456,
+      processIdentity: "start-456",
       summary: "started"
     });
 

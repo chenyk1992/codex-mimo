@@ -311,9 +311,9 @@ function isJobRecord(value: unknown, expectedJobId: string): value is JobRecord 
     typeof value.kind === "string" &&
     typeof value.cwd === "string" &&
     typeof value.task === "string" &&
-    typeof value.status === "string" &&
+    isJobStatus(value.status) &&
     (value.phase === undefined || typeof value.phase === "string") &&
-    (value.processIdentity === null || typeof value.processIdentity === "string") &&
+    isPersistedProcessState(value.status, value.pid, value.processIdentity) &&
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string" &&
     Array.isArray(value.changedFiles) &&
@@ -326,6 +326,18 @@ function isJobRecord(value: unknown, expectedJobId: string): value is JobRecord 
     (value.pendingTransition === undefined ||
       (isJobStatus(value.status) && isPendingJobTransition(value.pendingTransition, value.status)))
   );
+}
+
+function isPersistedProcessState(
+  status: JobRecord["status"],
+  pid: unknown,
+  processIdentity: unknown
+): boolean {
+  if (status !== "running") return pid === null && processIdentity === null;
+  if (pid === null) return processIdentity === null;
+  return isPositiveInteger(pid) &&
+    typeof processIdentity === "string" &&
+    processIdentity.trim().length > 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -519,8 +531,7 @@ function isPendingJobTransition(
 function isNormalizedTransitionState(value: Record<string, unknown>): boolean {
   if (value.status === "running") {
     return (value.phase === undefined || isJobPhase(value.phase)) &&
-      (value.pid === null || isPositiveInteger(value.pid)) &&
-      (value.processIdentity === null || typeof value.processIdentity === "string");
+      isPersistedProcessState("running", value.pid, value.processIdentity);
   }
   return value.phase === undefined && value.pid === null && value.processIdentity === null;
 }

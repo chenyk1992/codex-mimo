@@ -58,7 +58,9 @@ describe("job MCP tools", () => {
   it("cancels an active job", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
-    updateJob(cwd, job.id, { status: "running", phase: "investigating", pid: 123 });
+    updateJob(cwd, job.id, {
+      status: "running", phase: "investigating", pid: 123, processIdentity: "start-123"
+    });
     const killProcess = vi.fn();
 
     const result = await mimoCancel({ cwd, jobId: job.id }, { killProcess });

@@ -457,6 +457,182 @@ describe("runJobWorker", () => {
     expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
   });
 
+  it.each([
+    "prompt",
+    "hook",
+    "run",
+    "event-write",
+    "hook-close",
+    "git-status",
+    "git-head",
+    "git-diff",
+    "git-commit",
+    "finalizer"
+  ] as const)("abandons a never-resolving %s dependency after external cancellation", async (stage) => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    const bound = definition();
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const pending = new Promise<never>(() => {});
+    const overrides: Partial<JobWorkerDependencies> = {
+      bindJobDefinition: () => bound,
+      statusPollMs: 5
+    };
+
+    if (stage === "prompt") vi.mocked(bound.buildPrompt).mockImplementationOnce(() => {
+      entered();
+      return pending;
+    });
+    if (stage === "hook") overrides.createHookCallbackController = () => {
+      entered();
+      return pending;
+    };
+    if (stage === "run") overrides.runMimoStreaming = () => {
+      entered();
+      return pending;
+    };
+    if (stage === "event-write") overrides.appendRawAndNormalizedEvent = () => {
+      entered();
+      return pending;
+    };
+    if (stage === "hook-close") {
+      const closingHook = hook();
+      vi.mocked(closingHook.close).mockImplementationOnce(() => {
+        entered();
+        return pending;
+      });
+      overrides.createHookCallbackController = async () => closingHook;
+    }
+    if (stage === "git-status") overrides.captureStatus = () => {
+      entered();
+      return pending;
+    };
+    if (stage === "git-head") overrides.captureHead = () => {
+      entered();
+      return pending;
+    };
+    if (stage === "git-diff") overrides.captureDiff = () => {
+      entered();
+      return pending;
+    };
+    if (stage === "git-commit") overrides.captureCommitChanges = () => {
+      entered();
+      return pending;
+    };
+    if (stage === "finalizer") vi.mocked(bound.finalize).mockImplementationOnce(() => {
+      entered();
+      return pending;
+    });
+    const deps = workerDeps(overrides);
+
+    const worker = runJobWorker(cwd, job.id, deps);
+    await started;
+    await transitionJob(cwd, job.id, { status: "cancelled", summary: "cancelled" });
+    const settled = await Promise.race([
+      worker.then(() => "done" as const),
+      new Promise<"stuck">((resolve) => setTimeout(() => resolve("stuck"), 150))
+    ]);
+
+    expect(settled).toBe("done");
+    expect(readJob(cwd, job.id)?.status).toBe("cancelled");
+    if (stage === "prompt" || stage === "git-head") {
+      expect(deps.createHookCallbackController).not.toHaveBeenCalled();
+    }
+    if (stage === "hook") expect(deps.runMimoStreaming).not.toHaveBeenCalled();
+    if (stage === "run") expect(bound.finalize).not.toHaveBeenCalled();
+    if (stage === "event-write") expect(bound.finalize).not.toHaveBeenCalled();
+    if (stage === "hook-close") expect(bound.finalize).not.toHaveBeenCalled();
+    if (stage === "git-status") expect(deps.captureHead).not.toHaveBeenCalled();
+    if (stage === "git-diff") expect(deps.captureCommitChanges).not.toHaveBeenCalled();
+    if (stage === "git-commit") expect(bound.finalize).not.toHaveBeenCalled();
+  });
+
+  it("closes a hook controller that resolves after cancellation already released the worker", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    const lateController = hook();
+    let resolveHook!: (controller: HookCallbackController) => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const hookCreation = new Promise<HookCallbackController>((resolve) => { resolveHook = resolve; });
+    const deps = workerDeps({
+      statusPollMs: 5,
+      createHookCallbackController: () => {
+        entered();
+        return hookCreation;
+      }
+    });
+
+    const worker = runJobWorker(cwd, job.id, deps);
+    await started;
+    await transitionJob(cwd, job.id, { status: "cancelled", summary: "cancelled" });
+    await worker;
+    resolveHook(lateController);
+
+    await vi.waitFor(() => expect(lateController.close).toHaveBeenCalledOnce());
+    expect(deps.runMimoStreaming).not.toHaveBeenCalled();
+  });
+
+  it("absorbs a dependency rejection that arrives after cancellation released ownership", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    const bound = definition();
+    let rejectPrompt!: (error: Error) => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    vi.mocked(bound.buildPrompt).mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectPrompt = reject;
+      entered();
+    }));
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+
+    try {
+      const worker = runJobWorker(cwd, job.id, workerDeps({
+        bindJobDefinition: () => bound,
+        statusPollMs: 5
+      }));
+      await started;
+      await transitionJob(cwd, job.id, { status: "cancelled", summary: "cancelled" });
+      await worker;
+      rejectPrompt(new Error("late prompt failure"));
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+
+  it("stops the execution guard before committing its own terminal transition", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    const bound = definition();
+    let finalizeSignal!: AbortSignal;
+    vi.mocked(bound.finalize).mockImplementationOnce(async (context) => {
+      finalizeSignal = context.signal;
+      return { status: "completed", summary: "done" };
+    });
+    const guardedTransition: typeof transitionJob = async (transitionCwd, transitionJobId, request) => {
+      const result = await transitionJob(transitionCwd, transitionJobId, request);
+      if (request.status === "completed") {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+      return result;
+    };
+
+    await runJobWorker(cwd, job.id, workerDeps({
+      bindJobDefinition: () => bound,
+      transitionJob: guardedTransition,
+      statusPollMs: 5
+    }));
+
+    expect(readJob(cwd, job.id)?.status).toBe("completed");
+    expect(finalizeSignal.aborted).toBe(false);
+  });
+
   it("completes when auxiliary state.json refresh fails after authoritative job writes", async () => {
     const cwd = tempWorkspace();
     const job = seedJob(cwd, "implement");

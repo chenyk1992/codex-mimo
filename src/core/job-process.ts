@@ -21,6 +21,12 @@ export type OwnedProcessTermination =
   | { status: "terminated" | "not_running" | "identity_mismatch"; evidence: string }
   | { status: "unconfirmed"; evidence: string };
 
+export type ProcessGroupProbe =
+  | { status: "running" | "not_running"; evidence: string }
+  | { status: "unconfirmed"; evidence: string };
+
+export type ProcessGroupSignal = "SIGTERM" | "SIGKILL";
+
 export interface ProcessIdentityCaptureOptions {
   query?: (pid: number) => ProcessIdentityCapture;
   platform?: NodeJS.Platform;
@@ -31,8 +37,16 @@ export interface ProcessIdentityCaptureOptions {
 export interface OwnedProcessTerminationOptions {
   captureIdentity?: (pid: number) => ProcessIdentityCapture;
   killProcessTree?: (pid: number) => { ok: boolean; evidence: string };
+  signalProcessGroup?: (
+    pid: number,
+    signal: ProcessGroupSignal
+  ) => { ok: boolean; evidence: string };
+  probeProcessGroup?: (pid: number) => ProcessGroupProbe;
+  wait?: (milliseconds: number) => void;
+  graceChecks?: number;
+  graceIntervalMs?: number;
   platform?: NodeJS.Platform;
-  killProcess?: (pid: number) => void;
+  killProcess?: (pid: number, signal?: string) => unknown;
   spawnSync?: typeof spawnSync;
 }
 
@@ -115,8 +129,19 @@ export function terminateOwnedJobProcess(
   const verification = verifyProcessIdentity(pid, expectedIdentity, { captureIdentity });
   if (verification.status !== "match") return verification;
 
+  const platform = options.platform ?? process.platform;
+  if (platform === "linux" || platform === "darwin") {
+    return terminateOwnedPosixProcessGroup(pid as number, options);
+  }
+  if (platform !== "win32") {
+    return {
+      status: "unconfirmed",
+      evidence: `Owned process termination is unsupported on platform ${platform}.`
+    };
+  }
+
   const killProcessTree = options.killProcessTree ?? ((targetPid: number) =>
-    killTreeWithEvidence(targetPid, options));
+    killWindowsTreeWithEvidence(targetPid, options));
   const killed = killProcessTree(pid as number);
   if (!killed.ok) return { status: "unconfirmed", evidence: killed.evidence };
 
@@ -241,32 +266,120 @@ function capturePosixIdentity(
   }
 }
 
-function killTreeWithEvidence(
+function terminateOwnedPosixProcessGroup(
   pid: number,
-  options: Pick<OwnedProcessTerminationOptions, "platform" | "killProcess" | "spawnSync">
-): { ok: boolean; evidence: string } {
-  const platform = options.platform ?? process.platform;
-  const killProcess = options.killProcess ?? ((targetPid: number) => process.kill(targetPid));
-  try {
-    if (platform === "win32") {
-      const result = (options.spawnSync ?? spawnSync)("taskkill", ["/PID", String(pid), "/T", "/F"], {
-        encoding: "utf8",
-        windowsHide: true
-      });
-      if (result.error || result.status !== 0) {
-        return {
-          ok: false,
-          evidence: `taskkill failed: ${result.error?.message ?? String(result.stderr).trim()}`
-        };
+  options: OwnedProcessTerminationOptions
+): OwnedProcessTermination {
+  const signalGroup = options.signalProcessGroup ?? ((targetPid, signal) =>
+    signalPosixProcessGroup(targetPid, signal, options.killProcess));
+  const probeGroup = options.probeProcessGroup ?? probePosixProcessGroup;
+  const wait = options.wait ?? waitSynchronously;
+  const checks = positiveIntegerOr(options.graceChecks, 3);
+  const intervalMs = nonNegativeNumberOr(options.graceIntervalMs, 50);
+
+  const terminated = signalGroup(pid, "SIGTERM");
+  if (!terminated.ok) return { status: "unconfirmed", evidence: terminated.evidence };
+  const afterTerm = waitForProcessGroupExit(pid, probeGroup, wait, checks, intervalMs);
+  if (afterTerm.status === "not_running") {
+    return { status: "terminated", evidence: afterTerm.evidence };
+  }
+  if (afterTerm.status === "unconfirmed") return afterTerm;
+
+  const killed = signalGroup(pid, "SIGKILL");
+  if (!killed.ok) return { status: "unconfirmed", evidence: killed.evidence };
+  const afterKill = waitForProcessGroupExit(pid, probeGroup, wait, checks, intervalMs);
+  return afterKill.status === "not_running"
+    ? { status: "terminated", evidence: afterKill.evidence }
+    : { status: "unconfirmed", evidence: afterKill.evidence };
+}
+
+function waitForProcessGroupExit(
+  pid: number,
+  probe: (pid: number) => ProcessGroupProbe,
+  wait: (milliseconds: number) => void,
+  checks: number,
+  intervalMs: number
+): ProcessGroupProbe {
+  let lastRunning: ProcessGroupProbe = {
+    status: "running",
+    evidence: `Process group ${pid} is still running.`
+  };
+  for (let check = 0; check < checks; check += 1) {
+    const result = probe(pid);
+    if (result.status !== "running") return result;
+    lastRunning = result;
+    if (check < checks - 1) {
+      try {
+        wait(intervalMs);
+      } catch (error) {
+        return { status: "unconfirmed", evidence: `Process-group wait failed: ${errorMessage(error)}` };
       }
-      return { ok: true, evidence: `taskkill accepted PID ${pid}.` };
     }
-    try {
-      killProcess(-pid);
-    } catch {
-      killProcess(pid);
+  }
+  return lastRunning;
+}
+
+function signalPosixProcessGroup(
+  pid: number,
+  signal: ProcessGroupSignal,
+  killProcess: (targetPid: number, targetSignal?: string) => unknown =
+    (targetPid, targetSignal) => process.kill(targetPid, targetSignal)
+): { ok: boolean; evidence: string } {
+  try {
+    killProcess(-pid, signal);
+    return { ok: true, evidence: `${signal} sent to process group ${pid}.` };
+  } catch (error) {
+    return {
+      ok: false,
+      evidence: `${signal} failed for process group ${pid}: ${errorMessage(error)}`
+    };
+  }
+}
+
+function probePosixProcessGroup(pid: number): ProcessGroupProbe {
+  try {
+    process.kill(-pid, 0);
+    return { status: "running", evidence: `Process group ${pid} is running.` };
+  } catch (error) {
+    if (isErrorWithCode(error, "ESRCH")) {
+      return { status: "not_running", evidence: `Process group ${pid} is not running.` };
     }
-    return { ok: true, evidence: `Termination signal sent to PID ${pid}.` };
+    return {
+      status: "unconfirmed",
+      evidence: `Process-group probe failed for ${pid}: ${errorMessage(error)}`
+    };
+  }
+}
+
+function waitSynchronously(milliseconds: number): void {
+  if (milliseconds <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function positiveIntegerOr(value: number | undefined, fallback: number): number {
+  return Number.isInteger(value) && (value as number) > 0 ? value as number : fallback;
+}
+
+function nonNegativeNumberOr(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function killWindowsTreeWithEvidence(
+  pid: number,
+  options: Pick<OwnedProcessTerminationOptions, "spawnSync">
+): { ok: boolean; evidence: string } {
+  try {
+    const result = (options.spawnSync ?? spawnSync)("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      encoding: "utf8",
+      windowsHide: true
+    });
+    if (result.error || result.status !== 0) {
+      return {
+        ok: false,
+        evidence: `taskkill failed: ${result.error?.message ?? String(result.stderr).trim()}`
+      };
+    }
+    return { ok: true, evidence: `taskkill accepted PID ${pid}.` };
   } catch (error) {
     return { ok: false, evidence: `Process termination failed: ${errorMessage(error)}` };
   }

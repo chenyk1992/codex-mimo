@@ -6,12 +6,17 @@ import { readJob, updateJob } from "./job-store.js";
 import { isActiveJobStatus } from "./jobs.js";
 import type { JobCallbackSummary, JobRecord, JobReportPaths, JobVerification } from "./jobs.js";
 
-export function startRuntimeJob(cwd: string, jobId: string, patch: { pid?: number | null } = {}): JobRecord {
+export function startRuntimeJob(
+  cwd: string,
+  jobId: string,
+  patch: { pid?: number | null; processIdentity?: string | null } = {}
+): JobRecord {
   const job = updateJob(cwd, jobId, {
     status: "running",
     phase: "starting",
     startedAt: new Date().toISOString(),
     pid: patch.pid ?? null,
+    processIdentity: patch.processIdentity ?? null,
     summary: "Starting MiMoCode job.",
     completedAt: undefined,
     errorCode: undefined,
@@ -93,6 +98,7 @@ export function completeRuntimeJob(
     status: "completed",
     phase: "done",
     pid: null,
+    processIdentity: null,
     completedAt: new Date().toISOString(),
     summary: result.summary,
     sessionId: result.sessionId ?? job.sessionId ?? null,
@@ -134,6 +140,7 @@ export function failRuntimeJob(
     status: "failed",
     phase: "failed",
     pid: null,
+    processIdentity: null,
     completedAt: new Date().toISOString(),
     errorCode: failure.errorCode,
     error: failure.error,
@@ -161,6 +168,7 @@ export function cancelRuntimeJob(cwd: string, jobId: string, summary = `Cancelle
     status: "cancelled",
     phase: "cancelled",
     pid: null,
+    processIdentity: null,
     completedAt: new Date().toISOString(),
     summary,
     errorCode: "cancelled",

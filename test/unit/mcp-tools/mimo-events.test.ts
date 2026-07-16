@@ -22,7 +22,9 @@ describe("mimo_events", () => {
   it("returns incremental signals for a specific job", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
-    updateJob(cwd, job.id, { status: "running", phase: "investigating", pid: 100 });
+    updateJob(cwd, job.id, {
+      status: "running", phase: "investigating", pid: 100, processIdentity: "start-100"
+    });
     appendJobSignal(job.signalsFile, {
       jobId: job.id,
       kind: "phase_changed",

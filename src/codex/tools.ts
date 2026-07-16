@@ -245,12 +245,12 @@ export async function mimoCompose(
       request: parsed
     });
     const spawnFn = deps.spawnJobWorker ?? spawnJobWorker;
-    const pid = spawnFn(parsed.cwd, "compose", job.id, {
+    spawnFn(parsed.cwd, "compose", job.id, {
       onExit: (code, signal) => {
         failJobOnUnexpectedWorkerExit(parsed.cwd, job.id, code, signal);
       }
     });
-    const queued = updateJob(parsed.cwd, job.id, { pid });
+    const queued = readJob(parsed.cwd, job.id) ?? job;
     if (parsed.wait) {
       const settled = await waitForJobToSettle(parsed.cwd, job.id, parsed.timeoutMs);
       return renderJobStatus(settled ?? queued, {
@@ -453,12 +453,12 @@ export async function mimoResumeJob(
   });
   if (parsed.background) {
     const spawnFn = deps.spawnJobWorker ?? spawnJobWorker;
-    const pid = spawnFn(parsed.cwd, "compose", child.id, {
+    spawnFn(parsed.cwd, "compose", child.id, {
       onExit: (code, signal) => {
         failJobOnUnexpectedWorkerExit(parsed.cwd, child.id, code, signal);
       }
     });
-    return renderJobLaunch(updateJob(parsed.cwd, child.id, { pid }));
+    return renderJobLaunch(readJob(parsed.cwd, child.id) ?? child);
   }
   return {
     jobId: child.id,
