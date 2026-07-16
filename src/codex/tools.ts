@@ -24,7 +24,11 @@ import {
 import type { JobNotificationStatus, JobRecord } from "../core/jobs.js";
 import { renderJobResult, renderJobStatus } from "../core/job-render.js";
 import { readRecentJobLogLines } from "../core/job-log.js";
-import { isAttentionSignal, readJobSignals } from "../core/job-signals.js";
+import {
+  isAttentionSignal,
+  readJobSignalPage,
+  type JobSignalReadResult
+} from "../core/job-signals.js";
 import { transitionJob } from "../core/job-transition.js";
 import { resolveMimoCommand } from "../mimo/run-json.js";
 import {
@@ -131,7 +135,7 @@ export async function mimoStatus(input: unknown) {
 export async function mimoEvents(input: unknown) {
   const parsed = JobEventsInput.parse(input);
   const job = resolveJobForSignals(parsed.cwd, parsed.jobId);
-  return renderJobSignals(job, readJobSignals(job.signalsFile, {
+  return renderJobSignals(job, readJobSignalPage(job.signalsFile, {
     sinceCursor: parsed.sinceCursor,
     limit: parsed.limit,
     minLevel: parsed.minLevel
@@ -252,17 +256,15 @@ function readAttentionSignals(
   job: JobRecord,
   options: { sinceCursor: number; limit: number; minLevel: "debug" | "info" | "warn" | "error" }
 ) {
-  const result = readJobSignals(job.signalsFile, {
+  return readJobSignalPage(job.signalsFile, {
     sinceCursor: options.sinceCursor,
-    minLevel: options.minLevel
+    minLevel: options.minLevel,
+    limit: options.limit,
+    include: isAttentionSignal
   });
-  return {
-    nextCursor: result.nextCursor,
-    signals: result.signals.filter(isAttentionSignal).slice(0, options.limit)
-  };
 }
 
-function renderJobSignals(job: JobRecord, result: ReturnType<typeof readJobSignals>) {
+function renderJobSignals(job: JobRecord, result: JobSignalReadResult) {
   const canCancel = job.status === "queued" || job.status === "running";
   const canReadResult = isResultStatus(job.status);
   return {

@@ -78,6 +78,39 @@ describe("mimo_wait", () => {
 
     expect(result).toMatchObject({ status: "running", phase: "reviewing", timedOut: true, waitedMs: 2_500 });
     expect(result.signals).toEqual([]);
+    expect(result.nextCursor).toBe(1);
     expect(JSON.stringify(result)).not.toMatch(/heartbeat|wake/i);
+  });
+
+  it("paginates attention signals without advancing past an omitted attention", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "compose", task: "Run", request: {} });
+    for (const [kind, summary] of [
+      ["needs_input", "one"], ["blocked", "two"], ["completed", "three"]
+    ] as const) {
+      appendJobSignal(job.signalsFile, { jobId: job.id, kind, level: "warn", summary });
+    }
+
+    const first = await mimoWait({ cwd, jobId: job.id, sinceCursor: 0, limit: 2, timeoutMs: 10 });
+    expect(first.signals.map((signal) => signal.cursor)).toEqual([1, 2]);
+    expect(first.nextCursor).toBe(2);
+
+    const second = await mimoWait({ cwd, jobId: job.id, sinceCursor: first.nextCursor, limit: 2, timeoutMs: 10 });
+    expect(second.signals.map((signal) => signal.cursor)).toEqual([3]);
+    expect(second.nextCursor).toBe(3);
+  });
+
+  it("advances across ordinary signals before an attention page", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "plan", task: "Plan", request: {} });
+    appendJobSignal(job.signalsFile, { jobId: job.id, kind: "milestone", level: "info", summary: "ordinary" });
+    appendJobSignal(job.signalsFile, { jobId: job.id, kind: "completed", level: "info", summary: "first" });
+    appendJobSignal(job.signalsFile, { jobId: job.id, kind: "failed", level: "error", summary: "second" });
+
+    const first = await mimoWait({ cwd, jobId: job.id, limit: 1, timeoutMs: 10 });
+    expect(first.signals.map((signal) => signal.cursor)).toEqual([2]);
+    expect(first.nextCursor).toBe(2);
+    expect((await mimoWait({ cwd, jobId: job.id, sinceCursor: 2, limit: 1, timeoutMs: 10 })).signals[0]?.cursor)
+      .toBe(3);
   });
 });

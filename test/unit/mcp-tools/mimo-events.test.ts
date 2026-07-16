@@ -82,4 +82,36 @@ describe("mimo_events", () => {
     const cwd = tempWorkspace();
     await expect(mimoEvents({ cwd, jobId: "compose-missing" })).rejects.toThrow("No job found");
   });
+
+  it("paginates without advancing past signals omitted by limit", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "plan", task: "Plan", request: {} });
+    for (const summary of ["one", "two", "three"]) {
+      appendJobSignal(job.signalsFile, {
+        jobId: job.id, kind: "milestone", level: "info", summary
+      });
+    }
+
+    const first = await mimoEvents({ cwd, jobId: job.id, sinceCursor: 0, limit: 2 });
+    expect(first.signals.map((signal) => signal.cursor)).toEqual([1, 2]);
+    expect(first.nextCursor).toBe(2);
+
+    const second = await mimoEvents({ cwd, jobId: job.id, sinceCursor: first.nextCursor, limit: 2 });
+    expect(second.signals.map((signal) => signal.cursor)).toEqual([3]);
+    expect(second.nextCursor).toBe(3);
+  });
+
+  it("may advance across filtered signals but not a later unreturned match", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "review", task: "Review", request: {} });
+    appendJobSignal(job.signalsFile, { jobId: job.id, kind: "milestone", level: "debug", summary: "ignored" });
+    appendJobSignal(job.signalsFile, { jobId: job.id, kind: "milestone", level: "info", summary: "returned" });
+    appendJobSignal(job.signalsFile, { jobId: job.id, kind: "milestone", level: "info", summary: "later" });
+
+    const first = await mimoEvents({ cwd, jobId: job.id, minLevel: "info", limit: 1 });
+    expect(first.signals.map((signal) => signal.cursor)).toEqual([2]);
+    expect(first.nextCursor).toBe(2);
+    expect((await mimoEvents({ cwd, jobId: job.id, sinceCursor: 2, minLevel: "info", limit: 1 })).signals[0]?.cursor)
+      .toBe(3);
+  });
 });

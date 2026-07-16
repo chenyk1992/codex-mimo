@@ -73,6 +73,10 @@ export function isAttentionSignal(
   return (ATTENTION_SIGNAL_KINDS as readonly JobSignalKind[]).includes(kind);
 }
 
+export interface ReadJobSignalPageOptions extends ReadJobSignalsOptions {
+  include?: (signal: JobSignal) => boolean;
+}
+
 export function appendJobSignal(file: string, signal: NewJobSignal): JobSignal {
   const cursor = readJobSignals(file).nextCursor + 1;
   return appendJobSignalAtCursor(file, cursor, signal);
@@ -151,6 +155,34 @@ function isJobSignal(value: Partial<JobSignal>): value is JobSignal {
     typeof value.createdAt === "string" &&
     typeof value.summary === "string"
   );
+}
+
+export function readJobSignalPage(
+  file: string,
+  options: ReadJobSignalPageOptions = {}
+): JobSignalReadResult {
+  const sinceCursor = options.sinceCursor ?? 0;
+  if (!fs.existsSync(file)) return { signals: [], nextCursor: sinceCursor };
+
+  const minRank = LEVEL_RANK[options.minLevel ?? "debug"];
+  const limit = options.limit ?? Number.POSITIVE_INFINITY;
+  const include = options.include ?? (() => true);
+  const signals: JobSignal[] = [];
+  let nextCursor = sinceCursor;
+
+  for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+    const parsed = parseJobSignalLine(line);
+    if (!parsed || parsed.cursor <= sinceCursor) continue;
+    if (LEVEL_RANK[parsed.level] < minRank || !include(parsed)) {
+      nextCursor = Math.max(nextCursor, parsed.cursor);
+      continue;
+    }
+    if (signals.length >= limit) break;
+    signals.push(parsed);
+    nextCursor = Math.max(nextCursor, parsed.cursor);
+  }
+
+  return { signals, nextCursor };
 }
 
 function sameSignal(left: JobSignal, right: JobSignal): boolean {
