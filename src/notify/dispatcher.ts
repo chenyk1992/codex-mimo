@@ -2,7 +2,11 @@ import path from "node:path";
 import { readJob, resolveJobDir } from "../core/job-store.js";
 import { isAttentionSignal, readJobSignals, type JobSignal } from "../core/job-signals.js";
 import type { JobRecord } from "../core/jobs.js";
-import { createCodexAppServerClient, type CodexAppServerClient } from "./codex-app-server.js";
+import {
+  createCodexAppServerClient,
+  type CodexAppServerClient,
+  type CodexAppServerClientOptions
+} from "./codex-app-server.js";
 import { deliverCodexNotification } from "./codex-adapter.js";
 import {
   claimDueDelivery,
@@ -20,19 +24,22 @@ import {
 import { deliverWebhook } from "./webhook-adapter.js";
 
 const DEFAULT_LEASE_MS = 30_000;
+const DEFAULT_ATTEMPT_TIMEOUT_MS = 10_000;
 const MAX_RETRY_AGE_MS = 1_800_000;
 
 export interface DispatcherDependencies {
   now?: () => Date;
   leaseMs?: number;
+  attemptTimeoutMs?: number;
   deliver?: (
     delivery: NotificationDelivery,
     job: JobRecord,
-    signal: JobSignal
+    signal: JobSignal,
+    attemptSignal: AbortSignal
   ) => Promise<DeliveryAttemptResult>;
   deliverWebhook?: typeof deliverWebhook;
   deliverCodex?: typeof deliverCodexNotification;
-  createCodexClient?: () => CodexAppServerClient;
+  createCodexClient?: (options?: CodexAppServerClientOptions) => CodexAppServerClient;
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch;
   renewDeliveryLease?: typeof renewDeliveryLease;
@@ -86,8 +93,15 @@ export async function dispatchNextDelivery(
   let result: DeliveryAttemptResult;
   try {
     result = dependencies.deliver
-      ? await dependencies.deliver(claimed, context.job, context.signal)
-      : await deliverByTarget(claimed, context.job, context.signal, dependencies);
+      ? await dependencies.deliver(claimed, context.job, context.signal, heartbeat.signal)
+      : await deliverByTarget(
+        claimed,
+        context.job,
+        context.signal,
+        heartbeat.signal,
+        leaseMs,
+        dependencies
+      );
   } catch {
     result = { outcome: "retry", error: "Notification delivery failed" };
   } finally {
@@ -147,21 +161,36 @@ export function readNotificationDeliveries(cwd: string): NotificationDelivery[] 
 async function deliverByTarget(
   delivery: NotificationDelivery,
   job: JobRecord,
-  signal: JobSignal,
+  jobSignal: JobSignal,
+  attemptSignal: AbortSignal,
+  leaseMs: number,
   dependencies: DispatcherDependencies
 ): Promise<DeliveryAttemptResult> {
+  const timeoutMs = dependencies.attemptTimeoutMs ?? Math.max(
+    1,
+    Math.min(DEFAULT_ATTEMPT_TIMEOUT_MS, Math.floor(leaseMs / 2))
+  );
   if (delivery.target.type === "webhook") {
     return (dependencies.deliverWebhook ?? deliverWebhook)(
       delivery,
       job,
-      signal,
+      jobSignal,
       dependencies.env,
-      dependencies.fetch
+      dependencies.fetch,
+      { signal: attemptSignal, timeoutMs }
     );
   }
 
-  const client = (dependencies.createCodexClient ?? createCodexAppServerClient)();
-  return (dependencies.deliverCodex ?? deliverCodexNotification)(delivery, job, signal, client);
+  const client = (dependencies.createCodexClient ?? createCodexAppServerClient)({
+    requestTimeoutMs: timeoutMs
+  });
+  return (dependencies.deliverCodex ?? deliverCodexNotification)(
+    delivery,
+    job,
+    jobSignal,
+    client,
+    attemptSignal
+  );
 }
 
 function loadDeliveryContext(
@@ -216,7 +245,7 @@ function startLeaseHeartbeat(
   delivery: NotificationDelivery,
   leaseMs: number,
   dependencies: DispatcherDependencies
-): { stop: () => Promise<void>; ownershipLost: () => boolean } {
+): { signal: AbortSignal; stop: () => Promise<void>; ownershipLost: () => boolean } {
   const schedule = dependencies.scheduleLeaseRenewal ?? defaultScheduleLeaseRenewal;
   const cancel = dependencies.cancelLeaseRenewal ?? defaultCancelLeaseRenewal;
   const renew = dependencies.renewDeliveryLease ?? renewDeliveryLease;
@@ -226,6 +255,7 @@ function startLeaseHeartbeat(
   let timer: unknown;
   let timerScheduled = false;
   let inFlight: Promise<void> | undefined;
+  const controller = new AbortController();
 
   const scheduleNext = (): void => {
     timer = schedule(tick, intervalMs);
@@ -243,8 +273,9 @@ function startLeaseHeartbeat(
       leaseMs
     )).then(
       () => undefined,
-      (error: unknown) => {
-        if (error instanceof StaleDeliveryGenerationError) lost = true;
+      () => {
+        lost = true;
+        controller.abort();
       }
     );
     inFlight = current;
@@ -255,6 +286,7 @@ function startLeaseHeartbeat(
 
   scheduleNext();
   return {
+    signal: controller.signal,
     ownershipLost: () => lost,
     stop: async () => {
       stopped = true;

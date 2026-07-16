@@ -158,6 +158,70 @@ describe("Codex App Server client", () => {
     await client.close();
   });
 
+  it("times out a silent JSON-RPC request and releases the child resources", async () => {
+    vi.useFakeTimers();
+    process = new FakeAppServerProcess();
+    spawnMock.mockReturnValue(process);
+    const client = createCodexAppServerClient({ requestTimeoutMs: 100 });
+
+    const initialization = client.initialize();
+    const rejected = expect(initialization).rejects.toMatchObject({ kind: "transport" });
+    expect(messagesFrom(process)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(100);
+
+    await rejected;
+    await expect(client.close()).resolves.toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(process.stdin.destroyed).toBe(true);
+    expect(process.stdout.destroyed).toBe(true);
+    expect(process.stderr.destroyed).toBe(true);
+    expect(process.listenerCount("exit")).toBe(0);
+  });
+
+  it.each(["thread/resume", "turn/start"] as const)(
+    "bounds a silent %s request with the same per-request deadline",
+    async (method) => {
+      vi.useFakeTimers();
+      const client = createCodexAppServerClient({ requestTimeoutMs: 100 });
+      const initialization = client.initialize();
+      const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
+      respond(process, { id, result: initializeResult });
+      await initialization;
+      messagesFrom(process);
+
+      const request = method === "thread/resume"
+        ? client.resumeThread("thread-1")
+        : client.startTurn("thread-1", "continue");
+      const rejected = expect(request).rejects.toMatchObject({ kind: "transport" });
+      await vi.advanceTimersByTimeAsync(100);
+
+      await rejected;
+      await expect(client.close()).resolves.toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(process.stdin.destroyed).toBe(true);
+      expect(process.stdout.destroyed).toBe(true);
+      expect(process.stderr.destroyed).toBe(true);
+      expect(process.listenerCount("exit")).toBe(0);
+    }
+  );
+
+  it("aborts a silent request immediately when delivery ownership is lost", async () => {
+    const controller = new AbortController();
+    const client = createCodexAppServerClient({ requestTimeoutMs: 10_000 });
+    const initialization = client.initialize(controller.signal);
+    const rejected = expect(initialization).rejects.toMatchObject({ kind: "transport" });
+    messagesFrom(process);
+
+    controller.abort();
+
+    await rejected;
+    await expect(client.close()).resolves.toBeUndefined();
+    expect(process.stdin.destroyed).toBe(true);
+    expect(process.stdout.destroyed).toBe(true);
+    expect(process.stderr.destroyed).toBe(true);
+    expect(process.listenerCount("exit")).toBe(0);
+  });
+
   it("waits for initialize response before sending initialized", async () => {
     const client = createCodexAppServerClient();
     const initialization = client.initialize();

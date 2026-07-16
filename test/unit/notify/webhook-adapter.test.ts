@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JobSignal } from "../../../src/core/job-signals.js";
 import type { JobRecord } from "../../../src/core/jobs.js";
 import {
@@ -60,6 +60,10 @@ const signal: JobSignal = {
 };
 
 describe("webhook adapter", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("builds only the compact version-1 notification payload", () => {
     const payload = buildNotificationPayload(delivery, job, signal);
 
@@ -185,6 +189,32 @@ describe("webhook adapter", () => {
       error: "Webhook request failed"
     });
     expect(JSON.stringify(result)).not.toContain("secret");
+  });
+
+  it("aborts and retries a fetch that never settles before the attempt deadline", async () => {
+    vi.useFakeTimers();
+    let observedSignal: AbortSignal | undefined;
+    const fetch = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      observedSignal = init?.signal ?? undefined;
+      return new Promise<Response>(() => undefined);
+    });
+
+    const attempt = deliverWebhook(
+      delivery,
+      job,
+      signal,
+      { HOOK_SECRET: "secret" },
+      fetch,
+      { timeoutMs: 100 }
+    );
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(attempt).resolves.toEqual({
+      outcome: "retry",
+      error: "Webhook request failed"
+    });
+    expect(observedSignal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it.each([

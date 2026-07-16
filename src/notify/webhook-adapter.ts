@@ -27,6 +27,15 @@ export interface NotificationPayload {
   };
 }
 
+const DEFAULT_WEBHOOK_TIMEOUT_MS = 10_000;
+
+export interface WebhookAttemptOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  scheduleTimeout?: (callback: () => void, delayMs: number) => unknown;
+  cancelTimeout?: (timer: unknown) => void;
+}
+
 export function buildNotificationPayload(
   delivery: NotificationDelivery,
   job: JobRecord,
@@ -60,7 +69,8 @@ export async function deliverWebhook(
   job: JobRecord,
   signal: JobSignal,
   env: NodeJS.ProcessEnv = process.env,
-  fetchImpl: typeof fetch = globalThis.fetch
+  fetchImpl: typeof fetch = globalThis.fetch,
+  options: WebhookAttemptOptions = {}
 ): Promise<DeliveryAttemptResult> {
   if (delivery.target.type !== "webhook") {
     return { outcome: "permanent", error: "Notification target is not a webhook" };
@@ -76,18 +86,25 @@ export async function deliverWebhook(
 
   const body = JSON.stringify(buildNotificationPayload(delivery, job, signal));
   let response: Response;
+  const deadline = createDeadline(options);
   try {
-    response = await fetchImpl(delivery.target.url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "X-Codex-Mimo-Event-Id": delivery.eventId,
-        "X-Codex-Mimo-Signature": signWebhookBody(body, secret)
-      },
-      body
-    });
+    response = await Promise.race([
+      Promise.resolve(fetchImpl(delivery.target.url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "X-Codex-Mimo-Event-Id": delivery.eventId,
+          "X-Codex-Mimo-Signature": signWebhookBody(body, secret)
+        },
+        body,
+        signal: deadline.signal
+      })),
+      deadline.expired
+    ]);
   } catch {
     return { outcome: "retry", error: "Webhook request failed" };
+  } finally {
+    deadline.dispose();
   }
 
   if (response.status >= 200 && response.status < 300) {
@@ -102,4 +119,44 @@ export async function deliverWebhook(
     (response.status >= 500 && response.status <= 599)
     ? { outcome: "retry", ...result }
     : { outcome: "permanent", ...result };
+}
+
+function createDeadline(options: WebhookAttemptOptions): {
+  signal: AbortSignal;
+  expired: Promise<never>;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  const schedule = options.scheduleTimeout ?? defaultScheduleTimeout;
+  const cancel = options.cancelTimeout ?? defaultCancelTimeout;
+  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_WEBHOOK_TIMEOUT_MS);
+  const onParentAbort = () => controller.abort();
+  let rejectExpired!: (error: Error) => void;
+  const expired = new Promise<never>((_resolve, reject) => { rejectExpired = reject; });
+  const onAbort = () => rejectExpired(new Error("Notification attempt ended"));
+  controller.signal.addEventListener("abort", onAbort, { once: true });
+  options.signal?.addEventListener("abort", onParentAbort, { once: true });
+  if (options.signal?.aborted) controller.abort();
+  const timer = schedule(() => controller.abort(), timeoutMs);
+
+  return {
+    signal: controller.signal,
+    expired,
+    dispose: () => {
+      cancel(timer);
+      options.signal?.removeEventListener("abort", onParentAbort);
+      controller.signal.removeEventListener("abort", onAbort);
+    }
+  };
+}
+
+function defaultScheduleTimeout(
+  callback: () => void,
+  delayMs: number
+): ReturnType<typeof setTimeout> {
+  return setTimeout(callback, delayMs);
+}
+
+function defaultCancelTimeout(timer: unknown): void {
+  clearTimeout(timer as ReturnType<typeof setTimeout>);
 }

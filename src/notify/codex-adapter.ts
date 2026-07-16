@@ -25,7 +25,8 @@ export async function deliverCodexNotification(
   delivery: NotificationDelivery,
   job: JobRecord,
   signal: JobSignal,
-  client: CodexAppServerClient
+  client: CodexAppServerClient,
+  attemptSignal?: AbortSignal
 ): Promise<DeliveryAttemptResult> {
   if (delivery.target.type !== "codex") {
     return { outcome: "permanent", error: "Notification target is not Codex" };
@@ -33,8 +34,8 @@ export async function deliverCodexNotification(
 
   let result: DeliveryAttemptResult;
   try {
-    await client.initialize();
-    const thread = await client.resumeThread(delivery.target.threadId);
+    await client.initialize(attemptSignal);
+    const thread = await client.resumeThread(delivery.target.threadId, attemptSignal);
     if (!thread.exists) {
       result = { outcome: "permanent", error: "Codex thread does not exist" };
     } else if (thread.busy) {
@@ -42,7 +43,8 @@ export async function deliverCodexNotification(
     } else {
       await client.startTurn(
         delivery.target.threadId,
-        buildCodexNotificationPrompt(job, signal)
+        buildCodexNotificationPrompt(job, signal),
+        attemptSignal
       );
       result = { outcome: "delivered" };
     }

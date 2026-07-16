@@ -8,9 +8,9 @@ export interface ThreadResumeResult {
 }
 
 export interface CodexAppServerClient {
-  initialize(): Promise<void>;
-  resumeThread(threadId: string): Promise<ThreadResumeResult>;
-  startTurn(threadId: string, prompt: string): Promise<void>;
+  initialize(signal?: AbortSignal): Promise<void>;
+  resumeThread(threadId: string, signal?: AbortSignal): Promise<ThreadResumeResult>;
+  startTurn(threadId: string, prompt: string, signal?: AbortSignal): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -41,15 +41,20 @@ interface PendingRequest {
   method: string;
   resolve: (value: unknown) => void;
   reject: (error: CodexAppServerError) => void;
+  cleanup: () => void;
 }
 
 const MISSING_THREAD = Symbol("missing-thread");
 const CLOSE_GRACE_MS = 1_000;
 const CLOSE_TERM_WAIT_MS = 1_000;
 const CLOSE_KILL_WAIT_MS = 1_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
 export interface CodexAppServerClientOptions {
   spawnProcess?: typeof spawn;
+  requestTimeoutMs?: number;
+  scheduleRequestTimeout?: (callback: () => void, delayMs: number) => unknown;
+  cancelRequestTimeout?: (timer: unknown) => void;
 }
 
 export function createCodexAppServerClient(
@@ -66,7 +71,7 @@ export function createCodexAppServerClient(
     throw new CodexAppServerError("transport", "Codex App Server transport failed");
   }
 
-  return new StdioCodexAppServerClient(child);
+  return new StdioCodexAppServerClient(child, options);
 }
 
 class StdioCodexAppServerClient implements CodexAppServerClient {
@@ -87,7 +92,17 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     this.failTransport("Codex App Server exited");
   };
 
-  constructor(private readonly child: ChildProcessWithoutNullStreams) {
+  private readonly requestTimeoutMs: number;
+  private readonly scheduleRequestTimeout: (callback: () => void, delayMs: number) => unknown;
+  private readonly cancelRequestTimeout: (timer: unknown) => void;
+
+  constructor(
+    private readonly child: ChildProcessWithoutNullStreams,
+    options: CodexAppServerClientOptions
+  ) {
+    this.requestTimeoutMs = Math.max(1, options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+    this.scheduleRequestTimeout = options.scheduleRequestTimeout ?? defaultScheduleRequestTimeout;
+    this.cancelRequestTimeout = options.cancelRequestTimeout ?? defaultCancelRequestTimeout;
     this.lines = createInterface({ input: child.stdout });
     this.lines.on("line", this.onLine);
     this.lines.on("error", this.onTransportError);
@@ -99,7 +114,7 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     child.once("exit", this.onExit);
   }
 
-  initialize(): Promise<void> {
+  initialize(signal?: AbortSignal): Promise<void> {
     if (this.initializePromise) return this.initializePromise;
     this.initializePromise = this.request("initialize", {
       clientInfo: {
@@ -107,16 +122,16 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
         title: "Codex MiMoCode Bridge",
         version: "0.1.0"
       }
-    }).then(() => {
+    }, signal).then(() => {
       this.notify("initialized", {});
       this.initialized = true;
     });
     return this.initializePromise;
   }
 
-  async resumeThread(threadId: string): Promise<ThreadResumeResult> {
+  async resumeThread(threadId: string, signal?: AbortSignal): Promise<ThreadResumeResult> {
     this.requireInitialized();
-    const result = await this.request("thread/resume", { threadId });
+    const result = await this.request("thread/resume", { threadId }, signal);
     if (result === MISSING_THREAD) return { exists: false, busy: false };
 
     const status = readThreadStatus(result);
@@ -127,12 +142,12 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     throw new CodexAppServerError("protocol", "Codex thread is unavailable");
   }
 
-  async startTurn(threadId: string, prompt: string): Promise<void> {
+  async startTurn(threadId: string, prompt: string, signal?: AbortSignal): Promise<void> {
     this.requireInitialized();
     await this.request("turn/start", {
       threadId,
       input: [{ type: "text", text: prompt }]
-    });
+    }, signal);
   }
 
   close(): Promise<void> {
@@ -173,12 +188,24 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     }
   }
 
-  private request(method: string, params: unknown): Promise<unknown> {
+  private request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
     if (this.terminalError) return Promise.reject(this.terminalError);
+    if (signal?.aborted) {
+      this.failTransport();
+      return Promise.reject(this.terminalError!);
+    }
 
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { method, resolve, reject });
+      let timer: unknown;
+      const onAbort = () => this.failTransport();
+      const cleanup = () => {
+        this.cancelRequestTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      timer = this.scheduleRequestTimeout(() => this.failTransport(), this.requestTimeoutMs);
+      this.pending.set(id, { method, resolve, reject, cleanup });
       try {
         this.write({ method, id, params });
       } catch {
@@ -235,6 +262,7 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
         return;
       }
       this.pending.delete(response.id);
+      pending.cleanup();
       pending.resolve(response.result);
       return;
     }
@@ -244,6 +272,7 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     }
 
     this.pending.delete(response.id);
+    pending.cleanup();
     if (pending.method === "thread/resume" && isMissingThreadError(response.error)) {
       pending.resolve(MISSING_THREAD);
       return;
@@ -267,7 +296,10 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
 
   private failAll(error: CodexAppServerError): void {
     if (!this.terminalError) this.terminalError = error;
-    for (const pending of this.pending.values()) pending.reject(this.terminalError);
+    for (const pending of this.pending.values()) {
+      pending.cleanup();
+      pending.reject(this.terminalError);
+    }
     this.pending.clear();
   }
 
@@ -358,6 +390,17 @@ function isMissingThreadError(error: RpcError): boolean {
 
 function isForbiddenThreadError(error: RpcError): boolean {
   return /forbidden|permission denied|access denied|unauthori[sz]ed/i.test(error.message);
+}
+
+function defaultScheduleRequestTimeout(
+  callback: () => void,
+  delayMs: number
+): ReturnType<typeof setTimeout> {
+  return setTimeout(callback, delayMs);
+}
+
+function defaultCancelRequestTimeout(timer: unknown): void {
+  clearTimeout(timer as ReturnType<typeof setTimeout>);
 }
 
 function isValidResult(method: string, result: unknown): boolean {

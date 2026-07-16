@@ -358,47 +358,64 @@ describe("notification dispatcher", () => {
     expect(timers.timers.every((timer) => !timer.active)).toBe(true);
   });
 
-  it("settles a delivered adapter result after an ordinary lease-renewal failure", async () => {
+  it("aborts an adapter and never settles its generation after any lease-renewal failure", async () => {
     const cwd = makeCwd();
     const { job } = await makeDelivery(cwd);
-    const adapter = deferred<DeliveryAttemptResult>();
     const timers = manualLeaseTimers();
+    let attemptSignal: AbortSignal | undefined;
+    const adapter = vi.fn((
+      _delivery: NotificationDelivery,
+      _job: unknown,
+      _signal: unknown,
+      signal: AbortSignal
+    ) => {
+      attemptSignal = signal;
+      return new Promise<DeliveryAttemptResult>((resolve) => {
+        signal.addEventListener("abort", () => resolve({ outcome: "delivered" }), { once: true });
+      });
+    });
     const renewDeliveryLease = vi.fn(async () => {
       throw new Error("disk failed with actual-super-secret-value");
     });
 
     const dispatch = dispatchNextDelivery(cwd, {
       now: () => new Date(createdAt),
-      deliver: () => adapter.promise,
+      deliver: adapter,
       renewDeliveryLease,
       scheduleLeaseRenewal: timers.scheduleLeaseRenewal,
       cancelLeaseRenewal: timers.cancelLeaseRenewal
     });
     await vi.waitFor(() => expect(timers.scheduleLeaseRenewal).toHaveBeenCalledOnce());
     await timers.fireNext();
-    adapter.resolve({ outcome: "delivered" });
 
-    await expect(dispatch).resolves.toMatchObject({ outcome: "settled" });
+    await expect(dispatch).resolves.toMatchObject({ outcome: "stale" });
+    expect(attemptSignal?.aborted).toBe(true);
     expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
-      status: "delivered",
-      attempts: 1,
-      deliveredAt: createdAt
+      status: "delivering",
+      attempts: 1
     });
     expect(fs.readFileSync(job.notificationOutboxFile, "utf8"))
       .not.toContain("actual-super-secret-value");
     expect(timers.timers.every((timer) => !timer.active)).toBe(true);
   });
 
-  it("reschedules a retry from fresh settlement time after an ordinary lease-renewal failure", async () => {
+  it("allows only a reclaimed owner to settle after an ordinary renewal failure", async () => {
     const cwd = makeCwd();
     const { job } = await makeDelivery(cwd);
-    const adapter = deferred<DeliveryAttemptResult>();
     const timers = manualLeaseTimers();
     let nowMs = Date.parse(createdAt);
+    let firstAborted = false;
+    let sideEffects = 0;
 
-    const dispatch = dispatchNextDelivery(cwd, {
+    const firstDispatch = dispatchNextDelivery(cwd, {
       now: () => new Date(nowMs),
-      deliver: () => adapter.promise,
+      leaseMs: 30_000,
+      deliver: (_delivery, _job, _jobSignal, signal) => new Promise((resolve) => {
+        signal.addEventListener("abort", () => {
+          firstAborted = true;
+          resolve({ outcome: "retry", error: "ownership lost" });
+        }, { once: true });
+      }),
       renewDeliveryLease: async () => {
         throw new Error("temporary lock failure");
       },
@@ -406,17 +423,26 @@ describe("notification dispatcher", () => {
       cancelLeaseRenewal: timers.cancelLeaseRenewal
     });
     await vi.waitFor(() => expect(timers.scheduleLeaseRenewal).toHaveBeenCalledOnce());
-    nowMs += 5_000;
     await timers.fireNext();
-    nowMs += 2_000;
-    adapter.resolve({ outcome: "retry", error: "offline" });
+    await expect(firstDispatch).resolves.toMatchObject({ outcome: "stale" });
 
-    await expect(dispatch).resolves.toMatchObject({ outcome: "settled" });
+    nowMs += 31_000;
+    const secondDispatch = await dispatchNextDelivery(cwd, {
+      now: () => new Date(nowMs),
+      leaseMs: 30_000,
+      deliver: async () => {
+        sideEffects += 1;
+        return { outcome: "delivered" };
+      }
+    });
+
+    expect(firstAborted).toBe(true);
+    expect(sideEffects).toBe(1);
+    expect(secondDispatch).toMatchObject({ outcome: "settled" });
     expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
-      status: "pending",
-      attempts: 1,
-      nextAttemptAt: "2026-07-16T00:00:17.000Z",
-      lastError: "offline"
+      status: "delivered",
+      attempts: 2,
+      deliveredAt: "2026-07-16T00:00:31.000Z"
     });
     expect(timers.timers.every((timer) => !timer.active)).toBe(true);
   });
@@ -496,6 +522,8 @@ describe("notification dispatcher", () => {
     await dispatchNextDelivery(cwd, { now: () => new Date(createdAt), createCodexClient, deliverWebhook });
 
     expect(createCodexClient).toHaveBeenCalledTimes(2);
+    expect(createCodexClient).toHaveBeenNthCalledWith(1, { requestTimeoutMs: 10_000 });
+    expect(createCodexClient).toHaveBeenNthCalledWith(2, { requestTimeoutMs: 10_000 });
     expect(close).toHaveBeenCalledTimes(2);
     expect(deliverWebhook).not.toHaveBeenCalled();
   });
