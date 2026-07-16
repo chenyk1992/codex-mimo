@@ -207,7 +207,7 @@ function nestedToolCommandText(part: Record<string, unknown>): string | undefine
   if (!isRecord(state)) return undefined;
   const input = state.input;
   if (!isRecord(input)) return undefined;
-  return stringValue(input.command ?? input.filePath ?? input.path);
+  return stringValue(input.command ?? input.file_path ?? input.filepath ?? input.filePath ?? input.path);
 }
 
 function describeEvent(event: NormalizedMimoEvent): string {

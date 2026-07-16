@@ -18,6 +18,18 @@ export interface ProcessLockEndpoint {
   port: number;
 }
 
+export class ProcessLockUnavailableError extends Error {
+  readonly key: string;
+  readonly endpoint: ProcessLockEndpoint;
+
+  constructor(key: string, endpoint: ProcessLockEndpoint, cause: unknown) {
+    super(`Timed out acquiring process lock at ${endpoint.host}:${endpoint.port}`, { cause });
+    this.name = "ProcessLockUnavailableError";
+    this.key = key;
+    this.endpoint = endpoint;
+  }
+}
+
 export function resolveProcessLockEndpoint(key: string): ProcessLockEndpoint {
   const canonicalKey = canonicalizeLockKey(key);
   const hash = createHash("sha256").update(canonicalKey, "utf8").digest();
@@ -43,7 +55,7 @@ export async function withProcessLock<T>(
   }
 
   const endpoint = resolveProcessLockEndpoint(key);
-  const server = await acquireEndpoint(endpoint, timeoutMs, retryMs);
+  const server = await acquireEndpoint(key, endpoint, timeoutMs, retryMs);
   try {
     return await action();
   } finally {
@@ -70,6 +82,7 @@ function canonicalizeLockKey(key: string): string {
 }
 
 async function acquireEndpoint(
+  key: string,
   endpoint: ProcessLockEndpoint,
   timeoutMs: number,
   retryMs: number
@@ -82,10 +95,7 @@ async function acquireEndpoint(
       if (!isErrorWithCode(error, "EADDRINUSE")) throw error;
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
-        throw new Error(
-          `Timed out acquiring process lock at ${endpoint.host}:${endpoint.port}`,
-          { cause: error }
-        );
+        throw new ProcessLockUnavailableError(key, endpoint, error);
       }
       await delay(Math.min(retryMs, remainingMs));
     }

@@ -23,7 +23,7 @@ interface StreamingChildProcess extends EventEmitter {
 }
 
 export interface StreamingRunOptions {
-  onStart?: (pid: number | null) => void;
+  onStart?: (pid: number | null) => Promise<void> | void;
   timeoutMs?: number;
   timeoutWarningMs?: number;
   signal?: AbortSignal;
@@ -118,8 +118,6 @@ export async function runMimoCliStreaming(
   const stderrParts: string[] = [];
   let terminationReason: TerminationReason | undefined;
 
-  options.onStart?.(child.pid ?? null);
-
   const terminateTree = (options.terminateProcessTree ?? terminateProcessTree).bind(null);
 
   const timeout = options.timeoutMs
@@ -179,21 +177,49 @@ export async function runMimoCliStreaming(
     child.stderr.on("end", resolve);
   });
 
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    child.on("error", reject);
-    child.on("close", (code: number | null) => resolve(terminationReason ? 124 : code ?? 1));
+  let cleanupExitListeners = () => undefined;
+  const exitCodePromise = new Promise<number>((resolve, reject) => {
+    const onError = (error: Error) => {
+      child.off("close", onClose);
+      reject(error);
+    };
+    const onClose = (code: number | null) => {
+      child.off("error", onError);
+      resolve(terminationReason ? 124 : code ?? 1);
+    };
+    cleanupExitListeners = () => {
+      child.off("error", onError);
+      child.off("close", onClose);
+    };
+    child.once("error", onError);
+    child.once("close", onClose);
   });
+  void exitCodePromise.catch(() => undefined);
 
-  if (timeout) clearTimeout(timeout);
-  if (warningTimeout) clearTimeout(warningTimeout);
-  abortCleanup?.();
-  await Promise.all([stdoutDone, stderrDone]);
+  try {
+    try {
+      await options.onStart?.(child.pid ?? null);
+    } catch (error) {
+      terminateTree(child.pid ?? null, child);
+      cleanupExitListeners();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      throw error;
+    }
 
-  return {
-    stdout: stdoutParts.join(""),
-    stderr: stderrParts.join(""),
-    exitCode,
-    pid: child.pid ?? null,
-    terminationReason
-  };
+    const exitCode = await exitCodePromise;
+    await Promise.all([stdoutDone, stderrDone]);
+    return {
+      stdout: stdoutParts.join(""),
+      stderr: stderrParts.join(""),
+      exitCode,
+      pid: child.pid ?? null,
+      terminationReason
+    };
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    if (warningTimeout) clearTimeout(warningTimeout);
+    abortCleanup?.();
+    cleanupExitListeners();
+  }
 }

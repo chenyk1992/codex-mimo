@@ -7,6 +7,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  ProcessLockUnavailableError,
   resolveProcessLockEndpoint,
   withProcessLock
 } from "../../../src/core/process-lock.js";
@@ -174,6 +175,17 @@ describe("process lock", () => {
         timeoutMs: 40,
         retryMs: 5
       })).rejects.toThrow("Timed out acquiring process lock");
+    });
+  });
+
+  it("reports immediate ownership contention with a typed unavailable error", async () => {
+    const key = path.join(tempDir(), "immediate-held.lock");
+
+    await withProcessLock(key, async () => {
+      const error = await withProcessLock(key, () => undefined, { timeoutMs: 0 })
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ProcessLockUnavailableError);
+      expect(error).toMatchObject({ key });
     });
   });
 

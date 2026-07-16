@@ -9,6 +9,7 @@ import {
   type PendingJobTransition
 } from "./jobs.js";
 import type { NotificationTarget } from "../notify/types.js";
+import { withProcessLock } from "./process-lock.js";
 
 const DEFAULT_MAX_JOBS = 100;
 
@@ -177,11 +178,35 @@ export function updateJob(
   return updated;
 }
 
-export function savePendingJobTransition(
+export async function updateJobAuthoritative(
+  cwd: string,
+  jobId: string,
+  patch: JobUpdatePatch,
+  options: JobStoreOptions = {}
+): Promise<JobRecord> {
+  const existing = readJob(cwd, jobId);
+  if (!existing) throw new Error(`Job not found: ${jobId}`);
+
+  const updated: JobRecord = {
+    ...existing,
+    ...patch,
+    id: existing.id,
+    kind: existing.kind,
+    cwd: existing.cwd,
+    createdAt: existing.createdAt,
+    updatedAt: nowIso()
+  };
+  if (Object.prototype.hasOwnProperty.call(patch, "phase") && patch.phase === undefined) {
+    delete updated.phase;
+  }
+  return persistAuthoritativeRecord(cwd, updated, options.maxJobs ?? DEFAULT_MAX_JOBS);
+}
+
+export async function savePendingJobTransition(
   cwd: string,
   jobId: string,
   pendingTransition: PendingJobTransition
-): JobRecord {
+): Promise<JobRecord> {
   const existing = readJob(cwd, jobId);
   if (!existing) throw new Error(`Job not found: ${jobId}`);
   if (existing.pendingTransition) {
@@ -194,18 +219,18 @@ export function savePendingJobTransition(
     );
   }
 
-  return writeUpdatedJob(cwd, {
+  return persistAuthoritativeRecord(cwd, {
     ...existing,
     pendingTransition,
     updatedAt: nowIso()
   });
 }
 
-export function finalizePendingJobTransition(
+export async function finalizePendingJobTransition(
   cwd: string,
   jobId: string,
   pendingTransition: PendingJobTransition
-): JobRecord {
+): Promise<JobRecord> {
   const existing = readJob(cwd, jobId);
   if (!existing) throw new Error(`Job not found: ${jobId}`);
   if (!existing.pendingTransition ||
@@ -228,14 +253,14 @@ export function finalizePendingJobTransition(
     updatedAt: nowIso()
   };
   if (pendingTransition.phase === undefined) delete updated.phase;
-  return writeUpdatedJob(cwd, updated);
+  return persistAuthoritativeRecord(cwd, updated);
 }
 
-export function clearPendingJobTransition(
+export async function clearPendingJobTransition(
   cwd: string,
   jobId: string,
   pendingTransition: PendingJobTransition
-): JobRecord {
+): Promise<JobRecord> {
   const existing = readJob(cwd, jobId);
   if (!existing) throw new Error(`Job not found: ${jobId}`);
   const finalized = { ...pendingTransition, stage: "finalized" as const };
@@ -251,7 +276,7 @@ export function clearPendingJobTransition(
 
   const updated = { ...existing, updatedAt: nowIso() };
   delete updated.pendingTransition;
-  return writeUpdatedJob(cwd, updated);
+  return persistAuthoritativeRecord(cwd, updated);
 }
 
 function assertValidJobId(jobId: string): void {
@@ -343,6 +368,32 @@ function writeUpdatedJob(cwd: string, record: JobRecord): JobRecord {
     // The per-job record is authoritative; the auxiliary index can be rebuilt later.
   }
   return record;
+}
+
+async function persistAuthoritativeRecord(
+  cwd: string,
+  record: JobRecord,
+  maxJobs = DEFAULT_MAX_JOBS
+): Promise<JobRecord> {
+  writeJobRecord(cwd, record);
+  await refreshStateIndexBestEffort(cwd, record.id, maxJobs);
+  return record;
+}
+
+async function refreshStateIndexBestEffort(
+  cwd: string,
+  jobId: string,
+  maxJobs: number
+): Promise<void> {
+  try {
+    await withProcessLock(resolveJobStateFile(cwd), () => {
+      const state = readState(cwd);
+      state.jobs = [jobId, ...state.jobs.filter((id) => id !== jobId)];
+      writeState(cwd, pruneState(cwd, state, maxJobs));
+    });
+  } catch {
+    // The atomic per-job record is authoritative; the shared index is rebuildable.
+  }
 }
 
 function samePendingTransition(

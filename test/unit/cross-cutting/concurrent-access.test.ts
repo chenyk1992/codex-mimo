@@ -17,6 +17,7 @@ import {
   readDeliveries
 } from "../../../src/notify/outbox.js";
 import { readJobSignals } from "../../../src/core/job-signals.js";
+import { appendJobProgress, transitionJob, updateRunningJobPid } from "../../../src/core/job-transition.js";
 
 const tempDirs: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -200,5 +201,29 @@ describe("concurrent access", () => {
 
     expect(readJobSignals(job.signalsFile).signals.map((signal) => signal.cursor).sort())
       .toEqual([1, 2]);
+  });
+
+  it("keeps every job in the shared state index during different-job PID and progress updates", async () => {
+    const cwd = tempWorkspace();
+    const first = createJobStore(cwd).create({ kind: "implement", task: "first", request: { cwd } });
+    const second = createJobStore(cwd).create({ kind: "implement", task: "second", request: { cwd } });
+    await transitionJob(cwd, first.id, { status: "running", phase: "starting", summary: "first" });
+    await transitionJob(cwd, second.id, { status: "running", phase: "starting", summary: "second" });
+
+    await Promise.all([
+      updateRunningJobPid(cwd, first.id, 111),
+      appendJobProgress(cwd, second.id, {
+        kind: "milestone",
+        level: "info",
+        summary: "second progressed"
+      })
+    ]);
+
+    expect(listJobs(cwd).map((job) => job.id)).toEqual(expect.arrayContaining([first.id, second.id]));
+    expect(readJob(cwd, first.id)?.pid).toBe(111);
+    expect(readJobSignals(second.signalsFile).signals).toEqual([
+      expect.objectContaining({ kind: "phase_changed" }),
+      expect.objectContaining({ kind: "milestone", summary: "second progressed" })
+    ]);
   });
 });

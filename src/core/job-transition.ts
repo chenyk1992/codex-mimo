@@ -16,7 +16,7 @@ import {
   readJob,
   resolveJobPaths,
   savePendingJobTransition,
-  updateJob
+  updateJobAuthoritative
 } from "./job-store.js";
 import {
   nowIso,
@@ -91,7 +91,7 @@ export async function transitionJob(
     }
 
     const pending = buildPendingTransition(existing, transition);
-    const intentJob = savePendingJobTransition(cwd, jobId, pending);
+    const intentJob = await savePendingJobTransition(cwd, jobId, pending);
     await dependencies.afterIntentPersisted?.();
     return applyPendingTransition(cwd, intentJob, pending, dependencies);
   });
@@ -119,10 +119,10 @@ export async function updateRunningJobPid(
   jobId: string,
   pid: number | null
 ): Promise<JobRecord> {
-  return withProcessLock(resolveJobStateLock(cwd, jobId), () => {
+  return withProcessLock(resolveJobStateLock(cwd, jobId), async () => {
     const job = requireJob(cwd, jobId);
     if (job.status !== "running") return job;
-    return updateJob(cwd, jobId, { pid });
+    return updateJobAuthoritative(cwd, jobId, { pid });
   });
 }
 
@@ -159,7 +159,7 @@ async function applyPendingTransition(
 
   let finalized = job;
   if (pending.stage === "prepared") {
-    finalized = finalizePendingJobTransition(cwd, job.id, pending);
+    finalized = await finalizePendingJobTransition(cwd, job.id, pending);
     pending = finalized.pendingTransition!;
     await dependencies.afterJobFinalized?.();
   }
@@ -177,7 +177,7 @@ async function applyPendingTransition(
     await dependencies.afterDeliveryEnqueued?.();
   }
 
-  const cleared = clearPendingJobTransition(cwd, finalized.id, pending);
+  const cleared = await clearPendingJobTransition(cwd, finalized.id, pending);
   await dependencies.afterIntentCleared?.();
   return { job: cleared, signal, deliveryCreated };
 }

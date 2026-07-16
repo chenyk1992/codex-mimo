@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { normalizeMimoEvent, type NormalizedMimoEvent } from "../compose/events.js";
 import { appendJobSignal } from "./job-signals.js";
-import { readJob, resolveJobPaths, updateJob } from "./job-store.js";
+import { readJob, resolveJobPaths, updateJobAuthoritative } from "./job-store.js";
 import type { JobPhase } from "./jobs.js";
 import { withProcessLock } from "./process-lock.js";
 
@@ -41,7 +41,7 @@ export async function appendRawAndNormalizedEvent(
   const rawLine = line.replace(/\r?\n$/, "");
   if (!rawLine.trim()) return undefined;
 
-  return withProcessLock(resolveJobPaths(cwd, jobId).jobFile, () => {
+  return withProcessLock(resolveJobPaths(cwd, jobId).jobFile, async () => {
     const job = readJob(cwd, jobId);
     if (!job) throw new Error(`Job not found: ${jobId}`);
 
@@ -53,7 +53,7 @@ export async function appendRawAndNormalizedEvent(
     const summary = summarizeNormalizedEvent(event);
     if (summary) appendJobLogLine(job.logFile, summary);
     const updated = phase || summary
-      ? updateJob(cwd, jobId, {
+      ? await updateJobAuthoritative(cwd, jobId, {
           ...(phase ? { phase } : {}),
           ...(summary ? { summary } : {})
         })

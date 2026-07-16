@@ -130,6 +130,49 @@ describe("streaming MiMo CLI runner", () => {
     });
   });
 
+  it("awaits asynchronous onStart before completing", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let settled = false;
+    const run = runMimoCliStreaming("E:/project/app", ["run"], {
+      spawnProcess: () => {
+        const child = makeChild(655);
+        queueMicrotask(() => child.emit("close", 0));
+        return child;
+      },
+      onStart: async () => held
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    release();
+    await expect(run).resolves.toMatchObject({ exitCode: 0 });
+  });
+
+  it("kills the child and rejects when asynchronous onStart fails", async () => {
+    const startup = new Error("PID persistence failed");
+    const child = makeChild(656);
+    const terminate = vi.fn((_pid, child) => {
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    });
+
+    await expect(runMimoCliStreaming("E:/project/app", ["run"], {
+      timeoutMs: 10_000,
+      spawnProcess: () => child,
+      terminateProcessTree: terminate,
+      onStart: async () => { throw startup; }
+    })).rejects.toBe(startup);
+
+    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(terminate.mock.calls[0][0]).toBe(656);
+    expect(child.listenerCount("error")).toBe(0);
+    expect(child.listenerCount("close")).toBe(0);
+  });
+
   it("terminates the process tree on timeout", async () => {
     let killedPid: number | null | undefined;
     const result = await runMimoCliStreaming("E:/project/app", ["run"], {

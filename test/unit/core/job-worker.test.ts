@@ -5,8 +5,8 @@ import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BoundJobDefinition } from "../../../src/core/job-definitions.js";
 import { runJobWorker, type JobWorkerDependencies } from "../../../src/core/job-worker.js";
-import { readJob, createJobStore } from "../../../src/core/job-store.js";
-import { transitionJob } from "../../../src/core/job-transition.js";
+import { readJob, createJobStore, resolveJobStateFile } from "../../../src/core/job-store.js";
+import { transitionJob, updateRunningJobPid } from "../../../src/core/job-transition.js";
 import type { JobKind, JobRecord } from "../../../src/core/jobs.js";
 import { readJobSignals } from "../../../src/core/job-signals.js";
 import { readDeliveries } from "../../../src/notify/outbox.js";
@@ -121,6 +121,101 @@ function workerDeps(overrides: Partial<JobWorkerDependencies> = {}): JobWorkerDe
 }
 
 describe("runJobWorker", () => {
+  it("allows only one concurrent worker to own a queued job", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement", true);
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const firstTransition = new Promise<void>((resolve) => { entered = resolve; });
+    let runningCalls = 0;
+    const delayedTransition: typeof transitionJob = async (transitionCwd, transitionJobId, request) => {
+      if (request.status === "running") {
+        runningCalls += 1;
+        if (runningCalls === 1) {
+          entered();
+          await held;
+        }
+      }
+      return transitionJob(transitionCwd, transitionJobId, request);
+    };
+    const deps = workerDeps({ transitionJob: delayedTransition });
+
+    const first = runJobWorker(cwd, job.id, deps);
+    await firstTransition;
+    const second = runJobWorker(cwd, job.id, deps);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release();
+    await Promise.all([first, second]);
+
+    const stored = readJob(cwd, job.id)!;
+    const signals = readJobSignals(stored.signalsFile).signals;
+    expect(deps.bindJobDefinition).toHaveBeenCalledTimes(1);
+    expect(deps.runMimoStreaming).toHaveBeenCalledTimes(1);
+    expect(signals.filter((signal) =>
+      signal.kind === "phase_changed" && signal.phase === "starting"
+    )).toHaveLength(1);
+    expect(signals.filter((signal) => signal.kind === "completed")).toHaveLength(1);
+    expect(readDeliveries(stored.notificationOutboxFile)).toHaveLength(1);
+  });
+
+  it.each([null, 808])("recovers a stale running job with stored PID %s without rerunning MiMo", async (pid) => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement", true);
+    await transitionJob(cwd, job.id, {
+      status: "running",
+      phase: "starting",
+      summary: "started",
+      pid
+    });
+    const terminateProcessTree = vi.fn();
+    const deps = {
+      ...workerDeps(),
+      terminateProcessTree
+    } as JobWorkerDependencies;
+
+    await runJobWorker(cwd, job.id, deps);
+    await runJobWorker(cwd, job.id, deps);
+
+    const stored = readJob(cwd, job.id)!;
+    expect(stored).toMatchObject({
+      status: "failed",
+      errorCode: "worker_restarted",
+      pid: null
+    });
+    expect(terminateProcessTree).toHaveBeenCalledTimes(1);
+    expect(terminateProcessTree).toHaveBeenCalledWith(pid);
+    expect(deps.runMimoStreaming).not.toHaveBeenCalled();
+    expect(readJobSignals(stored.signalsFile).signals.filter((signal) => signal.kind === "failed")).toHaveLength(1);
+    expect(readDeliveries(stored.notificationOutboxFile)).toHaveLength(1);
+    expect(deps.spawnNotificationWorker).toHaveBeenCalledTimes(2);
+  });
+
+  it("records worker_restarted even when terminating the stale process fails", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement", true);
+    await transitionJob(cwd, job.id, {
+      status: "running",
+      phase: "starting",
+      summary: "started",
+      pid: 808
+    });
+    const deps = workerDeps({
+      terminateProcessTree: vi.fn(() => {
+        throw new Error("access denied");
+      })
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "worker_restarted",
+      pid: null
+    });
+    expect(deps.runMimoStreaming).not.toHaveBeenCalled();
+  });
+
   it.each(["plan", "implement", "review", "fix-ci", "resume", "compose"] as const)(
     "runs %s through the same lifecycle",
     async (kind) => {
@@ -153,6 +248,103 @@ describe("runJobWorker", () => {
       expect.any(Array),
       expect.objectContaining({ timeoutMs: 1_800_000 })
     );
+  });
+
+  it("stops after buildPrompt when the job is cancelled during prompt setup", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "plan");
+    const bound = definition();
+    vi.mocked(bound.buildPrompt).mockImplementationOnce(async () => {
+      await transitionJob(cwd, job.id, { status: "cancelled", summary: "cancelled" });
+      return { message: "prompt", files: [] };
+    });
+    const deps = workerDeps({ bindJobDefinition: () => bound });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)?.status).toBe("cancelled");
+    expect(deps.createHookCallbackController).not.toHaveBeenCalled();
+    expect(deps.runMimoStreaming).not.toHaveBeenCalled();
+  });
+
+  it("stops and closes the hook when cancelled after hook creation", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    const controller = hook();
+    const deps = workerDeps({
+      createHookCallbackController: async () => {
+        await transitionJob(cwd, job.id, { status: "cancelled", summary: "cancelled" });
+        return controller;
+      }
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)?.status).toBe("cancelled");
+    expect(deps.runMimoStreaming).not.toHaveBeenCalled();
+    expect(controller.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts a newly spawned child when cancellation wins the PID-null window", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    let observedAborted = false;
+    const deps = workerDeps({
+      runMimoStreaming: async (_cwd, _args, options) => {
+        await transitionJob(cwd, job.id, { status: "cancelled", summary: "cancelled" });
+        await options.onStart?.(909);
+        observedAborted = options.signal?.aborted ?? false;
+        return { ...completedRun, exitCode: 124, pid: 909, terminationReason: "host_abort" };
+      }
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(observedAborted).toBe(true);
+    expect(readJob(cwd, job.id)).toMatchObject({ status: "cancelled", pid: null });
+  });
+
+  it("stops a pending callback wait when the authoritative job becomes cancelled", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    const controller = hook();
+    vi.mocked(controller.waitForCallback).mockImplementationOnce(() => new Promise(() => {}));
+    let cancelled = false;
+    const bound = definition();
+    const deps = {
+      ...workerDeps({
+        bindJobDefinition: () => bound,
+        createHookCallbackController: async () => controller
+      }),
+      sleep: async () => {
+        if (!cancelled) {
+          cancelled = true;
+          await transitionJob(cwd, job.id, { status: "cancelled", summary: "cancelled" });
+        }
+      }
+    } as JobWorkerDependencies;
+
+    const settled = await Promise.race([
+      runJobWorker(cwd, job.id, deps).then(() => "done"),
+      new Promise<"stuck">((resolve) => setTimeout(() => resolve("stuck"), 100))
+    ]);
+
+    expect(settled).toBe("done");
+    expect(bound.finalize).not.toHaveBeenCalled();
+    expect(deps.captureDiff).not.toHaveBeenCalled();
+    expect(controller.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("completes when auxiliary state.json refresh fails after authoritative job writes", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    const stateFile = resolveJobStateFile(cwd);
+    fs.rmSync(stateFile, { force: true });
+    fs.mkdirSync(stateFile);
+
+    await runJobWorker(cwd, job.id, workerDeps());
+
+    expect(readJob(cwd, job.id)).toMatchObject({ status: "completed", pid: null });
   });
 
   it("does not report its own .codex-mimo runtime files as read-only writes", async () => {
@@ -309,6 +501,34 @@ describe("runJobWorker", () => {
     expect(fs.readFileSync(stored.logFile, "utf8")).toContain("npm test");
     expect(fs.readFileSync(stored.logFile, "utf8")).toContain("Done.");
     expect(readJobSignals(stored.signalsFile).signals.some((signal) => signal.kind === "milestone")).toBe(true);
+  });
+
+  it("logs canonical file_path for read, write, and edit events", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    const deps = workerDeps({
+      runMimoStreaming: async (_cwd, _args, options) => {
+        for (const tool of ["read", "write", "edit"]) {
+          await options.onLine?.(JSON.stringify({
+            type: "tool_use",
+            part: {
+              type: "tool",
+              tool,
+              state: { input: { file_path: `src/${tool}.ts`, filePath: "wrong.ts" } }
+            }
+          }));
+        }
+        return completedRun;
+      }
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    const log = fs.readFileSync(readJob(cwd, job.id)!.logFile, "utf8");
+    expect(log).toContain("src/read.ts");
+    expect(log).toContain("src/write.ts");
+    expect(log).toContain("src/edit.ts");
+    expect(log).not.toContain("wrong.ts");
   });
 
   it("clears PID and does not let a cancellation race create a second terminal event", async () => {

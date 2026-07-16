@@ -4,7 +4,7 @@ import {
   type JobExecutionFinalizeContext
 } from "./job-definitions.js";
 import { appendJobLogLine, appendRawAndNormalizedEvent } from "./job-log.js";
-import { readJob } from "./job-store.js";
+import { readJob, resolveJobPaths } from "./job-store.js";
 import {
   recoverPendingTransition,
   transitionJob,
@@ -31,8 +31,13 @@ import {
   runMimoCliStreaming,
   type StreamingRunResult
 } from "../mimo/streaming-runner.js";
-import { spawnNotificationWorker } from "./job-process.js";
+import { spawnNotificationWorker, terminateJobProcess } from "./job-process.js";
 import type { NormalizedMimoEvent } from "../compose/events.js";
+import {
+  ProcessLockUnavailableError,
+  resolveProcessLockEndpoint,
+  withProcessLock
+} from "./process-lock.js";
 
 export interface JobWorkerDependencies {
   bindJobDefinition?: (job: JobRecord) => BoundJobDefinition;
@@ -47,6 +52,8 @@ export interface JobWorkerDependencies {
   updateRunningJobPid?: typeof updateRunningJobPid;
   appendRawAndNormalizedEvent?: typeof appendRawAndNormalizedEvent;
   spawnNotificationWorker?: typeof spawnNotificationWorker;
+  terminateProcessTree?: (pid: number | null) => void;
+  sleep?: (milliseconds: number) => Promise<void>;
 }
 
 type WorkerStage = "starting" | "prompt" | "hook" | "run" | "callback" | "finalize";
@@ -65,14 +72,54 @@ export async function runJobWorker(
   jobId: string,
   deps: JobWorkerDependencies = {}
 ): Promise<void> {
+  const ownershipKey = `${resolveJobPaths(cwd, jobId).jobFile}.worker-ownership`;
+  const ownershipEndpoint = resolveProcessLockEndpoint(ownershipKey);
+  try {
+    await withProcessLock(ownershipKey, () => runOwnedJobWorker(cwd, jobId, deps), {
+      timeoutMs: 0
+    });
+  } catch (error) {
+    if (error instanceof ProcessLockUnavailableError && error.key === ownershipKey &&
+        error.endpoint.host === ownershipEndpoint.host &&
+        error.endpoint.port === ownershipEndpoint.port) {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function runOwnedJobWorker(
+  cwd: string,
+  jobId: string,
+  deps: JobWorkerDependencies
+): Promise<void> {
   const recover = deps.recoverPendingTransition ?? recoverPendingTransition;
   const recovered = await recover(cwd, jobId);
   if (recovered?.deliveryCreated) startNotificationWorker(cwd, recovered.job, deps);
 
   const initial = requireJob(cwd, jobId);
-  if (initial.status !== "queued") return;
+  if (TERMINAL_STATUSES.has(initial.status)) return;
 
   const transition = deps.transitionJob ?? transitionJob;
+  if (initial.status === "running") {
+    try {
+      (deps.terminateProcessTree ?? ((pid) => terminateJobProcess(pid)))(initial.pid ?? null);
+    } catch (error) {
+      bestEffortLog(initial.logFile, `Failed to terminate stale MiMoCode process: ${errorMessage(error)}`);
+    }
+    const failure: JobTransition = {
+      status: "failed",
+      summary: "A previous job worker exited while MiMoCode was still running.",
+      error: "A previous job worker exited while MiMoCode was still running.",
+      errorCode: "worker_restarted"
+    };
+    const result = await transitionRecoverably(cwd, jobId, failure, deps);
+    bestEffortLog(result.job.logFile, failure.error!);
+    if (result.deliveryCreated) startNotificationWorker(cwd, result.job, deps);
+    return;
+  }
+  if (initial.status !== "queued") return;
+
   let stage: WorkerStage = "starting";
   let hook: HookCallbackController | undefined;
   let eventWrites = Promise.resolve();
@@ -85,23 +132,27 @@ export async function runJobWorker(
       phase: "starting",
       summary: "Starting MiMoCode."
     });
+    if (await stopForExternalTerminal(cwd, jobId, deps)) return;
 
     stage = "prompt";
     const prompt = await definition.buildPrompt();
+    if (await stopForExternalTerminal(cwd, jobId, deps)) return;
     const mimoArgs = definition.buildMimoArgs(prompt);
     const captureStatus = deps.captureStatus ?? captureGitStatus;
     const captureHead = deps.captureHead ?? captureGitHead;
     const gitStatusBefore = withoutRuntimeStatus(await captureStatus(cwd));
     const gitHeadBefore = await captureHead(cwd);
+    if (await stopForExternalTerminal(cwd, jobId, deps)) return;
 
     stage = "hook";
     hook = await (deps.createHookCallbackController ?? createHookCallbackController)({
       cwd,
       kind: initial.kind
     });
+    if (await stopForExternalTerminal(cwd, jobId, deps)) return;
 
     const events: NormalizedMimoEvent[] = [];
-    const queueEventWrite = (action: () => Promise<NormalizedMimoEvent | JobRecord | undefined>) => {
+    const queueEventWrite = (action: () => Promise<NormalizedMimoEvent | undefined>) => {
       eventWrites = eventWrites.then(async () => {
         try {
           const result = await action();
@@ -113,11 +164,15 @@ export async function runJobWorker(
     };
 
     stage = "run";
+    const abortController = new AbortController();
     const run = await (deps.runMimoStreaming ?? runMimoCliStreaming)(cwd, mimoArgs, {
       timeoutMs: readTimeout(initial.request),
       env: hook.env,
-      onStart: (pid) => queueEventWrite(async () =>
-        (deps.updateRunningJobPid ?? updateRunningJobPid)(cwd, jobId, pid)),
+      signal: abortController.signal,
+      onStart: async (pid) => {
+        const updated = await (deps.updateRunningJobPid ?? updateRunningJobPid)(cwd, jobId, pid);
+        if (updated.status !== "running") abortController.abort();
+      },
       onLine: (line) => queueEventWrite(async () =>
         (deps.appendRawAndNormalizedEvent ?? appendRawAndNormalizedEvent)(cwd, jobId, line))
     });
@@ -127,10 +182,9 @@ export async function runJobWorker(
     if (await stopForExternalTerminal(cwd, jobId, deps)) return;
 
     stage = "callback";
-    const callbackEvidence = toExecutionCallbackEvidence(
-      hook.invocationId,
-      await hook.waitForCallback()
-    );
+    const callbackEvidence = await waitForExecutionCallback(cwd, jobId, hook, deps);
+    if (!callbackEvidence) return;
+    if (await stopForExternalTerminal(cwd, jobId, deps)) return;
 
     stage = "finalize";
     const captureDiff = deps.captureDiff ?? captureGitDiff;
@@ -160,7 +214,7 @@ export async function runJobWorker(
 
     if (await stopForExternalTerminal(cwd, jobId, deps)) return;
     const result = await transition(cwd, jobId, outcome);
-    appendJobLogLine(result.job.logFile, outcome.summary);
+    bestEffortLog(result.job.logFile, outcome.summary);
     if (result.deliveryCreated) startNotificationWorker(cwd, result.job, deps);
   } catch (error) {
     await eventWrites;
@@ -177,6 +231,46 @@ export async function runJobWorker(
         );
       }
     }
+  }
+}
+
+async function waitForExecutionCallback(
+  cwd: string,
+  jobId: string,
+  hook: HookCallbackController,
+  deps: JobWorkerDependencies
+): Promise<ReturnType<typeof toExecutionCallbackEvidence> | undefined> {
+  const callback = hook.waitForCallback().then(
+    (value) => ({ type: "callback" as const, value }),
+    (error: unknown) => ({ type: "error" as const, error })
+  );
+  const sleep = deps.sleep ?? delay;
+
+  while (true) {
+    const result = await Promise.race([
+      callback,
+      sleep(100).then(() => ({ type: "tick" as const }))
+    ]);
+    if (result.type === "callback") {
+      return toExecutionCallbackEvidence(hook.invocationId, result.value);
+    }
+    if (result.type === "error") throw result.error;
+    if (await stopForExternalTerminal(cwd, jobId, deps)) return undefined;
+  }
+}
+
+async function transitionRecoverably(
+  cwd: string,
+  jobId: string,
+  request: JobTransition,
+  deps: JobWorkerDependencies
+): Promise<JobTransitionResult> {
+  try {
+    return await (deps.transitionJob ?? transitionJob)(cwd, jobId, request);
+  } catch (error) {
+    const recovered = await (deps.recoverPendingTransition ?? recoverPendingTransition)(cwd, jobId);
+    if (!recovered) throw error;
+    return recovered;
   }
 }
 
@@ -221,7 +315,7 @@ async function failWorker(
     if (!recovered) throw error;
     result = recovered;
   }
-  appendJobLogLine(result.job.logFile, failure.error!);
+  bestEffortLog(result.job.logFile, failure.error!);
   if (result.deliveryCreated) startNotificationWorker(cwd, result.job, deps);
 }
 
@@ -280,6 +374,10 @@ function stageErrorCode(stage: WorkerStage): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function bestEffortLog(file: string, message: string): void {
