@@ -1,4 +1,5 @@
 import type { NotificationInput, NotificationTarget } from "./types.js";
+import { InputValidationError } from "../core/input-validation.js";
 
 export function resolveNotificationTarget(
   input: NotificationInput | undefined,
@@ -12,7 +13,7 @@ export function resolveNotificationTarget(
   if (input.type === "codex") {
     const threadId = input.threadId?.trim() || env.CODEX_THREAD_ID?.trim();
     if (!threadId) {
-      throw new Error("Codex notification requires threadId");
+      throw new InputValidationError("Codex notification requires threadId");
     }
     return { type: "codex", threadId };
   }
@@ -22,15 +23,15 @@ export function resolveNotificationTarget(
   try {
     protocol = new URL(url).protocol;
   } catch {
-    throw new Error("Webhook URL must use http or https");
+    throw new InputValidationError("Webhook URL must use http or https");
   }
   if (protocol !== "http:" && protocol !== "https:") {
-    throw new Error("Webhook URL must use http or https");
+    throw new InputValidationError("Webhook URL must use http or https");
   }
 
   const secretEnv = input.secretEnv.trim();
   if (!secretEnv) {
-    throw new Error("Webhook notification requires secretEnv");
+    throw new InputValidationError("Webhook notification requires secretEnv");
   }
   return { type: "webhook", url, secretEnv };
 }

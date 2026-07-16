@@ -14,8 +14,10 @@ import {
   mimoWait as defaultMimoWait
 } from "../codex/tools.js";
 import { runJobWorker as defaultRunJobWorker } from "../core/job-worker.js";
+import { formatZodError, InputValidationError } from "../core/input-validation.js";
 import { runNotificationWorker as defaultRunNotificationWorker } from "../notify/worker.js";
 import type { NotificationInput } from "../notify/types.js";
+import { ZodError } from "zod";
 import {
   formatDoctorReport as defaultFormatDoctorReport,
   runDoctor as defaultRunDoctor,
@@ -113,8 +115,12 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
     stdout(JSON.stringify(result));
     return 0;
   } catch (error) {
+    if (error instanceof ZodError) {
+      stderr(formatZodError(error));
+      return 2;
+    }
     stderr(errorMessage(error));
-    return error instanceof CliInputError ? 2 : 1;
+    return error instanceof InputValidationError ? 2 : 1;
   }
 }
 
@@ -377,7 +383,7 @@ function appendFlag(flags: Map<string, string[]>, flag: string, value: string): 
   flags.set(flag, [...(flags.get(flag) ?? []), value]);
 }
 
-class CliInputError extends Error {}
+class CliInputError extends InputValidationError {}
 
 function isFailedHealthcheck(result: unknown): boolean {
   return typeof result === "object" && result !== null && "ok" in result && result.ok === false;

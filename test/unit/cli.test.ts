@@ -53,6 +53,17 @@ async function invoke(args: string[], overrides: Partial<CliDependencies> = {}) 
   return { exitCode, stdout: stdout.join("\n"), stderr: stderr.join("\n"), deps };
 }
 
+async function invokeReal(args: string[]) {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const exitCode = await runCli(args, {
+    cwd: () => cwd,
+    stdout: (line) => stdout.push(line),
+    stderr: (line) => stderr.push(line)
+  });
+  return { exitCode, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
+}
+
 describe("unified CLI work commands", () => {
   const cases = [
     ["plan", ["plan", "--cwd", cwd, "Plan authentication"], "mimoPlan",
@@ -219,5 +230,39 @@ describe("strict CLI surface", () => {
     const result = await invoke(["plan", "Task", "--timeout-ms", "never"]);
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain("--timeout-ms must be a positive integer");
+  });
+});
+
+describe("shared input validation boundary", () => {
+  it.each([
+    [["compose", "--workflow", "bogus", "Task"], "workflow"],
+    [["events", "--min-level", "trace"], "minLevel"],
+    [["events", "--limit", "101"], "limit"]
+  ] as const)("returns exit 2 for invalid shared input %#", async (args, field) => {
+    const result = await invokeReal([...args]);
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toMatch(new RegExp(`^Invalid input: ${field}: `));
+    expect(result.stderr).not.toContain("[\n  {");
+  });
+
+  it("returns exit 2 for a non-HTTP webhook URL", async () => {
+    const result = await invokeReal([
+      "plan", "Task", "--notify", "webhook", "--url", "file:///tmp/hook", "--secret-env", "HOOK_SECRET"
+    ]);
+
+    expect(result).toEqual({
+      exitCode: 2,
+      stdout: "",
+      stderr: "Webhook URL must use http or https"
+    });
+  });
+
+  it("keeps a shared job-not-found error as runtime exit 1", async () => {
+    const result = await invokeReal(["status", "--job-id", "missing-job"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("No jobs recorded");
   });
 });
