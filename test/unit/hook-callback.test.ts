@@ -8,7 +8,7 @@ import {
   buildCallbackSummary,
   createHookCallbackController,
   createInvocationId,
-  toExecutionCallback,
+  toExecutionCallbackEvidence,
   writeHookConfig
 } from "../../src/mimo/hook-callback.js";
 
@@ -76,28 +76,35 @@ describe("hook callback payload helpers", () => {
     });
   });
 
-  it("converts the wire hook summary into the stored execution callback", () => {
-    expect(toExecutionCallback("fallback-invocation", {
+  it("separates transient callback text from stored execution callback metadata", () => {
+    const evidence = toExecutionCallbackEvidence("fallback-invocation", {
       invocationId: "hook-invocation",
       event: "session.post",
       receivedAt: "2026-07-16T00:00:00.000Z",
       sessionId: "ses-1",
       outcome: "completed",
-      finalText: "Completed from callback."
-    })).toEqual({
-      invocationId: "hook-invocation",
-      receivedAt: "2026-07-16T00:00:00.000Z",
-      sessionId: "ses-1",
-      outcome: "completed",
-      finalText: "Completed from callback."
+      finalText: "Completed from callback with private-token."
     });
+
+    expect(evidence).toEqual({
+      executionCallback: {
+        invocationId: "hook-invocation",
+        receivedAt: "2026-07-16T00:00:00.000Z",
+        sessionId: "ses-1",
+        outcome: "completed"
+      },
+      callbackFinalText: "Completed from callback with private-token."
+    });
+    expect(JSON.stringify(evidence.executionCallback)).not.toContain("private-token");
   });
 
   it("records a missing execution callback without changing wire identifiers", () => {
-    expect(toExecutionCallback("fallback-invocation", null)).toEqual({
-      invocationId: "fallback-invocation",
-      outcome: "missing",
-      error: "MiMoCode exited before codex-mimo received session.post."
+    expect(toExecutionCallbackEvidence("fallback-invocation", null)).toEqual({
+      executionCallback: {
+        invocationId: "fallback-invocation",
+        outcome: "missing",
+        error: "MiMoCode exited before codex-mimo received session.post."
+      }
     });
     expect(CALLBACK_HEADER).toBe("x-codex-mimo-callback-token");
   });
@@ -330,13 +337,16 @@ describe("hook callback controller", () => {
           timestamp: "2026-06-27T01:00:00.000Z",
           sessionID: "ses_persist",
           outcome: "cancelled",
-          error: "blocked"
+          error: "blocked",
+          finalText: "transient-private-token"
         })
       });
 
       await controller.waitForCallback();
       expect(fs.existsSync(controller.callbackFile)).toBe(true);
-      expect(fs.readFileSync(controller.callbackFile, "utf-8")).toContain("ses_persist");
+      const persisted = fs.readFileSync(controller.callbackFile, "utf-8");
+      expect(persisted).toContain("ses_persist");
+      expect(persisted).not.toContain("transient-private-token");
     } finally {
       await controller.close();
     }

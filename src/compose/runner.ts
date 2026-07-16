@@ -18,7 +18,7 @@ import { buildComposePrompt, getComposeWorkflow, type ComposeWorkflowName } from
 import { preparePromptTransport } from "../mimo/prompt-transport.js";
 import {
   createHookCallbackController,
-  toExecutionCallback,
+  toExecutionCallbackEvidence,
   type HookCallbackController,
   type MimoHookCallbackSummary
 } from "../mimo/hook-callback.js";
@@ -433,6 +433,12 @@ interface BuildComposeReportFromRunInput {
 export function buildComposeReportFromRun(input: BuildComposeReportFromRunInput): ComposeReport {
   const events = parseMimoJsonLines(input.eventsStdout);
   const sessionId = input.callback?.sessionId ?? extractSessionIdFromEvents(events);
+  const callbackEvidence = input.callback || input.callbackTimedOut
+    ? toExecutionCallbackEvidence(
+      input.callback?.invocationId ?? `compose-${input.input.workflow}`,
+      input.callback ?? null
+    )
+    : undefined;
   return createComposeReport({
     id: input.id,
     createdAt: input.createdAt,
@@ -446,9 +452,7 @@ export function buildComposeReportFromRun(input: BuildComposeReportFromRunInput)
     diff: input.diff,
     terminationReason: input.terminationReason,
     sessionId,
-    executionCallback: input.callback || input.callbackTimedOut
-      ? toExecutionCallback(input.callback?.invocationId ?? `compose-${input.input.workflow}`, input.callback ?? null)
-      : undefined,
+    executionCallback: callbackEvidence?.executionCallback,
     gitStatusBefore: input.gitStatusBefore,
     gitStatusAfter: input.gitStatusAfter,
     gitHeadBefore: input.gitHeadBefore,

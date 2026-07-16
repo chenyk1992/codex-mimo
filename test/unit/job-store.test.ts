@@ -113,6 +113,26 @@ describe("job store", () => {
     expect(() => readJob(cwd, "compose-bad-file")).toThrow(/malformed job/i);
   });
 
+  it("rejects persisted callback metadata containing transient final text", () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "compose",
+      task: "Run dev workflow",
+      request: { workflow: "dev" }
+    });
+    const paths = resolveJobPaths(cwd, job.id);
+    fs.writeFileSync(paths.jobFile, JSON.stringify({
+      ...job,
+      executionCallback: {
+        invocationId: "inv-1",
+        outcome: "completed",
+        finalText: "must remain transient"
+      }
+    }), "utf-8");
+
+    expect(() => readJob(cwd, job.id)).toThrow(/malformed job/i);
+  });
+
   it("does not prune active jobs", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd, { maxJobs: 2 });

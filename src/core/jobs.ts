@@ -60,7 +60,6 @@ export interface ExecutionCallbackSummary {
   sessionId?: string | null;
   receivedAt?: string;
   error?: string;
-  finalText?: string;
 }
 
 export interface JobTransitionFields {

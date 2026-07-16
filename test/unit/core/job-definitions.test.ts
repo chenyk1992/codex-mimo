@@ -261,7 +261,12 @@ describe("job finalization", () => {
 
   it.each([
     ["How can I help you?", "failed", "semantic_failure"],
+    ["Hello! How can I help you?", "failed", "semantic_failure"],
+    ["Hi, what task would you like me to implement?", "failed", "semantic_failure"],
     ["您好，有什么可以帮您？", "failed", "semantic_failure"],
+    ["Hello world implementation completed successfully.", "completed", undefined],
+    ["Hi, the requested change is complete.", "completed", undefined],
+    ["Hey, implementation is done.", "completed", undefined],
     ["The implementation preserves the normal question: How can I help users?", "completed", undefined]
   ] as const)("classifies direct and Compose final text identically: %s", async (finalText, status, errorCode) => {
     const cwd = tempDir();
@@ -282,31 +287,55 @@ describe("job finalization", () => {
     expect([compose.status, compose.errorCode]).toEqual([status, errorCode]);
   });
 
-  it("uses execution callback finalText when stdout contains no message text", async () => {
+  it.each([
+    ["Plan complete from callback.", "completed", undefined],
+    ["Please clarify which database to use.", "needs_input", undefined],
+    ["Blocked by missing permission.", "blocked", undefined],
+    ["Hello! How can I help you?", "failed", "semantic_failure"]
+  ] as const)("uses transient callback evidence without persisting it: %s", async (
+    callbackFinalText,
+    status,
+    errorCode
+  ) => {
     const cwd = tempDir();
     const request: JobRequestByKind["plan"] = { cwd, task: "plan it" };
+    const executionCallback: ExecutionCallbackSummary = { invocationId: "inv", outcome: "completed" };
     const outcome = await getJobDefinition("plan").finalize({
       job: makeJob("plan", request),
       request,
       run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
       events: [],
-      executionCallback: { invocationId: "inv", outcome: "completed", finalText: "Plan complete from callback." },
+      executionCallback,
+      callbackFinalText,
       verification: []
     });
 
-    expect(outcome).toMatchObject({ status: "completed", summary: "Plan complete from callback." });
+    expect(outcome).toMatchObject({ status, ...(errorCode ? { errorCode } : {}) });
+    expect(outcome.executionCallback).toEqual(executionCallback);
+    expect(outcome.executionCallback).not.toHaveProperty("finalText");
+    if (status !== "failed") expect(outcome.summary).toBe(callbackFinalText);
+    expect(JSON.stringify(outcome).split(callbackFinalText).length - 1).toBe(status === "failed" ? 0 : 1);
 
     const composeRequest: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "compose" };
+    let reportJson = "";
     const compose = await getJobDefinition("compose").finalize({
       job: makeJob("compose", composeRequest),
       request: composeRequest,
       run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
       events: [],
-      executionCallback: { invocationId: "inv", outcome: "completed", finalText: "Compose complete from callback." },
+      executionCallback,
+      callbackFinalText,
       verification: [],
-      deps: { runVerification: async () => [], writeComposeReport: () => undefined }
+      deps: {
+        runVerification: async () => [],
+        writeComposeReport: (report) => { reportJson = JSON.stringify(report); }
+      }
     });
-    expect(compose).toMatchObject({ status: "completed", summary: "Compose complete from callback." });
+    expect(compose).toMatchObject({ status, ...(errorCode ? { errorCode } : {}) });
+    expect(compose.executionCallback).toEqual(executionCallback);
+    expect(compose.executionCallback).not.toHaveProperty("finalText");
+    expect(reportJson).not.toContain(callbackFinalText);
+    expect(JSON.stringify(compose).split(callbackFinalText).length - 1).toBe(status === "failed" ? 0 : 1);
   });
 
   it("fails a read-only definition when HEAD changes without a dirty-file delta", async () => {

@@ -43,8 +43,8 @@ const BLOCKED_PATTERNS = [
 ] as const;
 
 const UNACCEPTED_TASK_PATTERNS = [
-  /^(?:hello|hi|hey)[!.,\s]*(?:how|what|may|can|would)?[\s\S]{0,120}$/i,
-  /^how (?:can|may) i (?:help|assist)(?: you)?[?!.\s]*$/i,
+  /^(?:(?:hello|hi|hey)[!.,\s]+)?how (?:can|may) i (?:help|assist)(?: you)?[?!.\s]*$/i,
+  /^(?:(?:hello|hi|hey)[!.,\s]+)?what (?:task|objective|goal|problem)\b[\s\S]{0,120}[?!.\s]*$/i,
   /^what (?:can i help|would you like)(?: me)?[\s\S]{0,120}[?!.\s]*$/i,
   /^please share (?:your|the) (?:task|objective|goal)[?!.\s]*$/i,
   /^(?:i )?(?:do not|don't|cannot|can't) (?:see|find|have).*(?:task|objective|goal)[\s\S]{0,200}$/i,

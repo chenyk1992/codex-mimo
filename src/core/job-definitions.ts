@@ -119,6 +119,7 @@ export interface JobExecutionFinalizeContext {
   run: StreamingRunResult;
   events: NormalizedMimoEvent[];
   executionCallback?: ExecutionCallbackSummary;
+  callbackFinalText?: string;
   gitStatusBefore?: GitStatusSnapshot;
   gitStatusAfter?: GitStatusSnapshot;
   gitHeadBefore?: GitHeadSnapshot;
@@ -480,7 +481,7 @@ function hasReadOnlyViolation(context: JobExecutionFinalizeContext, changedFiles
 }
 
 function finalTextFrom(context: JobExecutionFinalizeContext): string {
-  return context.executionCallback?.finalText?.trim() || extractFinalText(context.events);
+  return context.callbackFinalText?.trim() || extractFinalText(context.events);
 }
 
 function emptyDiff(): GitDiffSnapshot {

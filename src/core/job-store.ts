@@ -282,6 +282,7 @@ function isJobRecord(value: unknown, expectedJobId: string): value is JobRecord 
     typeof value.updatedAt === "string" &&
     Array.isArray(value.changedFiles) &&
     Array.isArray(value.verification) &&
+    isOptionalExecutionCallback(value.executionCallback) &&
     typeof value.logFile === "string" &&
     typeof value.eventsFile === "string" &&
     typeof value.signalsFile === "string" &&
@@ -472,6 +473,7 @@ function isOptionalVerificationArray(value: unknown): boolean {
 function isOptionalExecutionCallback(value: unknown): boolean {
   if (value === undefined) return true;
   return isRecord(value) &&
+    Object.keys(value).every((key) => EXECUTION_CALLBACK_KEYS.has(key)) &&
     typeof value.invocationId === "string" &&
     (value.outcome === "completed" || value.outcome === "error" ||
       value.outcome === "cancelled" || value.outcome === "missing") &&
@@ -479,6 +481,14 @@ function isOptionalExecutionCallback(value: unknown): boolean {
     isOptionalTimestamp(value.receivedAt) &&
     isOptionalString(value.error);
 }
+
+const EXECUTION_CALLBACK_KEYS = new Set([
+  "invocationId",
+  "outcome",
+  "sessionId",
+  "receivedAt",
+  "error"
+]);
 
 function isOptionalReportPaths(value: unknown): boolean {
   if (value === undefined) return true;

@@ -61,6 +61,11 @@ export interface HookCallbackControllerDeps {
   writeHookConfig?: typeof writeHookConfig;
 }
 
+export interface ExecutionCallbackEvidence {
+  executionCallback: ExecutionCallbackSummary;
+  callbackFinalText?: string;
+}
+
 export function createInvocationId(
   prefix: string,
   now: () => number = Date.now,
@@ -86,24 +91,28 @@ export function buildCallbackSummary(payload: MimoHookCallbackPayload): MimoHook
   };
 }
 
-export function toExecutionCallback(
+export function toExecutionCallbackEvidence(
   invocationId: string,
   callback: MimoHookCallbackSummary | null
-): ExecutionCallbackSummary {
+): ExecutionCallbackEvidence {
   if (!callback) {
     return {
-      invocationId,
-      outcome: "missing",
-      error: "MiMoCode exited before codex-mimo received session.post."
+      executionCallback: {
+        invocationId,
+        outcome: "missing",
+        error: "MiMoCode exited before codex-mimo received session.post."
+      }
     };
   }
   return {
-    invocationId: callback.invocationId,
-    outcome: callback.outcome ?? "error",
-    sessionId: callback.sessionId ?? null,
-    receivedAt: callback.receivedAt,
-    ...(callback.error ? { error: callback.error } : {}),
-    ...(callback.finalText ? { finalText: callback.finalText } : {})
+    executionCallback: {
+      invocationId: callback.invocationId,
+      outcome: callback.outcome ?? "error",
+      sessionId: callback.sessionId ?? null,
+      receivedAt: callback.receivedAt,
+      ...(callback.error ? { error: callback.error } : {})
+    },
+    ...(callback.finalText ? { callbackFinalText: callback.finalText } : {})
   };
 }
 
@@ -247,7 +256,9 @@ export async function createHookCallbackController(input: {
 
         if (!settled) {
           const summary = buildCallbackSummary(payload);
-          fs.writeFileSync(callbackFile, JSON.stringify(payload, null, 2), "utf-8");
+          const persistedPayload = { ...payload };
+          delete persistedPayload.finalText;
+          fs.writeFileSync(callbackFile, JSON.stringify(persistedPayload, null, 2), "utf-8");
           settled = true;
           clearCallbackTimer();
           resolveCallback(summary);
