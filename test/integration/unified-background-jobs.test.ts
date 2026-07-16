@@ -59,7 +59,14 @@ function requests(cwd: string): JobRequestByKind {
     implement: { cwd, task: "implement it", allowWrite: true, timeoutMs: 2_000 },
     review: { cwd, base: "HEAD", timeoutMs: 2_000 },
     "fix-ci": { cwd, file: "ci.log", task: "fix it", timeoutMs: 2_000 },
-    resume: { cwd, jobId: "parent-1", task: "continue", sessionId: "session-parent", timeoutMs: 2_000 },
+    resume: {
+      cwd,
+      jobId: "parent-1",
+      task: "continue",
+      sessionId: "session-parent",
+      executionPolicy: { agent: "build", writesAllowed: true },
+      timeoutMs: 2_000
+    },
     compose: { cwd, workflow: "plan", task: "compose it", timeoutMs: 2_000 }
   };
 }
@@ -79,6 +86,8 @@ function workerDependencies(input: {
   callback?: boolean;
   finalText?: string;
   callbackWaitMs?: number;
+  secretProbeName?: string;
+  secretProbeFile?: string;
 } = {}): JobWorkerDependencies {
   const mode = input.mode ?? "complete";
   const callback = input.callback ?? true;
@@ -100,11 +109,13 @@ function workerDependencies(input: {
         ...options.env,
         FAKE_MIMO_MODE: mode,
         FAKE_MIMO_CALLBACK: callback ? "1" : "0",
-        FAKE_MIMO_FINAL_TEXT: finalText
+        FAKE_MIMO_FINAL_TEXT: finalText,
+        ...(input.secretProbeName ? { FAKE_MIMO_SECRET_PROBE_NAME: input.secretProbeName } : {}),
+        ...(input.secretProbeFile ? { FAKE_MIMO_SECRET_PROBE_FILE: input.secretProbeFile } : {})
       },
       spawnProcess: (spawnCwd, _mimoArgs, env) => spawn(process.execPath, [fakeMimo], {
         cwd: spawnCwd,
-        env: { ...process.env, ...env },
+        env,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true
       }),
@@ -389,6 +400,52 @@ describe("unified background jobs", () => {
         .not.toContain(secret);
       expect(readDeliveries(job.notificationOutboxFile)[0].status).toBe("delivered");
     } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  it("keeps a frozen webhook secret available to notification delivery but out of MiMo and persisted artifacts", async () => {
+    const cwd = workspace();
+    const secretName = "INTEGRATION_ISOLATED_WEBHOOK_SECRET";
+    const secret = "isolated-secret-value-never-persist";
+    const probeFile = path.join(cwd, "mimo-secret-probe.txt");
+    let body = "";
+    let signature = "";
+    const server = http.createServer((request, response) => {
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", () => {
+        signature = String(request.headers["x-codex-mimo-signature"] ?? "");
+        response.writeHead(204).end();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("webhook fixture did not bind");
+    const previous = process.env[secretName];
+    process.env[secretName] = secret;
+    try {
+      const target = {
+        type: "webhook" as const,
+        url: `http://127.0.0.1:${address.port}/notify`,
+        secretEnv: secretName
+      };
+      const completed = await runFake(cwd, seed(cwd, "implement", target), {
+        secretProbeName: secretName,
+        secretProbeFile: probeFile
+      });
+
+      expect(fs.readFileSync(probeFile, "utf8")).toBe("missing");
+      await runNotificationWorker(cwd, { sleep: async () => undefined });
+      expect(signature).toBe(crypto.createHmac("sha256", secret).update(body).digest("hex"));
+      const persisted = allFiles(path.join(cwd, ".codex-mimo"))
+        .map((file) => fs.readFileSync(file, "utf8"))
+        .join("\n");
+      expect(persisted).not.toContain(secret);
+      expect(readDeliveries(completed.notificationOutboxFile)[0].status).toBe("delivered");
+    } finally {
+      if (previous === undefined) delete process.env[secretName];
+      else process.env[secretName] = previous;
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   });

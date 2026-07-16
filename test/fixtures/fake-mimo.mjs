@@ -7,6 +7,14 @@ if (process.env.FAKE_MIMO_INVOCATIONS_FILE) {
   fs.appendFileSync(process.env.FAKE_MIMO_INVOCATIONS_FILE, `${process.pid}\n`, "utf8");
 }
 
+if (process.env.FAKE_MIMO_SECRET_PROBE_FILE && process.env.FAKE_MIMO_SECRET_PROBE_NAME) {
+  fs.writeFileSync(
+    process.env.FAKE_MIMO_SECRET_PROBE_FILE,
+    process.env[process.env.FAKE_MIMO_SECRET_PROBE_NAME] === undefined ? "missing" : "present",
+    "utf8"
+  );
+}
+
 process.stdout.write(`${JSON.stringify({
   type: "text",
   timestamp: new Date().toISOString(),

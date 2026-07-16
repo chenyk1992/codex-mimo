@@ -131,6 +131,31 @@ describe("streaming MiMo CLI runner", () => {
     });
   });
 
+  it("omits protected environment keys after merging the parent and callback environment", async () => {
+    let seenEnv: NodeJS.ProcessEnv | undefined;
+
+    await runMimoCliStreaming("E:/project/app", ["run"], {
+      env: {
+        CODEX_MIMO_CALLBACK_TOKEN: "callback-token",
+        WEBHOOK_SECRET: "must-not-win"
+      },
+      omitEnv: ["WEBHOOK_SECRET"],
+      spawnProcess: (_cwd, _args, env) => {
+        seenEnv = env;
+        const child = makeChild(655);
+        queueMicrotask(() => child.emit("close", 0));
+        return child;
+      }
+    });
+
+    expect(seenEnv?.WEBHOOK_SECRET).toBeUndefined();
+    expect(seenEnv).toMatchObject({
+      CODEX_MIMO_CALLBACK_TOKEN: "callback-token",
+      PYTHONUTF8: "1",
+      PYTHONIOENCODING: "utf-8"
+    });
+  });
+
   it("awaits asynchronous onStart before completing", async () => {
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });

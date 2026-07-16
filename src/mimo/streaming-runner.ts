@@ -32,6 +32,7 @@ export interface StreamingRunOptions {
   timeoutWarningMs?: number;
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
+  omitEnv?: readonly string[];
   onLine?: (line: string) => void;
   onStderr?: (chunk: string) => void;
   onTimeoutWarning?: (pid: number | null) => void;
@@ -43,7 +44,7 @@ function defaultSpawn(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Str
   return spawn(resolveMimoCommand(), args, {
     cwd,
     detached: process.platform !== "win32",
-    env: withUtf8ProcessEnv(env),
+    env,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
     shell: process.platform === "win32"
@@ -90,7 +91,7 @@ export async function runMimoCliStreaming(
   args: string[],
   options: StreamingRunOptions = {}
 ): Promise<StreamingRunResult> {
-  const childEnv = withUtf8ProcessEnv(options.env);
+  const childEnv = withUtf8ProcessEnv(options.env, process.env, options.omitEnv);
   const child = (options.spawnProcess ?? defaultSpawn)(cwd, args, childEnv);
   const stdoutParts: string[] = [];
   const stderrParts: string[] = [];

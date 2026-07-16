@@ -214,6 +214,9 @@ async function runOwnedJobWorker(
         (deps.runMimoStreaming ?? runMimoCliStreaming)(cwd, mimoArgs, {
           timeoutMs: readTimeout(initial.request),
           env: hook.env,
+          omitEnv: initial.notificationTarget?.type === "webhook"
+            ? [initial.notificationTarget.secretEnv]
+            : [],
           signal: executionGuard.signal,
           onStart: async (pid) => {
             const captured = (deps.captureProcessIdentity ?? captureProcessIdentity)(pid);

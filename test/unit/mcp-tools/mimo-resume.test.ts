@@ -70,7 +70,11 @@ describe("mimo_resume", () => {
 
   it("inherits the absence of a target without re-resolving ambient CODEX_THREAD_ID", async () => {
     const cwd = tempWorkspace();
-    const source = createJobStore(cwd).create({ kind: "plan", task: "Plan", request: {} });
+    const source = createJobStore(cwd).create({
+      kind: "plan",
+      task: "Plan",
+      request: { cwd, task: "Plan" }
+    });
     updateJob(cwd, source.id, { status: "needs_input", sessionId: "ses_parent" });
     const receipt = await mimoResume({ cwd, jobId: source.id, task: "Continue" }, {
       env: { CODEX_THREAD_ID: "must-not-drift" }, spawnJobWorker: vi.fn().mockReturnValue(123)
@@ -90,5 +94,65 @@ describe("mimo_resume", () => {
       env: {}, spawnJobWorker: vi.fn().mockReturnValue(123)
     })).rejects.toThrow(message);
     expect(listJobs(cwd).map((job) => job.id)).toEqual([source.id]);
+  });
+
+  it.each([
+    ["plan", { task: "Plan", cwd: "" }, { agent: "plan", writesAllowed: false }],
+    ["review", { base: "HEAD", cwd: "" }, { agent: "plan", writesAllowed: false }],
+    ["compose", { workflow: "plan", task: "Plan", cwd: "" }, { agent: "compose", writesAllowed: false }],
+    ["compose", { workflow: "dev", task: "Build", cwd: "" }, { agent: "compose", writesAllowed: true }]
+  ] as const)("freezes the effective %s parent policy into the child request", async (kind, template, expected) => {
+    const cwd = tempWorkspace();
+    const source = createJobStore(cwd).create({
+      kind,
+      task: "Parent task",
+      request: { ...template, cwd }
+    });
+    updateJob(cwd, source.id, { status: "blocked", sessionId: "ses_parent" });
+
+    const receipt = await mimoResume({ cwd, jobId: source.id, task: "Continue" }, {
+      env: {}, spawnJobWorker: vi.fn().mockReturnValue(123)
+    });
+
+    expect(readJob(cwd, receipt.jobId)?.request).toMatchObject({ executionPolicy: expected });
+  });
+
+  it("preserves the original policy across recursive resumes", async () => {
+    const cwd = tempWorkspace();
+    const source = createJobStore(cwd).create({
+      kind: "plan",
+      task: "Plan",
+      request: { cwd, task: "Plan" }
+    });
+    updateJob(cwd, source.id, { status: "blocked", sessionId: "ses_parent" });
+    const first = await mimoResume({ cwd, jobId: source.id, task: "Continue once" }, {
+      env: {}, spawnJobWorker: vi.fn().mockReturnValue(123)
+    });
+    updateJob(cwd, first.jobId, { status: "blocked", sessionId: "ses_child" });
+
+    const second = await mimoResume({ cwd, jobId: first.jobId, task: "Continue twice" }, {
+      env: {}, spawnJobWorker: vi.fn().mockReturnValue(123)
+    });
+
+    expect(readJob(cwd, second.jobId)?.request).toMatchObject({
+      executionPolicy: { agent: "plan", writesAllowed: false }
+    });
+  });
+
+  it("does not expose a public write-policy override", async () => {
+    const cwd = tempWorkspace();
+    const source = createJobStore(cwd).create({
+      kind: "plan",
+      task: "Plan",
+      request: { cwd, task: "Plan" }
+    });
+    updateJob(cwd, source.id, { status: "blocked", sessionId: "ses_parent" });
+
+    await expect(mimoResume({
+      cwd,
+      jobId: source.id,
+      task: "Continue",
+      allowWrite: true
+    }, { env: {}, spawnJobWorker: vi.fn().mockReturnValue(123) })).rejects.toThrow();
   });
 });

@@ -72,7 +72,13 @@ describe("job definition registry", () => {
     ["plan", { cwd: "E:/project", task: "plan it" }, "plan"],
     ["implement", { cwd: "E:/project", task: "build it", allowWrite: true }, "build"],
     ["fix-ci", { cwd: "E:/project", file: "ci.log", task: "fix it" }, "build"],
-    ["resume", { cwd: "E:/project", jobId: "parent-1", task: "continue", sessionId: "ses_1" }, "build"],
+    ["resume", {
+      cwd: "E:/project",
+      jobId: "parent-1",
+      task: "continue",
+      sessionId: "ses_1",
+      executionPolicy: { agent: "build", writesAllowed: true }
+    }, "build"],
     ["compose", { cwd: "E:/project", workflow: "dev", task: "build it" }, "compose"]
   ] as const)("uses the fixed MiMo agent for %s", async (kind, request, agent) => {
     const definition = getJobDefinition(kind);
@@ -85,10 +91,54 @@ describe("job definition registry", () => {
 
   it("resumes from the parent session", async () => {
     const definition = getJobDefinition("resume");
-    const request = { cwd: "E:/project", jobId: "parent-1", task: "continue", sessionId: "ses_1" };
+    const request = {
+      cwd: "E:/project",
+      jobId: "parent-1",
+      task: "continue",
+      sessionId: "ses_1",
+      executionPolicy: { agent: "build" as const, writesAllowed: true }
+    };
     const prompt = await definition.buildPrompt(request, ACTIVE_SIGNAL);
 
     expect(definition.buildMimoArgs(request, prompt)).toContain("ses_1");
+  });
+
+  it.each([
+    [{ agent: "plan", writesAllowed: false } as const, "plan", "failed", "read_only_violation"],
+    [{ agent: "compose", writesAllowed: false } as const, "compose", "failed", "read_only_violation"],
+    [{ agent: "build", writesAllowed: true } as const, "build", "completed", undefined]
+  ])("enforces a resumed parent's immutable %j execution policy", async (executionPolicy, agent, status, errorCode) => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["resume"] = {
+      cwd,
+      jobId: "parent-1",
+      task: "continue",
+      sessionId: "ses_1",
+      executionPolicy
+    };
+    const definition = getJobDefinition("resume");
+    const prompt = await definition.buildPrompt(request, ACTIVE_SIGNAL);
+    const args = definition.buildMimoArgs(request, prompt);
+    const outcome = await definition.finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("resume", request),
+      request,
+      run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      gitStatusBefore: { short: "", dirty: false, fingerprints: {} },
+      gitStatusAfter: {
+        short: " M changed.ts",
+        dirty: true,
+        fingerprints: { "changed.ts": { status: " M", contentHash: "changed" } }
+      },
+      diff: { changedFiles: ["changed.ts"], diffStat: "", diff: "diff" },
+      verification: []
+    });
+
+    expect(args[args.indexOf("--agent") + 1]).toBe(agent);
+    if (!executionPolicy.writesAllowed) expect(prompt.message).toContain("Do not edit files");
+    expect(outcome).toMatchObject({ status, ...(errorCode ? { errorCode } : {}) });
   });
 
   it("rejects an invalid review base before producing a prompt", async () => {
@@ -391,7 +441,13 @@ describe("job finalization", () => {
         implement: { cwd, task: "implement", allowWrite: true },
         review: { cwd, base: "HEAD" },
         "fix-ci": { cwd, file: "ci.log", task: "fix" },
-        resume: { cwd, jobId: "parent", task: "resume", sessionId: "ses-parent" },
+        resume: {
+          cwd,
+          jobId: "parent",
+          task: "resume",
+          sessionId: "ses-parent",
+          executionPolicy: { agent: "build", writesAllowed: true }
+        },
         compose: { cwd, workflow: "dev", task: "compose" }
       };
       const request = requests[kind];

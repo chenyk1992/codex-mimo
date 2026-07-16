@@ -41,7 +41,7 @@ import {
 } from "../mimo/prompt-transport.js";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
 import type { StreamingRunResult } from "../mimo/streaming-runner.js";
-import { implementPrompt, planPrompt, reviewPrompt } from "./prompt.js";
+import { implementPrompt, planPrompt, resumePrompt, reviewPrompt } from "./prompt.js";
 import { classifyRunOutcome, type JobOutcome } from "./job-outcome.js";
 import type { ExecutionCallbackSummary, JobKind, JobRecord } from "./jobs.js";
 
@@ -71,10 +71,16 @@ const FixCiRequestSchema = CommonRequestSchema.extend({
   task: z.string().min(1).optional()
 });
 
+const JobExecutionPolicySchema = z.object({
+  agent: z.enum(["plan", "build", "compose"]),
+  writesAllowed: z.boolean()
+}).strict();
+
 const ResumeRequestSchema = CommonRequestSchema.extend({
   jobId: z.string().min(1),
   task: z.string().min(1),
-  sessionId: z.string().min(1)
+  sessionId: z.string().min(1),
+  executionPolicy: JobExecutionPolicySchema
 });
 
 const ComposeRequestSchema = CommonRequestSchema.extend({
@@ -100,6 +106,7 @@ export type ReviewJobRequest = z.input<typeof ReviewRequestSchema>;
 export type FixCiJobRequest = z.input<typeof FixCiRequestSchema>;
 export type ResumeJobRequest = z.input<typeof ResumeRequestSchema>;
 export type ComposeJobRequest = z.input<typeof ComposeRequestSchema>;
+export type JobExecutionPolicy = z.infer<typeof JobExecutionPolicySchema>;
 
 export interface JobRequestByKind {
   plan: PlanJobRequest;
@@ -143,7 +150,7 @@ export interface JobFinalizeContext<Request extends { cwd: string }> extends Job
 
 export interface JobDefinition<Kind extends JobKind, Request extends { cwd: string }> {
   kind: Kind;
-  writesAllowed: boolean;
+  executionPolicy(request: Request): JobExecutionPolicy;
   buildPrompt(request: Request, signal: AbortSignal): Promise<PromptTransportResult>;
   buildMimoArgs(request: Request, prompt: PromptTransportResult): string[];
   finalize(context: JobFinalizeContext<Request>): Promise<JobOutcome>;
@@ -155,7 +162,7 @@ export type JobDefinitionRegistry = {
 
 export interface BoundJobDefinition {
   kind: JobKind;
-  writesAllowed: boolean;
+  executionPolicy: JobExecutionPolicy;
   buildPrompt(signal: AbortSignal): Promise<PromptTransportResult>;
   buildMimoArgs(prompt: PromptTransportResult): string[];
   finalize(context: JobExecutionFinalizeContext): Promise<JobOutcome>;
@@ -179,7 +186,7 @@ const implementDefinition: JobDefinition<"implement", ImplementJobRequest> = dir
 
 const reviewDefinition: JobDefinition<"review", ReviewJobRequest> = {
   kind: "review",
-  writesAllowed: false,
+  executionPolicy: () => ({ agent: "plan", writesAllowed: false }),
   async buildPrompt(request, signal) {
     const base = request.base ?? "HEAD";
     const diff = await captureGitDiff(request.cwd, base, { signal });
@@ -218,18 +225,37 @@ const fixCiDefinition: JobDefinition<"fix-ci", FixCiJobRequest> = directDefiniti
   title: "codex-mimo fix-ci"
 });
 
-const resumeDefinition: JobDefinition<"resume", ResumeJobRequest> = directDefinition({
+const resumeDefinition: JobDefinition<"resume", ResumeJobRequest> = {
   kind: "resume",
-  agent: "build",
-  writesAllowed: true,
-  prompt: (request) => implementPrompt(request.task),
-  session: (request) => request.sessionId,
-  title: "codex-mimo resume"
-});
+  executionPolicy: (request) => ({ ...request.executionPolicy }),
+  async buildPrompt(request) {
+    return preparePromptTransport(
+      resumePrompt(request.task, request.executionPolicy.writesAllowed),
+      { cwd: request.cwd }
+    );
+  },
+  buildMimoArgs(request, prompt) {
+    return buildMimoRunArgs({
+      cwd: request.cwd,
+      agent: request.executionPolicy.agent,
+      model: request.model,
+      session: request.sessionId,
+      message: prompt.message,
+      title: "codex-mimo resume",
+      files: prompt.files
+    });
+  },
+  async finalize(context) {
+    return finalizeDirect(context, context.request.executionPolicy.writesAllowed);
+  }
+};
 
 const composeDefinition: JobDefinition<"compose", ComposeJobRequest> = {
   kind: "compose",
-  writesAllowed: true,
+  executionPolicy: (request) => ({
+    agent: "compose",
+    writesAllowed: getComposeWorkflow(request.workflow).writesAllowed
+  }),
   async buildPrompt(request) {
     const workflow = getComposeWorkflow(request.workflow);
     return preparePromptTransport(buildComposePrompt({
@@ -295,29 +321,34 @@ function bind<Kind extends JobKind, Request extends { cwd: string }>(
   }
   return {
     kind: definition.kind,
-    writesAllowed: definition.writesAllowed,
+    executionPolicy: definition.executionPolicy(request),
     buildPrompt: (signal) => definition.buildPrompt(request, signal),
     buildMimoArgs: (prompt) => definition.buildMimoArgs(request, prompt),
     finalize: (context) => definition.finalize({ ...context, job, request })
   };
 }
 
-interface DirectDefinitionInput<Kind extends Exclude<JobKind, "compose">, Request extends { cwd: string; model?: string }> {
+interface DirectDefinitionInput<
+  Kind extends Exclude<JobKind, "compose" | "resume">,
+  Request extends { cwd: string; model?: string }
+> {
   kind: Kind;
   agent: "plan" | "build";
   writesAllowed: boolean;
   prompt: (request: Request) => string;
   files?: (request: Request) => string[];
-  session?: (request: Request) => string;
   title: string;
 }
 
-function directDefinition<Kind extends Exclude<JobKind, "compose">, Request extends { cwd: string; model?: string }>(
+function directDefinition<
+  Kind extends Exclude<JobKind, "compose" | "resume">,
+  Request extends { cwd: string; model?: string }
+>(
   input: DirectDefinitionInput<Kind, Request>
 ): JobDefinition<Kind, Request> {
   return {
     kind: input.kind,
-    writesAllowed: input.writesAllowed,
+    executionPolicy: () => ({ agent: input.agent, writesAllowed: input.writesAllowed }),
     async buildPrompt(request) {
       return preparePromptTransport(input.prompt(request), { cwd: request.cwd });
     },
@@ -326,7 +357,6 @@ function directDefinition<Kind extends Exclude<JobKind, "compose">, Request exte
         cwd: request.cwd,
         agent: input.agent,
         model: request.model,
-        session: input.session?.(request),
         message: prompt.message,
         title: input.title,
         files: mergeChangedFiles(prompt.files, input.files?.(request) ?? [])

@@ -86,7 +86,7 @@ function hook(callback: MimoHookCallbackSummary | null = completedCallback): Hoo
 function definition(outcome: Partial<Awaited<ReturnType<BoundJobDefinition["finalize"]>>> = {}): BoundJobDefinition {
   return {
     kind: "implement",
-    writesAllowed: true,
+    executionPolicy: { agent: "build", writesAllowed: true },
     buildPrompt: vi.fn(async () => ({ message: "prompt", files: [] })),
     buildMimoArgs: vi.fn(() => ["run", "--format", "json", "prompt"]),
     finalize: vi.fn(async (context) => ({

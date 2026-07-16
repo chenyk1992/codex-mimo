@@ -5,7 +5,6 @@ import crypto from "node:crypto";
 export interface PromptTransportResult {
   message: string;
   files: string[];
-  cleanupFiles: string[];
 }
 
 export function preparePromptTransport(
@@ -15,7 +14,7 @@ export function preparePromptTransport(
   const maxInlineLength = options.maxInlineLength ?? 8_000;
   const shouldUseFile = Boolean(options.forceFile) || message.length > maxInlineLength || hasNonAscii(message);
   if (!shouldUseFile) {
-    return { message, files: [], cleanupFiles: [] };
+    return { message, files: [] };
   }
 
   const file = writePromptAttachment(message, { cwd: options.cwd, label: "prompt", extension: ".md" });
@@ -26,8 +25,7 @@ export function preparePromptTransport(
       "Read that file as the full task input before acting.",
       `On Windows PowerShell, use \`Get-Content -Encoding UTF8 "${file}"\` rather than omitting the encoding flag.`
     ].join("\n"),
-    files: [file],
-    cleanupFiles: []
+    files: [file]
   };
 }
 

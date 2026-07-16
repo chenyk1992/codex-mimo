@@ -15,6 +15,7 @@ import {
   ReviewInput
 } from "./tool-schemas.js";
 import { launchJob, type LaunchJobDependencies } from "../core/job-launcher.js";
+import { bindJobDefinition } from "../core/job-definitions.js";
 import { listJobs, readJob } from "../core/job-store.js";
 import {
   spawnNotificationWorker,
@@ -108,6 +109,7 @@ export async function mimoResume(input: unknown, deps: LaunchJobDependencies = {
   if (!parent.sessionId) {
     throw new Error(`Job ${parent.id} does not have a sessionId and cannot be resumed.`);
   }
+  const executionPolicy = bindJobDefinition(parent).executionPolicy;
 
   const { notify, ...options } = parsed;
   return launchJob({
@@ -115,7 +117,7 @@ export async function mimoResume(input: unknown, deps: LaunchJobDependencies = {
     cwd: parsed.cwd,
     task: parsed.task,
     parentJobId: parent.id,
-    request: { ...options, sessionId: parent.sessionId },
+    request: { ...options, sessionId: parent.sessionId, executionPolicy },
     ...(notify === undefined
       ? { notificationTarget: parent.notificationTarget ?? null }
       : { notify })
