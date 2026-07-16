@@ -3,8 +3,17 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { spawn, execFileSync } from "node:child_process";
+import {
+  spawn,
+  execFileSync,
+  type ChildProcess,
+  type ChildProcessWithoutNullStreams
+} from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import type { JobRequestByKind } from "../../src/core/job-definitions.js";
 import { launchJob } from "../../src/core/job-launcher.js";
 import { runJobWorker, type JobWorkerDependencies } from "../../src/core/job-worker.js";
@@ -13,15 +22,21 @@ import { transitionJob } from "../../src/core/job-transition.js";
 import type { JobKind, JobRecord } from "../../src/core/jobs.js";
 import { createHookCallbackController } from "../../src/mimo/hook-callback.js";
 import { runMimoCliStreaming } from "../../src/mimo/streaming-runner.js";
-import { claimDueDelivery, readDeliveries } from "../../src/notify/outbox.js";
+import { readDeliveries } from "../../src/notify/outbox.js";
+import { dispatchNextDelivery } from "../../src/notify/dispatcher.js";
 import { runNotificationWorker } from "../../src/notify/worker.js";
-import type { CodexAppServerClient } from "../../src/notify/codex-app-server.js";
+import { createCodexAppServerClient } from "../../src/notify/codex-app-server.js";
 
 const workspaces: string[] = [];
+const children = new Set<ChildProcess>();
 const fakeMimo = path.resolve("test/fixtures/fake-mimo.mjs");
+const fakeCodexAppServer = path.resolve("test/fixtures/fake-codex-app-server.mjs");
+const processJobWorker = path.resolve("test/fixtures/process-job-worker.mjs");
+const processNotifyWorker = path.resolve("test/fixtures/process-notify-worker.mjs");
 
-afterEach(() => {
+afterEach(async () => {
   vi.restoreAllMocks();
+  await Promise.all([...children].map((child) => stopChild(child, true)));
   for (const cwd of workspaces.splice(0)) fs.rmSync(cwd, { recursive: true, force: true });
 });
 
@@ -111,6 +126,55 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<v
   }
 }
 
+function track<T extends ChildProcess>(child: T): T {
+  children.add(child);
+  child.once("exit", () => children.delete(child));
+  return child;
+}
+
+async function stopChild(child: ChildProcess, tree: boolean): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null || !child.pid) return;
+  if (tree && process.platform === "win32") {
+    try {
+      execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true
+      });
+    } catch {}
+  } else {
+    try { child.kill("SIGKILL"); } catch {}
+  }
+  await waitForExit(child).catch(() => undefined);
+}
+
+function waitForExit(child: ChildProcess, timeoutMs = 5_000): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`Child ${child.pid} did not exit.`)), timeoutMs);
+    child.once("exit", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
+}
+
+function readJsonLines(file: string): Array<Record<string, unknown>> {
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+function processIsRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function allFiles(root: string): string[] {
   return fs.readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
     const target = path.join(root, entry.name);
@@ -184,37 +248,112 @@ describe("unified background jobs", () => {
     expect(result.status).toBe(status);
   });
 
-  it("recovers a restarted job worker without rerunning MiMo", async () => {
+  it("recovers a crashed job-worker child, terminates its owned MiMo tree, and does not rerun it", async () => {
     const cwd = workspace();
     const job = seed(cwd, "implement");
-    await transitionJob(cwd, job.id, { status: "running", phase: "starting", summary: "started" });
-    const runMimoStreaming = vi.fn();
+    const checkpoint = path.join(cwd, "mimo-checkpoint.json");
+    const invocations = path.join(cwd, "mimo-invocations.log");
+    const childEnv = {
+      ...process.env,
+      FAKE_MIMO_PATH: fakeMimo,
+      FAKE_MIMO_CHECKPOINT_FILE: checkpoint,
+      FAKE_MIMO_INVOCATIONS_FILE: invocations
+    };
+    const first = track(spawn(process.execPath, [processJobWorker, cwd, job.id], {
+      cwd,
+      env: childEnv,
+      stdio: "ignore",
+      windowsHide: true
+    }));
+    await waitUntil(() => fs.existsSync(checkpoint) && readJob(cwd, job.id)?.pid !== null, 10_000);
+    const owned = JSON.parse(fs.readFileSync(checkpoint, "utf8")) as {
+      pid: number;
+      descendantPid: number;
+    };
+    expect(processIsRunning(owned.pid)).toBe(true);
+    expect(processIsRunning(owned.descendantPid)).toBe(true);
 
-    await runJobWorker(cwd, job.id, {
-      runMimoStreaming,
-      terminateOwnedProcess: () => ({ status: "not_running", evidence: "stale process is absent" }),
-      spawnNotificationWorker: () => 999
+    await stopChild(first, false);
+    expect(readJob(cwd, job.id)).toMatchObject({ status: "running", pid: owned.pid });
+
+    const second = track(spawn(process.execPath, [processJobWorker, cwd, job.id], {
+      cwd,
+      env: childEnv,
+      stdio: "ignore",
+      windowsHide: true
+    }));
+    await waitForExit(second, 10_000);
+    await waitUntil(() => !processIsRunning(owned.pid) && !processIsRunning(owned.descendantPid), 5_000);
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "worker_restarted",
+      pid: null,
     });
-
-    expect(readJob(cwd, job.id)).toMatchObject({ status: "failed", errorCode: "worker_restarted" });
-    expect(runMimoStreaming).not.toHaveBeenCalled();
+    expect(fs.readFileSync(invocations, "utf8").trim().split(/\r?\n/)).toHaveLength(1);
   });
 
-  it("recovers an expired notification lease after worker restart", async () => {
+  it("recovers an expired lease after a notify-worker child crashes during HTTP delivery", async () => {
     const cwd = workspace();
-    const job = await runFake(cwd, seed(cwd, "implement", { type: "codex", threadId: "thread-lease" }));
-    const claimedAt = new Date("2026-07-16T00:00:00.000Z");
-    await claimDueDelivery(job.notificationOutboxFile, claimedAt, 10);
-    const deliver = vi.fn(async () => ({ outcome: "delivered" as const }));
-
-    await runNotificationWorker(cwd, {
-      now: () => new Date("2026-07-16T00:00:00.011Z"),
-      deliver,
-      sleep: async () => undefined
+    const secret = "notify-process-secret";
+    let requestCount = 0;
+    let successfulResponses = 0;
+    let firstRequest!: () => void;
+    const firstRequestReceived = new Promise<void>((resolve) => { firstRequest = resolve; });
+    const server = http.createServer((_request, response) => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        firstRequest();
+        return;
+      }
+      successfulResponses += 1;
+      response.writeHead(204).end();
     });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("notify fixture did not bind");
+    const target = {
+      type: "webhook" as const,
+      url: `http://127.0.0.1:${address.port}/notify`,
+      secretEnv: "INTEGRATION_WEBHOOK_SECRET"
+    };
+    const job = await runFake(cwd, seed(cwd, "implement", target));
+    const env = {
+      ...process.env,
+      INTEGRATION_WEBHOOK_SECRET: secret,
+      FAKE_NOTIFY_LEASE_MS: "150"
+    };
+    try {
+      const first = track(spawn(process.execPath, [processNotifyWorker, cwd], {
+        cwd,
+        env,
+        stdio: "ignore",
+        windowsHide: true
+      }));
+      await firstRequestReceived;
+      await waitUntil(() => readDeliveries(job.notificationOutboxFile)[0]?.status === "delivering");
+      await stopChild(first, false);
+      const leaseUntil = Date.parse(readDeliveries(job.notificationOutboxFile)[0].leaseUntil!);
+      await waitUntil(() => Date.now() > leaseUntil, 2_000);
 
-    expect(deliver).toHaveBeenCalledOnce();
-    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({ status: "delivered", attempts: 2 });
+      const second = track(spawn(process.execPath, [processNotifyWorker, cwd], {
+        cwd,
+        env,
+        stdio: "ignore",
+        windowsHide: true
+      }));
+      await waitForExit(second, 5_000);
+
+      expect(requestCount).toBe(2);
+      expect(successfulResponses).toBe(1);
+      expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+        status: "delivered",
+        attempts: 2
+      });
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("delivers a deduplicated HMAC webhook without persisting the secret", async () => {
@@ -254,36 +393,72 @@ describe("unified background jobs", () => {
     }
   });
 
-  it("returns a receipt, never waits, and resumes the frozen Codex thread exactly once", async () => {
+  it("records zero MCP wait calls and resumes the frozen Codex thread once over stdio RPC", async () => {
     const cwd = workspace();
-    const receipt = await launchJob({
-      kind: "implement",
-      cwd,
-      task: "notify Codex",
-      request: { cwd, task: "notify Codex", allowWrite: true, timeoutMs: 2_000 },
-      notify: { type: "codex" }
-    }, { env: { CODEX_THREAD_ID: "thread-test" }, spawnJobWorker: () => 123 });
+    const toolCalls: string[] = [];
+    const mcpServer = new McpServer({ name: "integration-recorder", version: "1.0.0" });
+    mcpServer.registerTool("mimo_implement", {
+      inputSchema: { task: z.string() }
+    }, async ({ task }) => {
+      toolCalls.push("mimo_implement");
+      const launched = await launchJob({
+        kind: "implement",
+        cwd,
+        task,
+        request: { cwd, task, allowWrite: true, timeoutMs: 2_000 },
+        notify: { type: "codex" }
+      }, { env: { CODEX_THREAD_ID: "thread-frozen" }, spawnJobWorker: () => 123 });
+      return { content: [{ type: "text", text: JSON.stringify(launched) }] };
+    });
+    mcpServer.registerTool("mimo_wait", { inputSchema: {} }, async () => {
+      toolCalls.push("mimo_wait");
+      return { content: [{ type: "text", text: "{}" }] };
+    });
+    const client = new Client({ name: "integration-client", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await mcpServer.connect(serverTransport);
+    await client.connect(clientTransport);
+    const response = await client.callTool({ name: "mimo_implement", arguments: { task: "notify Codex" } });
+    const content = response.content[0];
+    if (content.type !== "text") throw new Error("Expected text tool result.");
+    const receipt = JSON.parse(content.text) as Awaited<ReturnType<typeof launchJob>>;
+    await client.close();
+    await mcpServer.close();
+
     const completed = await runFake(cwd, readJob(cwd, receipt.jobId)!);
     expect(JSON.parse(fs.readFileSync(completed.notificationOutboxFile, "utf8").trim()).target).toEqual({
-      type: "codex", threadId: "thread-test"
+      type: "codex", threadId: "thread-frozen"
     });
-    const calls: string[] = [];
-    const client: CodexAppServerClient = {
-      initialize: async () => { calls.push("initialize"); },
-      resumeThread: async (threadId) => { calls.push(`thread/resume:${threadId}`); return { exists: true, busy: false }; },
-      startTurn: async (threadId, prompt) => { calls.push(`turn/start:${threadId}:${prompt}`); },
-      close: async () => undefined
-    };
-    const waitToolCalls = 0;
+    const marker = path.join(cwd, "codex-app-server.jsonl");
+    const createClient = () => createCodexAppServerClient({
+      spawnProcess: (_command, _args, options) => track(spawn(process.execPath, [fakeCodexAppServer], {
+        ...options,
+        cwd,
+        env: { ...options.env, FAKE_CODEX_MARKER: marker },
+        stdio: ["pipe", "pipe", "pipe"]
+      })) as ChildProcessWithoutNullStreams
+    });
 
-    await runNotificationWorker(cwd, { createCodexClient: () => client, sleep: async () => undefined });
-    await runNotificationWorker(cwd, { createCodexClient: () => client, sleep: async () => undefined });
+    const delivered = await dispatchNextDelivery(cwd, { createCodexClient: createClient });
+    const duplicate = await dispatchNextDelivery(cwd, { createCodexClient: createClient });
+    expect(delivered).toMatchObject({ outcome: "settled", delivery: { status: "delivered" } });
+    expect(duplicate).toEqual({ outcome: "idle" });
+    const calls = readJsonLines(marker);
+    const methods = calls.map((call) => call.method);
 
     expect(receipt.status).toBe("queued");
-    expect(waitToolCalls).toBe(0);
-    expect(calls.filter((call) => call.startsWith("thread/resume"))).toHaveLength(1);
-    expect(calls.filter((call) => call.startsWith("turn/start"))).toHaveLength(1);
-    expect(calls.filter((call) => call === "initialize")).toHaveLength(1);
-    expect(calls.find((call) => call.startsWith("turn/start"))).toContain("Call mimo_result");
+    expect(toolCalls).toEqual(["mimo_implement"]);
+    expect(methods.filter((method) => method === "initialize")).toHaveLength(1);
+    expect(methods.filter((method) => method === "initialized")).toHaveLength(1);
+    expect(methods.filter((method) => method === "thread/resume")).toHaveLength(1);
+    expect(methods.filter((method) => method === "turn/start")).toHaveLength(1);
+    const resume = calls.find((call) => call.method === "thread/resume")!;
+    expect(resume.params).toEqual({ threadId: "thread-frozen" });
+    const start = calls.find((call) => call.method === "turn/start")!;
+    const params = start.params as { threadId: string; input: Array<{ text: string }> };
+    expect(params.threadId).toBe("thread-frozen");
+    expect(params.input[0].text).toContain("Call mimo_result");
+    expect(params.input[0].text).toContain(`jobId "${receipt.jobId}"`);
+    expect(params.input[0].text).toContain(`cwd "${cwd.replace(/\\/g, "\\\\")}"`);
   });
 });

@@ -70,6 +70,24 @@ function fakeClient(result: ThreadResumeResult = { exists: true, busy: false }):
 }
 
 describe("Codex notification adapter", () => {
+  it("includes the frozen cwd required to fetch the notified job result", () => {
+    const prompt = buildCodexNotificationPrompt(job, signal);
+
+    expect(prompt).toContain('Call mimo_result with cwd "C:\\\\workspace"');
+    expect(prompt).toContain('and jobId "implement-1"');
+  });
+
+  it("keeps long frozen identifiers exact even when the callback prompt exceeds the compact target", () => {
+    const cwd = `C:\\\\${"nested\\\\".repeat(40)}quoted-\"目录`;
+    const jobId = `implement-${"x".repeat(260)}-\"quoted\"`;
+
+    const prompt = buildCodexNotificationPrompt({ ...job, cwd, id: jobId }, signal);
+
+    expect(prompt).toContain(`cwd ${JSON.stringify(cwd)}`);
+    expect(prompt).toContain(`jobId ${JSON.stringify(jobId)}`);
+    expect(prompt.length).toBeGreaterThan(240);
+  });
+
   it("resumes an idle thread and starts exactly one new turn", async () => {
     const calls: string[] = [];
     const client: CodexAppServerClient = {
@@ -88,7 +106,7 @@ describe("Codex notification adapter", () => {
     expect(calls).toEqual([
       "initialize",
       "resume:thread-1",
-      "turn:thread-1:MiMoCode job implement-1 emitted completed. Call mimo_result and continue handling the original request.",
+      'turn:thread-1:MiMoCode job emitted completed. Call mimo_result with cwd "C:\\\\workspace" and jobId "implement-1"; continue handling the original request.',
       "close"
     ]);
   });
@@ -186,7 +204,7 @@ describe("Codex notification adapter", () => {
     const prompt = buildCodexNotificationPrompt(job, inputSignal);
 
     expect(prompt).toBe(
-      "MiMoCode job implement-1 emitted needs_input. Call mimo_result and continue handling the original request. Reason: Need the API token from the operator."
+      'MiMoCode job emitted needs_input. Call mimo_result with cwd "C:\\\\workspace" and jobId "implement-1"; continue handling the original request. Reason: Need the API token from the operator.'
     );
     expect(prompt).not.toContain("private task prompt");
     expect(prompt).not.toContain("request-secret");
@@ -213,20 +231,19 @@ describe("Codex notification adapter", () => {
 
   it("does not append a reason for terminal events", () => {
     expect(buildCodexNotificationPrompt(job, signal)).toBe(
-      "MiMoCode job implement-1 emitted completed. Call mimo_result and continue handling the original request."
+      'MiMoCode job emitted completed. Call mimo_result with cwd "C:\\\\workspace" and jobId "implement-1"; continue handling the original request.'
     );
   });
 
-  it("caps terminal prompts even when the internal job id is unexpectedly long", () => {
+  it("preserves an unexpectedly long internal job id in terminal prompts", () => {
+    const jobId = `implement-${"x".repeat(500)}`;
     const prompt = buildCodexNotificationPrompt(
-      { ...job, id: `implement-${"x".repeat(500)}` },
+      { ...job, id: jobId },
       signal
     );
 
-    expect(prompt.length).toBe(240);
-    expect(prompt.endsWith(
-      " emitted completed. Call mimo_result and continue handling the original request."
-    )).toBe(true);
+    expect(prompt).toContain(`jobId ${JSON.stringify(jobId)}`);
+    expect(prompt.length).toBeGreaterThan(240);
     expect(prompt).not.toMatch(/[\r\n]/);
   });
 

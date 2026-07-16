@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createJobStore,
   failStaleJobs,
@@ -22,6 +22,7 @@ function tempWorkspace(): string {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const cwd of tempDirs.splice(0)) {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -101,6 +102,107 @@ describe("job store", () => {
     const second = store.create({ kind: "compose", task: "Second", request: { workflow: "dev" } });
 
     expect(listJobs(cwd).map((entry) => entry.id)).toEqual([second.id, first.id]);
+  });
+
+  it.each(["EPERM", "EACCES", "EBUSY"])(
+    "retries a transient Windows %s while replacing an authoritative job record",
+    (code) => {
+      const cwd = tempWorkspace();
+      const job = createJobStore(cwd).create({ kind: "implement", task: "retry", request: { cwd } });
+      const jobFile = resolveJobPaths(cwd, job.id).jobFile;
+      const rename = fs.renameSync.bind(fs);
+      let attempts = 0;
+      vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
+        if (target === jobFile && attempts++ === 0) {
+          throw Object.assign(new Error(`transient ${code}`), { code });
+        }
+        return rename(source, target);
+      });
+
+      const updated = updateJob(cwd, job.id, {
+        status: "running", phase: "starting", pid: 101, processIdentity: "retry-101"
+      });
+
+      expect(updated.status).toBe("running");
+      expect(readJob(cwd, job.id)?.status).toBe("running");
+      expect(attempts).toBe(2);
+    }
+  );
+
+  it("retries independently across consecutive authoritative writes", () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "implement", task: "retry twice", request: { cwd } });
+    const jobFile = resolveJobPaths(cwd, job.id).jobFile;
+    const rename = fs.renameSync.bind(fs);
+    let attempts = 0;
+    vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
+      if (target === jobFile && attempts++ % 2 === 0) {
+        throw Object.assign(new Error("transient EBUSY"), { code: "EBUSY" });
+      }
+      return rename(source, target);
+    });
+
+    updateJob(cwd, job.id, {
+      status: "running", phase: "starting", pid: 102, processIdentity: "retry-102"
+    });
+    const completed = updateJob(cwd, job.id, {
+      status: "completed", phase: undefined, pid: null, processIdentity: null, summary: "done"
+    });
+
+    expect(completed.status).toBe("completed");
+    expect(readJob(cwd, job.id)?.summary).toBe("done");
+    expect(attempts).toBe(4);
+  });
+
+  it("throws the original transient error after the bounded retry budget is exhausted", () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "implement", task: "exhaust", request: { cwd } });
+    const jobFile = resolveJobPaths(cwd, job.id).jobFile;
+    const transient = Object.assign(new Error("still busy"), { code: "EBUSY" });
+    let attempts = 0;
+    vi.spyOn(fs, "renameSync").mockImplementation((_source, target) => {
+      if (target === jobFile) attempts += 1;
+      throw transient;
+    });
+
+    expect(() => updateJob(cwd, job.id, { summary: "not persisted" })).toThrow(transient);
+    expect(attempts).toBe(5);
+    expect(readJob(cwd, job.id)?.summary).toBeUndefined();
+  });
+
+  it("does not retry a non-transient rename failure", () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "implement", task: "fail", request: { cwd } });
+    const jobFile = resolveJobPaths(cwd, job.id).jobFile;
+    const failure = Object.assign(new Error("missing temp"), { code: "ENOENT" });
+    let attempts = 0;
+    vi.spyOn(fs, "renameSync").mockImplementation((_source, target) => {
+      if (target === jobFile) attempts += 1;
+      throw failure;
+    });
+
+    expect(() => updateJob(cwd, job.id, { summary: "not persisted" })).toThrow(failure);
+    expect(attempts).toBe(1);
+  });
+
+  it("does not retry Windows error codes on another platform", () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "implement", task: "platform", request: { cwd } });
+    const jobFile = resolveJobPaths(cwd, job.id).jobFile;
+    const failure = Object.assign(new Error("permission"), { code: "EPERM" });
+    let attempts = 0;
+    const platform = process.platform;
+    Object.defineProperty(process, "platform", { value: "linux" });
+    vi.spyOn(fs, "renameSync").mockImplementation((_source, target) => {
+      if (target === jobFile) attempts += 1;
+      throw failure;
+    });
+    try {
+      expect(() => updateJob(cwd, job.id, { summary: "not persisted" })).toThrow(failure);
+      expect(attempts).toBe(1);
+    } finally {
+      Object.defineProperty(process, "platform", { value: platform });
+    }
   });
 
   it("creates and lists an authoritative job when the state cache cannot be written", async () => {

@@ -74,6 +74,8 @@ Notification state is auxiliary. Delivery failure records `failed`, attempts, an
 
 Normal Codex operation uses none of these until the callback turn; that turn calls `mimo_result`. Ordinary phase and milestone signals do not create a caller notification.
 
+The gated real-Codex smoke (`RUN_LOCAL_CODEX_NOTIFY_SMOKE=1`) must run from an idle, dedicated Codex task with the task-injected `CODEX_THREAD_ID`. Its completion notification starts a real callback turn in that task, so using an active task can cause busy retries or mix smoke instructions with unrelated work. The smoke starts the packaged stdio MCP server, lets both detached workers run normally, and accepts only a `completed` result marker written by the resumed task from `mimo_result` fields.
+
 ## Parent-Job Continuation
 
 Call `mimo_resume` with a `needs_input` or `blocked` parent `jobId` and the additional task text. The parent must have a saved `sessionId`. The launcher creates a new `resume` child job, copies the parent session internally, and inherits the parent target unless the request explicitly supplies another target. Parent and child records remain independently auditable.

@@ -1,4 +1,11 @@
+import fs from "node:fs";
+import { spawn } from "node:child_process";
+
 const finalText = process.env.FAKE_MIMO_FINAL_TEXT ?? "Job completed from fake MiMo.";
+
+if (process.env.FAKE_MIMO_INVOCATIONS_FILE) {
+  fs.appendFileSync(process.env.FAKE_MIMO_INVOCATIONS_FILE, `${process.pid}\n`, "utf8");
+}
 
 process.stdout.write(`${JSON.stringify({
   type: "text",
@@ -8,6 +15,18 @@ process.stdout.write(`${JSON.stringify({
 })}\n`);
 
 if (process.env.FAKE_MIMO_MODE === "hang") {
+  const descendant = process.env.FAKE_MIMO_TREE === "1"
+    ? spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
+        stdio: "ignore",
+        windowsHide: true
+      })
+    : undefined;
+  if (process.env.FAKE_MIMO_CHECKPOINT_FILE) {
+    fs.writeFileSync(process.env.FAKE_MIMO_CHECKPOINT_FILE, JSON.stringify({
+      pid: process.pid,
+      descendantPid: descendant?.pid ?? null
+    }), "utf8");
+  }
   setInterval(() => undefined, 1_000);
 } else if (process.env.FAKE_MIMO_CALLBACK === "1") {
   const endpoint = process.env.CODEX_MIMO_CALLBACK_ENDPOINT;

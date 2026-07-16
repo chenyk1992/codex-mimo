@@ -22,9 +22,77 @@ const EXPECTED_TOOL_NAMES = [
   "mimo_cancel",
   "mimo_jobs"
 ];
-const WORK_TOOL_NAMES = new Set([
-  "mimo_plan", "mimo_implement", "mimo_review", "mimo_fix_ci", "mimo_resume", "mimo_compose"
-]);
+const STRING_SCHEMA = { type: "string", minLength: 1 };
+const NOTIFY_SCHEMA = {
+  anyOf: [
+    {
+      type: "object",
+      properties: {
+        type: { type: "string", const: "codex" },
+        threadId: STRING_SCHEMA
+      },
+      required: ["type"],
+      additionalProperties: false
+    },
+    {
+      type: "object",
+      properties: {
+        type: { type: "string", const: "webhook" },
+        url: STRING_SCHEMA,
+        secretEnv: STRING_SCHEMA
+      },
+      required: ["type", "url", "secretEnv"],
+      additionalProperties: false
+    }
+  ]
+};
+const COMMON_JOB_PROPERTIES = {
+  cwd: STRING_SCHEMA,
+  model: STRING_SCHEMA,
+  timeoutMs: { type: "integer", exclusiveMinimum: 0, default: 1_800_000 },
+  notify: NOTIFY_SCHEMA
+};
+
+function canonicalWorkSchema(properties, required) {
+  return {
+    type: "object",
+    properties: { ...COMMON_JOB_PROPERTIES, ...properties },
+    required,
+    additionalProperties: false,
+    $schema: "http://json-schema.org/draft-07/schema#"
+  };
+}
+
+const CANONICAL_WORK_TOOL_SCHEMAS = {
+  mimo_plan: canonicalWorkSchema({ task: STRING_SCHEMA }, ["cwd", "task"]),
+  mimo_implement: canonicalWorkSchema(
+    { task: STRING_SCHEMA, allowWrite: { type: "boolean" } },
+    ["cwd", "task", "allowWrite"]
+  ),
+  mimo_review: canonicalWorkSchema({ base: { ...STRING_SCHEMA, default: "HEAD" } }, ["cwd"]),
+  mimo_fix_ci: canonicalWorkSchema(
+    { file: STRING_SCHEMA, task: STRING_SCHEMA },
+    ["cwd", "file"]
+  ),
+  mimo_resume: canonicalWorkSchema(
+    { jobId: STRING_SCHEMA, task: STRING_SCHEMA },
+    ["cwd", "jobId", "task"]
+  ),
+  mimo_compose: canonicalWorkSchema({
+    workflow: {
+      type: "string",
+      enum: [
+        "brainstorm", "dev", "fix", "fix-ci", "plan", "execute-plan", "review",
+        "parallel", "worktree", "merge", "new-skill"
+      ]
+    },
+    task: STRING_SCHEMA,
+    file: STRING_SCHEMA,
+    since: STRING_SCHEMA,
+    verification: { type: "array", items: STRING_SCHEMA },
+    reportDir: STRING_SCHEMA
+  }, ["cwd", "workflow"])
+};
 
 function usage() {
   return [
@@ -256,6 +324,12 @@ function validateSkill(root, skillDir, errors) {
   }
 }
 
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (!isObject(value)) return JSON.stringify(value);
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+}
+
 function validateSkills(root, errors) {
   if (!assertDirectory(root, "skills", errors)) {
     return;
@@ -335,14 +409,10 @@ async function validateBuiltTools(root, errors) {
     if (JSON.stringify(names) !== JSON.stringify(EXPECTED_TOOL_NAMES)) {
       errors.push(`built MCP server must expose exactly the 13 supported tools in canonical order; found: ${names.join(", ")}`);
     }
-    for (const tool of tools) {
-      if (!WORK_TOOL_NAMES.has(tool?.name)) continue;
-      const properties = tool?.inputSchema?.properties;
-      if (!isObject(properties)) continue;
-      for (const field of ["background", "wait"]) {
-        if (Object.prototype.hasOwnProperty.call(properties, field)) {
-          errors.push(`${tool.name} must not expose removed field ${field}`);
-        }
+    for (const [name, expectedSchema] of Object.entries(CANONICAL_WORK_TOOL_SCHEMAS)) {
+      const tool = tools.find((candidate) => candidate?.name === name);
+      if (stableJson(tool?.inputSchema) !== stableJson(expectedSchema)) {
+        errors.push(`${name} input schema must match the canonical contract`);
       }
     }
   } catch (error) {

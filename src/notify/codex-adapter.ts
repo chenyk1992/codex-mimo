@@ -9,17 +9,16 @@ import type { DeliveryAttemptResult, NotificationDelivery } from "./types.js";
 const MAX_PROMPT_LENGTH = 240;
 
 export function buildCodexNotificationPrompt(job: JobRecord, signal: JobSignal): string {
-  const prefix = "MiMoCode job ";
-  const suffix = ` emitted ${signal.kind}. ` +
-    "Call mimo_result and continue handling the original request.";
-  const jobId = singleLine(job.id).slice(0, MAX_PROMPT_LENGTH - prefix.length - suffix.length);
-  const base = `${prefix}${jobId}${suffix}`;
+  const base = `MiMoCode job emitted ${signal.kind}. ` +
+    `Call mimo_result with cwd ${JSON.stringify(singleLine(job.cwd))} ` +
+    `and jobId ${JSON.stringify(singleLine(job.id))}; continue handling the original request.`;
   if (signal.kind !== "needs_input" && signal.kind !== "blocked") return base;
 
   const reasonPrefix = " Reason: ";
   const available = Math.max(0, MAX_PROMPT_LENGTH - base.length - reasonPrefix.length);
+  if (available === 0) return base;
   const reason = singleLine(signal.summary).slice(0, available);
-  return `${base}${reasonPrefix}${reason}`.slice(0, MAX_PROMPT_LENGTH);
+  return `${base}${reasonPrefix}${reason}`;
 }
 
 export async function deliverCodexNotification(

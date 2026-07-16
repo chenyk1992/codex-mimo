@@ -10,9 +10,72 @@ const EXPECTED_TOOLS = [
   "mimo_result", "mimo_cancel", "mimo_jobs"
 ] as const;
 
+interface FixtureTool {
+  name: string;
+  inputSchema: Record<string, unknown>;
+}
+
+const string = { type: "string", minLength: 1 };
+const notify = {
+  anyOf: [
+    {
+      type: "object",
+      properties: { type: { type: "string", const: "codex" }, threadId: string },
+      required: ["type"],
+      additionalProperties: false
+    },
+    {
+      type: "object",
+      properties: { type: { type: "string", const: "webhook" }, url: string, secretEnv: string },
+      required: ["type", "url", "secretEnv"],
+      additionalProperties: false
+    }
+  ]
+};
+const commonProperties = {
+  cwd: string,
+  model: string,
+  timeoutMs: { type: "integer", exclusiveMinimum: 0, default: 1_800_000 },
+  notify
+};
+
+function workSchema(properties: Record<string, unknown>, required: string[]): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: { ...commonProperties, ...properties },
+    required,
+    additionalProperties: false,
+    $schema: "http://json-schema.org/draft-07/schema#"
+  };
+}
+
+const WORK_SCHEMAS: Record<string, Record<string, unknown>> = {
+  mimo_plan: workSchema({ task: string }, ["cwd", "task"]),
+  mimo_implement: workSchema({ task: string, allowWrite: { type: "boolean" } }, ["cwd", "task", "allowWrite"]),
+  mimo_review: workSchema({ base: { ...string, default: "HEAD" } }, ["cwd"]),
+  mimo_fix_ci: workSchema({ file: string, task: string }, ["cwd", "file"]),
+  mimo_resume: workSchema({ jobId: string, task: string }, ["cwd", "jobId", "task"]),
+  mimo_compose: workSchema({
+    workflow: {
+      type: "string",
+      enum: ["brainstorm", "dev", "fix", "fix-ci", "plan", "execute-plan", "review", "parallel", "worktree", "merge", "new-skill"]
+    },
+    task: string,
+    file: string,
+    since: string,
+    verification: { type: "array", items: string },
+    reportDir: string
+  }, ["cwd", "workflow"])
+};
+
 function createPluginFixture(
   skillFrontmatter: string,
-  options: { toolNames?: readonly string[]; oldWorkField?: string; skillBody?: string } = {}
+  options: {
+    toolNames?: readonly string[];
+    oldWorkField?: string;
+    skillBody?: string;
+    mutateTools?: (tools: FixtureTool[]) => void;
+  } = {}
 ): string {
   const root = mkdtempSync(path.join(tmpdir(), "codex-mimo-plugin-"));
 
@@ -68,17 +131,15 @@ function createPluginFixture(
     path.join(root, "skills", "mimocode", "SKILL.md"),
     `${skillFrontmatter}\n\n# MiMoCode\n\n${options.skillBody ?? "Use MiMoCode as a specialist coding agent."}\n`
   );
-  const tools = (options.toolNames ?? EXPECTED_TOOLS).map((name) => ({
+  const tools: FixtureTool[] = (options.toolNames ?? EXPECTED_TOOLS).map((name) => ({
     name,
-    inputSchema: {
-      type: "object",
-      properties: {
-        ...(name.startsWith("mimo_") && ["mimo_plan", "mimo_implement", "mimo_review", "mimo_fix_ci", "mimo_resume", "mimo_compose"].includes(name)
-          ? { cwd: { type: "string" }, ...(options.oldWorkField ? { [options.oldWorkField]: { type: "boolean" } } : {}) }
-          : {})
-      }
-    }
+    inputSchema: structuredClone(WORK_SCHEMAS[name] ?? { type: "object", properties: {} })
   }));
+  if (options.oldWorkField) {
+    const plan = tools.find((tool) => tool.name === "mimo_plan")!;
+    (plan.inputSchema.properties as Record<string, unknown>)[options.oldWorkField] = { type: "boolean" };
+  }
+  options.mutateTools?.(tools);
   writeFileSync(path.join(root, "dist", "codex", "mcp-server.js"), `
 import readline from "node:readline";
 const tools = ${JSON.stringify(tools)};
@@ -145,7 +206,63 @@ describe("lightweight plugin validator", () => {
     const result = runValidator(root);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain(`must not expose removed field ${field}`);
+    expect(result.stderr).toContain("mimo_plan input schema must match the canonical contract");
+  });
+
+  it("rejects an extra legacy work-tool property", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      mutateTools: (tools) => {
+        const plan = tools.find((tool) => tool.name === "mimo_plan")!;
+        (plan.inputSchema.properties as Record<string, unknown>).session = { type: "string" };
+      }
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("mimo_plan input schema must match the canonical contract");
+  });
+
+  it("rejects a missing required work-tool field", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      mutateTools: (tools) => {
+        const implement = tools.find((tool) => tool.name === "mimo_implement")!;
+        implement.inputSchema.required = ["cwd", "task"];
+      }
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("mimo_implement input schema must match the canonical contract");
+  });
+
+  it("rejects a work-tool schema that permits unknown properties", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      mutateTools: (tools) => {
+        tools.find((tool) => tool.name === "mimo_review")!.inputSchema.additionalProperties = true;
+      }
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("mimo_review input schema must match the canonical contract");
+  });
+
+  it("rejects an unknown nested notify property", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      mutateTools: (tools) => {
+        const compose = tools.find((tool) => tool.name === "mimo_compose")!;
+        const notifySchema = (compose.inputSchema.properties as Record<string, any>).notify;
+        notifySchema.anyOf[0].properties.session = { type: "string" };
+      }
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("mimo_compose input schema must match the canonical contract");
   });
 
   it("rejects skill guidance that tells Codex to loop on mimo_wait", () => {

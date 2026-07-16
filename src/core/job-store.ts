@@ -9,6 +9,7 @@ import {
   type PendingJobTransition
 } from "./jobs.js";
 import type { NotificationTarget } from "../notify/types.js";
+import { renameWithWindowsRetry } from "./atomic-file.js";
 import { withProcessLock } from "./process-lock.js";
 
 const DEFAULT_MAX_JOBS = 100;
@@ -371,7 +372,7 @@ function writeState(cwd: string, state: JobState): void {
   const temporary = `${stateFile}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   try {
     fs.writeFileSync(temporary, JSON.stringify(state, null, 2), "utf-8");
-    fs.renameSync(temporary, stateFile);
+    renameWithWindowsRetry(temporary, stateFile);
   } finally {
     fs.rmSync(temporary, { force: true });
   }
@@ -383,7 +384,7 @@ function writeJobRecord(cwd: string, record: JobRecord): void {
   const temporary = `${jobFile}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   try {
     fs.writeFileSync(temporary, JSON.stringify(record, null, 2), "utf-8");
-    fs.renameSync(temporary, jobFile);
+    renameWithWindowsRetry(temporary, jobFile);
   } finally {
     fs.rmSync(temporary, { force: true });
   }

@@ -48,14 +48,20 @@ const CLOSE_GRACE_MS = 1_000;
 const CLOSE_TERM_WAIT_MS = 1_000;
 const CLOSE_KILL_WAIT_MS = 1_000;
 
-export function createCodexAppServerClient(): CodexAppServerClient {
+export interface CodexAppServerClientOptions {
+  spawnProcess?: typeof spawn;
+}
+
+export function createCodexAppServerClient(
+  options: CodexAppServerClientOptions = {}
+): CodexAppServerClient {
   let child: ChildProcessWithoutNullStreams;
   try {
-    child = spawn("codex", ["app-server", "--listen", "stdio://"], {
+    child = (options.spawnProcess ?? spawn)("codex", ["app-server", "--listen", "stdio://"], {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       env: withUtf8ProcessEnv()
-    });
+    }) as ChildProcessWithoutNullStreams;
   } catch {
     throw new CodexAppServerError("transport", "Codex App Server transport failed");
   }

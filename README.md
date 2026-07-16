@@ -163,4 +163,4 @@ $env:RUN_LOCAL_MIMO_HOOK_SMOKE='1'; npm run test:smoke:mimo-hooks
 $env:RUN_LOCAL_CODEX_NOTIFY_SMOKE='1'; npm run test:smoke:codex-notify
 ```
 
-The Codex notification smoke also requires a real Codex App Server and the current task's injected `CODEX_THREAD_ID`.
+The Codex notification smoke also requires a real Codex App Server and an idle, dedicated Codex task with its injected `CODEX_THREAD_ID`. Do not run it from a task handling other work: the smoke deliberately resumes that task and asks its callback turn to fetch `mimo_result` and write an external observation marker.
