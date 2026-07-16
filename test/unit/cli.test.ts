@@ -1,446 +1,223 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
-import { buildMimoRunArgs } from "../../src/mimo/run-json.js";
-import { planPrompt, implementPrompt, reviewPrompt } from "../../src/core/prompt.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { CLI_USAGE, runCli, type CliDependencies } from "../../src/cli/commands.js";
 
-vi.mock("execa", () => ({
-  execa: vi.fn().mockResolvedValue({ stdout: "1.0.0" })
-}));
+const cwd = "E:/project";
+const jobId = "job-1";
 
-vi.mock("../../src/mimo/mimo-runner.js", () => ({
-  runAndCapture: vi.fn()
-}));
+function receipt(kind: string) {
+  return {
+    jobId,
+    kind,
+    status: "queued",
+    actions: {
+      status: "mimo_status",
+      events: "mimo_events",
+      result: "mimo_result",
+      cancel: "mimo_cancel"
+    }
+  };
+}
 
-vi.mock("../../src/git/diff.js", () => ({
-  captureGitDiff: vi.fn().mockResolvedValue({
-    diffStat: " file.ts | 2 +-",
-    diff: "diff --git a/file.ts\n+new line",
-    changedFiles: ["file.ts"]
-  })
-}));
+function dependencies(): CliDependencies {
+  return {
+    cwd: () => cwd,
+    mimoPlan: vi.fn(async () => receipt("plan")),
+    mimoImplement: vi.fn(async () => receipt("implement")),
+    mimoReview: vi.fn(async () => receipt("review")),
+    mimoFixCi: vi.fn(async () => receipt("fix-ci")),
+    mimoResume: vi.fn(async () => receipt("resume")),
+    mimoCompose: vi.fn(async () => receipt("compose")),
+    mimoStatus: vi.fn(async () => ({ jobId, status: "running" })),
+    mimoEvents: vi.fn(async () => ({ jobId, signals: [], nextCursor: 0 })),
+    mimoWait: vi.fn(async () => ({ jobId, signals: [], timedOut: true })),
+    mimoResult: vi.fn(async () => ({ jobId, status: "completed" })),
+    mimoCancel: vi.fn(async () => ({ jobId, status: "cancelled" })),
+    mimoJobs: vi.fn(async () => [{ jobId, status: "completed" }]),
+    mimoHealthcheck: vi.fn(async () => ({ ok: true, version: "1.0.0", cwd })),
+    runDoctor: vi.fn(async () => ({ ok: true } as never)),
+    formatDoctorReport: vi.fn(() => "Doctor: ok"),
+    runJobWorker: vi.fn(async () => undefined),
+    runNotificationWorker: vi.fn(async () => undefined)
+  };
+}
 
-import { execa } from "execa";
-import { runAndCapture } from "../../src/mimo/mimo-runner.js";
-import {
-  composeStatusExitCode,
-  DOCTOR_HINT,
-  formatMimoRunResult,
-  runPlan,
-  runImplement,
-  runReview,
-  runFixCi,
-  runResume
-} from "../../src/cli/commands.js";
+async function invoke(args: string[], overrides: Partial<CliDependencies> = {}) {
+  const deps = { ...dependencies(), ...overrides };
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const exitCode = await runCli(args, {
+    ...deps,
+    stdout: (line) => stdout.push(line),
+    stderr: (line) => stderr.push(line)
+  });
+  return { exitCode, stdout: stdout.join("\n"), stderr: stderr.join("\n"), deps };
+}
 
-const mockedExeca = vi.mocked(execa);
-const mockedRunAndCapture = vi.mocked(runAndCapture);
-const defaultRunResult = {
-  sessionId: "ses_test",
-  summary: "ok",
-  changedFiles: [],
-  commands: [],
-  errors: [],
-  exitCode: 0,
-  raw: []
-};
+describe("unified CLI work commands", () => {
+  const cases = [
+    ["plan", ["plan", "--cwd", cwd, "Plan authentication"], "mimoPlan",
+      { cwd, task: "Plan authentication" }],
+    ["implement", ["implement", "--cwd", cwd, "--allow-write", "Implement authentication"], "mimoImplement",
+      { cwd, task: "Implement authentication", allowWrite: true }],
+    ["review", ["review", "--cwd", cwd, "--base", "origin/main"], "mimoReview",
+      { cwd, base: "origin/main" }],
+    ["fix-ci", ["fix-ci", "--cwd", cwd, "--file", "ci.log", "Fix CI"], "mimoFixCi",
+      { cwd, file: "ci.log", task: "Fix CI" }],
+    ["resume", ["resume", "--cwd", cwd, "--job-id", "parent-1", "Continue implementation"], "mimoResume",
+      { cwd, jobId: "parent-1", task: "Continue implementation" }],
+    ["compose", ["compose", "--cwd", cwd, "--workflow", "dev", "Build authentication"], "mimoCompose",
+      { cwd, workflow: "dev", task: "Build authentication" }]
+  ] as const;
 
-beforeEach(() => {
-  mockedExeca.mockClear();
-  mockedExeca.mockResolvedValue({ stdout: "" } as any);
-  mockedRunAndCapture.mockReset();
-  mockedRunAndCapture.mockResolvedValue(defaultRunResult);
-});
+  it.each(cases)("%s prints a queued receipt", async (kind, args, dependency, expectedInput) => {
+    const startedAt = performance.now();
+    const result = await invoke([...args]);
+    const elapsedMs = performance.now() - startedAt;
 
-describe("CLI command building", () => {
-  it("builds plan command with agent and message", () => {
-    const args = buildMimoRunArgs({
-      cwd: "/project",
-      agent: "plan",
-      message: planPrompt("Add auth")
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      kind,
+      status: "queued",
+      actions: { result: "mimo_result" }
     });
-    expect(args[0]).toBe("run");
-    expect(args).toContain("--agent");
-    expect(args).toContain("plan");
-    expect(args).toContain("--format");
-    expect(args).toContain("json");
+    expect(result.stderr).toBe("");
+    expect(elapsedMs).toBeLessThan(1_000);
+    expect(result.deps[dependency]).toHaveBeenCalledWith(expectedInput);
   });
 
-  it("includes --file flags for attached files", () => {
-    const args = buildMimoRunArgs({
-      cwd: "/project",
-      agent: "build",
-      message: implementPrompt("Fix CI"),
-      files: ["ci.log", "error.log"]
+  it("parses common job options once for every work command", async () => {
+    const result = await invoke([
+      "plan", "Plan 中文支持", "--cwd", cwd, "--model", "mimo-v2",
+      "--timeout-ms", "9000", "--notify", "codex", "--thread-id", "thread-1"
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.deps.mimoPlan).toHaveBeenCalledWith({
+      cwd,
+      task: "Plan 中文支持",
+      model: "mimo-v2",
+      timeoutMs: 9000,
+      notify: { type: "codex", threadId: "thread-1" }
     });
-    const fileIndices = args.reduce((acc, v, i) => v === "--file" ? [...acc, i] : acc, [] as number[]);
-    const messageIndex = args.indexOf(implementPrompt("Fix CI"));
-    expect(fileIndices).toHaveLength(2);
-    expect(messageIndex).toBeGreaterThan(-1);
-    expect(fileIndices[0]).toBeGreaterThan(messageIndex);
-    expect(args[fileIndices[0] + 1]).toBe("ci.log");
-    expect(args[fileIndices[1] + 1]).toBe("error.log");
   });
 
-  it("includes --session for resume", () => {
-    const args = buildMimoRunArgs({
-      cwd: "/project",
-      agent: "build",
-      message: "Continue",
-      session: "sess_123"
-    });
-    expect(args).toContain("--session");
-    expect(args).toContain("sess_123");
+  it.each([
+    [["--notify", "codex"], { type: "codex" }],
+    [["--notify", "codex", "--thread-id", "thread-1"], { type: "codex", threadId: "thread-1" }],
+    [["--notify", "webhook", "--url", "https://example.test/hook", "--secret-env", "HOOK_SECRET"],
+      { type: "webhook", url: "https://example.test/hook", secretEnv: "HOOK_SECRET" }]
+  ] as const)("supports notification variant %#", async (flags, notify) => {
+    const result = await invoke(["plan", "Task", ...flags]);
+    expect(result.exitCode).toBe(0);
+    expect(result.deps.mimoPlan).toHaveBeenCalledWith(expect.objectContaining({ notify }));
   });
 
-  it("includes --fork when specified", () => {
-    const args = buildMimoRunArgs({
-      cwd: "/project",
-      agent: "build",
-      message: "Fork this",
-      fork: true
-    });
-    expect(args).toContain("--fork");
+  it("requires explicit write authorization for implement", async () => {
+    const result = await invoke(["implement", "Change code"]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("--allow-write");
+    expect(result.deps.mimoImplement).not.toHaveBeenCalled();
   });
 
-  it("selects agent=plan for plan commands", () => {
-    const args = buildMimoRunArgs({
-      cwd: "/project",
-      agent: "plan",
-      message: "task"
-    });
-    const agentIdx = args.indexOf("--agent");
-    expect(args[agentIdx + 1]).toBe("plan");
+  it("requires --job-id rather than --session for resume", async () => {
+    const missing = await invoke(["resume", "Continue"]);
+    const legacy = await invoke(["resume", "--session", "session-1", "Continue"]);
+
+    expect(missing.exitCode).toBe(2);
+    expect(missing.stderr).toContain("--job-id");
+    expect(legacy.exitCode).toBe(2);
+    expect(legacy.stderr).toContain("--session");
   });
 
-  it("selects agent=build for implement commands", () => {
-    const args = buildMimoRunArgs({
-      cwd: "/project",
-      agent: "build",
-      message: "task"
+  it("returns a stable runtime failure when job launch fails", async () => {
+    const result = await invoke(["plan", "Task"], {
+      mimoPlan: vi.fn(async () => { throw new Error("worker spawn failed"); })
     });
-    const agentIdx = args.indexOf("--agent");
-    expect(args[agentIdx + 1]).toBe("build");
-  });
 
-  it("includes --model when specified", () => {
-    const args = buildMimoRunArgs({
-      cwd: "/project",
-      agent: "build",
-      message: "task",
-      model: "gpt-4"
-    });
-    expect(args).toContain("--model");
-    expect(args).toContain("gpt-4");
-  });
-
-  it("includes --title when specified", () => {
-    const args = buildMimoRunArgs({
-      cwd: "/project",
-      agent: "build",
-      message: "task",
-      title: "My Task"
-    });
-    expect(args).toContain("--title");
-    expect(args).toContain("My Task");
-  });
-
-  it("includes --attach when specified", () => {
-    const args = buildMimoRunArgs({
-      cwd: "/project",
-      agent: "build",
-      message: "task",
-      attach: "context.md"
-    });
-    expect(args).toContain("--attach");
-    expect(args).toContain("context.md");
-  });
-
-  it("includes --continue when specified", () => {
-    const args = buildMimoRunArgs({
-      cwd: "/project",
-      agent: "build",
-      message: "task",
-      continue: true
-    });
-    expect(args).toContain("--continue");
-  });
-
-  it("places message before --file flags", () => {
-    const args = buildMimoRunArgs({
-      cwd: "/project",
-      agent: "build",
-      message: "the message",
-      files: ["a.txt"]
-    });
-    const msgIdx = args.indexOf("the message");
-    const fileIdx = args.indexOf("--file");
-    expect(msgIdx).toBeLessThan(fileIdx);
-  });
-
-  it("omits optional flags when not provided", () => {
-    const args = buildMimoRunArgs({
-      cwd: "/project",
-      agent: "plan",
-      message: "task"
-    });
-    expect(args).not.toContain("--model");
-    expect(args).not.toContain("--session");
-    expect(args).not.toContain("--fork");
-    expect(args).not.toContain("--title");
-    expect(args).not.toContain("--attach");
-    expect(args).not.toContain("--continue");
-    expect(args).not.toContain("--file");
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("worker spawn failed");
   });
 });
 
-describe("prompt templates", () => {
-  it("plan prompt includes rules", () => {
-    const prompt = planPrompt("Test task");
-    expect(prompt).toContain("Test task");
-    expect(prompt).toContain("Do not edit files");
-    expect(prompt).toContain("planning agent");
+describe("public CLI controls", () => {
+  const cases = [
+    ["status", ["status", "--cwd", cwd, "--job-id", jobId, "--json"], "mimoStatus"],
+    ["events", ["events", "--cwd", cwd, "--job-id", jobId, "--since-cursor", "2", "--limit", "5", "--min-level", "warn", "--json"], "mimoEvents"],
+    ["wait", ["wait", "--cwd", cwd, "--job-id", jobId, "--timeout-ms", "5", "--json"], "mimoWait"],
+    ["result", ["result", "--cwd", cwd, "--job-id", jobId, "--json"], "mimoResult"],
+    ["cancel", ["cancel", "--cwd", cwd, "--job-id", jobId, "--json"], "mimoCancel"],
+    ["jobs", ["jobs", "--cwd", cwd, "--all", "--json"], "mimoJobs"]
+  ] as const;
+
+  it.each(cases)("supports %s", async (_command, args, dependency) => {
+    const result = await invoke([...args]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toBeDefined();
+    expect(result.deps[dependency]).toHaveBeenCalledTimes(1);
   });
 
-  it("puts the user task before agent boilerplate", () => {
-    expect(planPrompt("Test task").startsWith("Objective:\nTest task")).toBe(true);
-    expect(implementPrompt("Test task").startsWith("Objective:\nTest task")).toBe(true);
-  });
-
-  it("plan prompt starts with an explicit objective", () => {
-    const prompt = planPrompt("Fix sum.ts");
-
-    expect(prompt.startsWith("Objective:\nFix sum.ts")).toBe(true);
-    expect(prompt).toContain("Do not ask what the task is");
-  });
-
-  it("implement prompt starts with an explicit objective", () => {
-    const prompt = implementPrompt("Update README");
-
-    expect(prompt.startsWith("Objective:\nUpdate README")).toBe(true);
-    expect(prompt).toContain("Do not ask what the task is");
-  });
-
-  it("implement prompt includes rules", () => {
-    const prompt = implementPrompt("Test task");
-    expect(prompt).toContain("Test task");
-    expect(prompt).toContain("surgical");
-    expect(prompt).toContain("implementation agent");
-  });
-
-  it("review prompt includes diff summary", () => {
-    const prompt = reviewPrompt("diff --git a/file.ts ...");
-    expect(prompt).toContain("diff --git a/file.ts");
-    expect(prompt).toContain("Do not edit files");
-  });
-
-  it("review prompt includes review agent label", () => {
-    const prompt = reviewPrompt("some diff");
-    expect(prompt).toContain("review agent");
-  });
-
-  it("plan prompt does not contain implementation rules", () => {
-    const prompt = planPrompt("task");
-    expect(prompt).not.toContain("surgical");
-    expect(prompt).not.toContain("implementation agent");
-  });
-
-  it("implement prompt does not contain planning rules", () => {
-    const prompt = implementPrompt("task");
-    expect(prompt).not.toContain("planning agent");
-    expect(prompt).not.toContain("implementation plan");
-  });
-
-  it("plan and implement prompts start with Objective: prefix", () => {
-    expect(planPrompt("x").startsWith("Objective:")).toBe(true);
-    expect(implementPrompt("x").startsWith("Objective:")).toBe(true);
-  });
-
-  it("review prompt starts with Objective:", () => {
-    expect(reviewPrompt("x").startsWith("Objective:")).toBe(true);
-  });
-});
-
-describe("CLI flag effects", () => {
-  it("dry-run does not execute mimo (verified by checking args only)", () => {
-    const args = buildMimoRunArgs({
-      cwd: "/project",
-      agent: "plan",
-      message: planPrompt("Test")
-    });
-    expect(args).toContain("run");
-    expect(args).toContain("--format");
-    expect(args).toContain("json");
-  });
-
-  it("file flag adds --file to args", () => {
-    const args = buildMimoRunArgs({
-      cwd: "/project",
-      agent: "build",
-      message: "Fix CI",
-      files: ["ci.log"]
-    });
-    expect(args).toContain("--file");
-    expect(args).toContain("ci.log");
-  });
-});
-
-describe("compose-worker command", () => {
-  it("requires --job-id flag", () => {
-    const args = ["compose-worker"];
-    expect(args).toContain("compose-worker");
-    expect(args).not.toContain("--job-id");
-  });
-
-  it("accepts --job-id flag", () => {
-    const args = ["compose-worker", "--job-id", "job-1"];
-    const jobIdIndex = args.indexOf("--job-id");
-    expect(jobIdIndex).toBeGreaterThan(-1);
-    expect(args[jobIdIndex + 1]).toBe("job-1");
-  });
-});
-
-describe("runPlan command", () => {
-  it("returns runAndCapture result with agent=plan", async () => {
-    const result = await runPlan("/project", "Add auth", []);
-    expect(result).toBe(defaultRunResult);
-    expect(mockedRunAndCapture).toHaveBeenCalledWith({
-      cwd: "/project",
-      agent: "plan",
-      message: planPrompt("Add auth"),
-      files: []
-    });
-  });
-
-  it("passes file flags when files provided", async () => {
-    await runPlan("/project", "task", ["spec.md"]);
-    expect(mockedRunAndCapture.mock.calls[0][0].files).toEqual(["spec.md"]);
-  });
-});
-
-describe("runImplement command", () => {
-  it("calls runAndCapture with agent=build", async () => {
-    await runImplement("/project", "Fix bug", []);
-    expect(mockedRunAndCapture.mock.calls[0][0]).toMatchObject({
-      cwd: "/project",
-      agent: "build",
-      message: implementPrompt("Fix bug"),
-      files: []
+  it("maps event and wait flags to the shared control input", async () => {
+    const result = await invoke([
+      "wait", "--job-id", jobId, "--since-cursor", "3", "--limit", "7",
+      "--min-level", "error", "--timeout-ms", "12000"
+    ]);
+    expect(result.deps.mimoWait).toHaveBeenCalledWith({
+      cwd,
+      jobId,
+      sinceCursor: 3,
+      limit: 7,
+      minLevel: "error",
+      timeoutMs: 12000
     });
   });
 });
 
-describe("runReview command", () => {
-  it("captures diff and uses agent=plan", async () => {
-    await runReview("/project", "HEAD", []);
-    expect(mockedRunAndCapture.mock.calls[0][0]).toMatchObject({
-      cwd: "/project",
-      agent: "plan"
-    });
+describe("internal CLI workers", () => {
+  it("runs job-worker without normal work output", async () => {
+    const result = await invoke(["job-worker", "--cwd", cwd, "--job-id", jobId]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.deps.runJobWorker).toHaveBeenCalledWith(cwd, jobId);
   });
 
-  it("includes diff content in the prompt", async () => {
-    await runReview("/project", "HEAD", []);
-    expect(mockedRunAndCapture.mock.calls[0][0].message).toContain("diff --git");
-  });
-});
-
-describe("runFixCi command", () => {
-  it("uses agent=build with file attachment", async () => {
-    await runFixCi("/project", "ci.log", undefined, []);
-    expect(mockedRunAndCapture.mock.calls[0][0]).toMatchObject({
-      cwd: "/project",
-      agent: "build",
-      files: ["ci.log"]
-    });
-  });
-
-  it("includes extra files alongside the primary file", async () => {
-    await runFixCi("/project", "ci.log", undefined, ["extra.log"]);
-    expect(mockedRunAndCapture.mock.calls[0][0].files).toEqual(["ci.log", "extra.log"]);
-  });
-
-  it("uses default task when none provided", async () => {
-    await runFixCi("/project", "ci.log", undefined, []);
-    expect(mockedRunAndCapture.mock.calls[0][0].message).toContain("Fix the CI failures");
-  });
-
-  it("uses custom task when provided", async () => {
-    await runFixCi("/project", "ci.log", "Fix tests", []);
-    expect(mockedRunAndCapture.mock.calls[0][0].message).toContain("Fix tests");
+  it("runs notify-worker without normal work output", async () => {
+    const result = await invoke(["notify-worker", "--cwd", cwd]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.deps.runNotificationWorker).toHaveBeenCalledWith(cwd);
   });
 });
 
-describe("runResume command", () => {
-  it("uses agent=build with the requested session", async () => {
-    await runResume("/project", "ses_resume", "Continue feature", []);
-    expect(mockedRunAndCapture.mock.calls[0][0]).toMatchObject({
-      cwd: "/project",
-      agent: "build",
-      session: "ses_resume",
-      files: []
-    });
-    expect(mockedRunAndCapture.mock.calls[0][0].message).toContain("Continue feature");
+describe("strict CLI surface", () => {
+  it.each(["compose-worker", "sessions"])("rejects removed %s command", async (command) => {
+    const result = await invoke([command]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain(`Unknown command: ${command}`);
   });
 
-  it("uses a default continuation task when none provided", async () => {
-    await runResume("/project", "ses_resume", undefined, []);
-    expect(mockedRunAndCapture.mock.calls[0][0].message).toContain("Continue the previous task.");
-  });
-});
+  it.each(["--background", "--wait", "--session", "--attach", "--fork", "--continue", "--dry-run"])(
+    "rejects removed %s flag",
+    async (flag) => {
+      const result = await invoke(["plan", "Task", flag]);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain(flag);
+    }
+  );
 
-describe("composeStatusExitCode", () => {
-  it("returns nonzero for failed and timeout compose results", () => {
-    expect(composeStatusExitCode("failed")).toBe(1);
-    expect(composeStatusExitCode("timeout")).toBe(1);
-  });
-
-  it("returns zero for successful or review-needed compose results", () => {
-    expect(composeStatusExitCode("passed")).toBe(0);
-    expect(composeStatusExitCode("needs_review")).toBe(0);
-  });
-});
-
-describe("formatMimoRunResult", () => {
-  it("prints compact callback-aware text", () => {
-    const text = formatMimoRunResult("implement", {
-      sessionId: "ses_123",
-      summary: "Changed the API path.",
-      changedFiles: ["src/api.ts"],
-      commands: [{ command: "npm test", exitCode: 0 }],
-      errors: ["minor warning"],
-      exitCode: 1,
-      raw: [],
-      callback: {
-        invocationId: "inv_1",
-        outcome: "completed",
-        sessionId: "ses_123",
-        receivedAt: "2026-06-27T00:00:00.000Z"
-      }
-    });
-
-    expect(text).toContain("Command: implement");
-    expect(text).toContain("Status: failed");
-    expect(text).toContain("Session: ses_123");
-    expect(text).toContain("Summary: Changed the API path.");
-    expect(text).toContain("Changed files:");
-    expect(text).toContain("  - src/api.ts");
-    expect(text).toContain("Commands:");
-    expect(text).toContain("  - npm test exit=0");
-    expect(text).toContain("Errors:");
-    expect(text).toContain("  - minor warning");
+  it("prints the exact canonical usage", async () => {
+    const result = await invoke([]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toBe(`Usage: ${CLI_USAGE}`);
+    expect(CLI_USAGE).toBe(
+      "codex-mimo <plan|implement|review|fix-ci|resume|compose|status|events|wait|result|cancel|jobs|doctor|healthcheck>"
+    );
   });
 
-  it("adds a doctor hint when a direct CLI command fails", () => {
-    const text = formatMimoRunResult("plan", {
-      sessionId: null,
-      summary: "MiMoCode failed.",
-      changedFiles: [],
-      commands: [],
-      errors: ["tool injection unavailable"],
-      exitCode: 1,
-      raw: []
-    });
-
-    expect(text).toContain(DOCTOR_HINT);
-    expect(text).toContain("codex-mimo doctor");
+  it("rejects malformed numeric flags as input errors", async () => {
+    const result = await invoke(["plan", "Task", "--timeout-ms", "never"]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("--timeout-ms must be a positive integer");
   });
 });
