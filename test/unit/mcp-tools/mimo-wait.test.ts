@@ -1,10 +1,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mimoWait } from "../../../src/codex/tools.js";
 import { createJobStore, updateJob } from "../../../src/core/job-store.js";
-import { appendJobSignal } from "../../../src/core/job-signals.js";
+import {
+  appendJobSignal,
+  isAttentionSignal,
+  readJobSignalPage
+} from "../../../src/core/job-signals.js";
 
 const tempDirs: string[] = [];
 function tempWorkspace(): string {
@@ -48,6 +52,37 @@ describe("mimo_wait", () => {
 
     expect(delays).toEqual([1_000]);
     expect(result.signals.map((signal) => signal.kind)).toEqual(["completed"]);
+    expect(result.nextCursor).toBe(2);
+    expect(result.timedOut).toBe(false);
+  });
+
+  it("continues internal scans after the last confirmed ordinary signal", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
+    appendJobSignal(job.signalsFile, {
+      jobId: job.id, kind: "milestone", level: "info", summary: "Ordinary progress."
+    });
+    const scanCursors: number[] = [];
+    const readSignals = vi.fn((selected, options) => {
+      scanCursors.push(options.sinceCursor);
+      return readJobSignalPage(selected.signalsFile, { ...options, include: isAttentionSignal });
+    });
+    let now = 0;
+
+    const result = await mimoWait({ cwd, jobId: job.id, timeoutMs: 10_000 }, {
+      now: () => now,
+      intervalMs: 1_000,
+      readSignals,
+      sleep: async (milliseconds) => {
+        now += milliseconds;
+        appendJobSignal(job.signalsFile, {
+          jobId: job.id, kind: "completed", level: "info", summary: "Done."
+        });
+      }
+    });
+
+    expect(scanCursors).toEqual([0, 1]);
+    expect(result.signals.map((signal) => signal.cursor)).toEqual([2]);
     expect(result.nextCursor).toBe(2);
     expect(result.timedOut).toBe(false);
   });

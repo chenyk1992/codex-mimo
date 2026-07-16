@@ -146,6 +146,7 @@ export interface MimoWaitDependencies {
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
   intervalMs?: number;
+  readSignals?: typeof readAttentionSignals;
 }
 
 export async function mimoWait(input: unknown, deps: MimoWaitDependencies = {}) {
@@ -154,19 +155,27 @@ export async function mimoWait(input: unknown, deps: MimoWaitDependencies = {}) 
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? delay;
   const intervalMs = deps.intervalMs ?? WAIT_CHECK_INTERVAL_MS;
+  const readSignals = deps.readSignals ?? readAttentionSignals;
   const startedAt = now();
   const deadline = startedAt + parsed.timeoutMs;
   let job = selected;
-  let result = readAttentionSignals(job, parsed);
+  let scanCursor = parsed.sinceCursor;
+  let result = readSignals(job, { ...parsed, sinceCursor: scanCursor });
 
   while (result.signals.length === 0 && now() < deadline) {
+    scanCursor = result.nextCursor;
     await sleep(Math.min(intervalMs, Math.max(1, deadline - now())));
     job = readJob(parsed.cwd, selected.id) ?? job;
-    result = readAttentionSignals(job, parsed);
+    result = readSignals(job, { ...parsed, sinceCursor: scanCursor });
   }
 
+  if (result.signals.length === 0) scanCursor = result.nextCursor;
+  const visibleResult = result.signals.length === 0
+    ? { signals: [], nextCursor: scanCursor }
+    : result;
+
   return {
-    ...renderJobSignals(job, result),
+    ...renderJobSignals(job, visibleResult),
     timedOut: result.signals.length === 0,
     waitedMs: Math.max(0, now() - startedAt)
   };
