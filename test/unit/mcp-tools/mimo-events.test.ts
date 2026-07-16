@@ -51,7 +51,7 @@ describe("mimo_events", () => {
       kind: "milestone",
       summary: "Reading files."
     });
-    expect(result.actions).toEqual({ status: "mimo_status", result: "mimo_result", cancel: "mimo_cancel" });
+    expect(result.actions).toEqual({ status: "mimo_status", cancel: "mimo_cancel" });
   });
 
   it("defaults to the most recent job and filters by level", async () => {

@@ -39,16 +39,14 @@ export const FixCiInput = JobOptionsSchema.extend({
   task: z.string().min(1).optional()
 }).strict();
 
-export const ResumeInput = z.object({
-  cwd: z.string(),
-  session: z.string(),
-  task: z.string(),
-  timeoutMs: z.number().int().positive().default(1_800_000)
+export const ResumeInput = JobOptionsSchema.extend({
+  jobId: z.string().min(1),
+  task: z.string().min(1)
 }).strict();
 
 export const HealthcheckInput = z.object({
   cwd: z.string().optional()
-});
+}).strict();
 
 export const ComposeWorkflowSchema = z.enum(COMPOSE_WORKFLOW_NAMES);
 
@@ -64,7 +62,7 @@ export const ComposeInput = JobOptionsSchema.extend({
 export const JobStatusInput = z.object({
   cwd: z.string(),
   jobId: z.string().optional()
-});
+}).strict();
 
 export const JobEventsInput = z.object({
   cwd: z.string(),
@@ -72,36 +70,23 @@ export const JobEventsInput = z.object({
   sinceCursor: z.number().int().nonnegative().default(0),
   limit: z.number().int().positive().max(100).default(20),
   minLevel: z.enum(["debug", "info", "warn", "error"]).default("debug")
-});
+}).strict();
 
 export const JobWaitInput = JobEventsInput.extend({
-  timeoutMs: z.number().int().positive().default(1_800_000),
-  pollMs: z.number().int().positive().max(60_000).default(1_000)
-});
-
-export const JobWakeInput = JobEventsInput.omit({ limit: true, minLevel: true }).extend({
-  minLevel: z.enum(["debug", "info", "warn", "error"]).default("info"),
   timeoutMs: z.number().int().positive().default(1_800_000)
-});
+}).strict();
 
 export const JobResultInput = z.object({
   cwd: z.string(),
   jobId: z.string().optional()
-});
+}).strict();
 
 export const JobCancelInput = z.object({
   cwd: z.string(),
   jobId: z.string()
-});
+}).strict();
 
 export const JobListInput = z.object({
   cwd: z.string(),
   all: z.boolean().default(false)
-});
-
-export const ResumeJobInput = z.object({
-  cwd: z.string(),
-  jobId: z.string(),
-  task: z.string().min(1),
-  background: z.boolean().default(false)
-});
+}).strict();

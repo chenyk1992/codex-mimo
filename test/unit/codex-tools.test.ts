@@ -46,9 +46,23 @@ describe("codex work tool handlers", () => {
     expect(spawnJobWorker).toHaveBeenCalledWith(cwd, result.jobId);
   });
 
-  it("keeps job controls registered while Task 10 migrates their contracts", () => {
-    expect(MIMO_TOOL_NAMES).toEqual(expect.arrayContaining([
-      "mimo_status", "mimo_events", "mimo_wait", "mimo_result", "mimo_cancel", "mimo_jobs"
-    ]));
+  it("exposes exactly the final 13-tool surface", () => {
+    expect(MIMO_TOOL_NAMES).toEqual([
+      "mimo_healthcheck",
+      "mimo_plan",
+      "mimo_implement",
+      "mimo_review",
+      "mimo_fix_ci",
+      "mimo_resume",
+      "mimo_compose",
+      "mimo_status",
+      "mimo_events",
+      "mimo_wait",
+      "mimo_result",
+      "mimo_cancel",
+      "mimo_jobs"
+    ]);
+    expect(MIMO_TOOL_NAMES).not.toContain("mimo_wake");
+    expect(MIMO_TOOL_NAMES).not.toContain("mimo_resume_job");
   });
 });

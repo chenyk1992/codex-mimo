@@ -12,6 +12,7 @@ export interface LaunchJobInput {
   request: unknown;
   parentJobId?: string;
   notify?: NotificationInput;
+  notificationTarget?: NotificationTarget | null;
 }
 
 export interface LaunchJobDependencies {
@@ -30,10 +31,15 @@ export async function launchJob(
   dependencies: LaunchJobDependencies = {}
 ): Promise<JobReceipt> {
   assertImplementWriteAuthorization(input);
-  const target = (dependencies.resolveTarget ?? resolveNotificationTarget)(
-    input.notify,
-    dependencies.env ?? process.env
-  );
+  if (input.notify !== undefined && input.notificationTarget !== undefined) {
+    throw new Error("A job launch cannot both resolve and reuse a notification target.");
+  }
+  const target = input.notificationTarget === undefined
+    ? (dependencies.resolveTarget ?? resolveNotificationTarget)(
+        input.notify,
+        dependencies.env ?? process.env
+      )
+    : cloneTarget(input.notificationTarget);
   const createJob = dependencies.createJob ?? ((cwd, createInput) =>
     createJobStore(cwd).create(createInput));
   const job = createJob(input.cwd, {
@@ -61,6 +67,13 @@ export async function launchJob(
   }
 
   return toJobReceipt(job);
+}
+
+function cloneTarget(target: NotificationTarget | null): NotificationTarget | undefined {
+  if (target === null) return undefined;
+  return target.type === "codex"
+    ? { type: "codex", threadId: target.threadId }
+    : { type: "webhook", url: target.url, secretEnv: target.secretEnv };
 }
 
 export function toJobReceipt(job: JobRecord): JobReceipt {

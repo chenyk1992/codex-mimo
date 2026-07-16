@@ -47,13 +47,6 @@ export interface JobReportPaths {
   diff?: string;
 }
 
-export interface JobSignalsHint {
-  tool: "mimo_events";
-  waitTool: "mimo_wait";
-  jobId: string;
-  sinceCursor: number;
-}
-
 export interface ExecutionCallbackSummary {
   invocationId: string;
   outcome: "completed" | "error" | "cancelled" | "missing";
@@ -122,6 +115,7 @@ export interface JobRecord {
 export interface JobStatusResult {
   jobId: string;
   kind: JobKind;
+  parentJobId: string | null;
   status: JobStatus;
   phase?: JobPhase;
   elapsedMs: number | null;
@@ -130,16 +124,29 @@ export interface JobStatusResult {
   changedFiles: string[];
   executionCallback?: ExecutionCallbackSummary;
   progress: string[];
-  signals: JobSignalsHint;
+  notification?: JobNotificationStatus;
   actions: {
+    events: "mimo_events";
+    wait?: "mimo_wait";
     result?: "mimo_result";
     cancel?: "mimo_cancel";
+    resume?: "mimo_resume";
   };
+}
+
+export interface JobNotificationStatus {
+  targetType: "codex" | "webhook";
+  status: "pending" | "delivering" | "delivered" | "failed";
+  attempts: number;
+  lastError?: string;
 }
 
 export interface JobResult {
   jobId: string;
+  kind: JobKind;
+  parentJobId: string | null;
   status: JobStatus;
+  resultType: "partial" | "final";
   summary: string;
   sessionId: string | null;
   changedFiles: string[];
@@ -148,7 +155,12 @@ export interface JobResult {
   error?: string;
   errorCode?: string;
   reportPaths?: JobReportPaths;
-  signals: JobSignalsHint;
+  notification?: JobNotificationStatus;
+  actions: {
+    status: "mimo_status";
+    events: "mimo_events";
+    resume?: "mimo_resume";
+  };
 }
 
 export function nowIso(): string {

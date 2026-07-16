@@ -22,7 +22,7 @@ describe("mimo_jobs", () => {
     const store = createJobStore(cwd);
     for (let i = 0; i < 10; i++) {
       const job = store.create({ kind: "compose", task: `Task ${i}`, request: {} });
-      updateJob(cwd, job.id, { status: "completed", phase: "done", summary: `Done ${i}` });
+      updateJob(cwd, job.id, { status: "completed", summary: `Done ${i}` });
     }
     const result = await mimoJobs({ cwd });
     expect(result.length).toBeLessThanOrEqual(8);
@@ -34,7 +34,7 @@ describe("mimo_jobs", () => {
     const store = createJobStore(cwd);
     for (let i = 0; i < 10; i++) {
       const job = store.create({ kind: "compose", task: `Task ${i}`, request: {} });
-      updateJob(cwd, job.id, { status: "completed", phase: "done", summary: `Done ${i}` });
+      updateJob(cwd, job.id, { status: "completed", summary: `Done ${i}` });
     }
     const result = await mimoJobs({ cwd, all: true });
     expect(result).toHaveLength(10);
