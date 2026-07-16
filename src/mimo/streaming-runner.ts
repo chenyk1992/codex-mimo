@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import readline from "node:readline";
 import type { Readable } from "node:stream";
 import { withUtf8ProcessEnv } from "../core/encoding.js";
-import { resolveMimoCommand } from "../mimo/run-json.js";
+import { resolveMimoCommand } from "./run-json.js";
 
 export type TerminationReason = "process_timeout" | "host_abort" | "user_cancelled";
 

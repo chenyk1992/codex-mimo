@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { terminateProcessTree } from "../../../src/compose/streaming-runner.js";
+import { terminateProcessTree } from "../../../src/mimo/streaming-runner.js";
 
 function makeChild(pid: number, killFn?: () => boolean) {
   const child = new EventEmitter() as EventEmitter & {

@@ -28,7 +28,7 @@ export interface ComposeWorkflow {
   requiresFile: boolean;
 }
 
-interface BuildComposePromptInput {
+export interface BuildComposePromptInput {
   workflow: ComposeWorkflow;
   task?: string;
   file?: string;

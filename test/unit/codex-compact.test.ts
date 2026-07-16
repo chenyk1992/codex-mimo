@@ -146,9 +146,8 @@ describe("Codex compact compose report", () => {
       mimoArgs: ["run"],
       requestedSkills: ["compose:dev"],
       status: "passed",
-      callback: {
+      executionCallback: {
         invocationId: "compose-dev-1",
-        event: "session.post",
         outcome: "completed",
         sessionId: "ses_callback",
         receivedAt: "2026-06-24T00:00:01.000Z"
@@ -177,7 +176,10 @@ describe("Codex compact compose report", () => {
       mimoArgs: ["run"],
       requestedSkills: ["compose:dev"],
       status: "failed",
-      callbackTimedOut: true,
+      executionCallback: {
+        invocationId: "compose-dev-timeout",
+        outcome: "missing"
+      },
       events: [],
       changedFiles: [],
       diffStat: "",

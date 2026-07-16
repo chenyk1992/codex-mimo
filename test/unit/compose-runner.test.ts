@@ -188,7 +188,7 @@ describe("compose runner", () => {
     expect(waitForCallback).toHaveBeenCalledTimes(1);
     expect(close).toHaveBeenCalledTimes(1);
     expect(result.sessionId).toBe("ses_callback");
-    expect(result.callback).toMatchObject({ outcome: "completed", sessionId: "ses_callback" });
+    expect(result.executionCallback).toMatchObject({ outcome: "completed", sessionId: "ses_callback" });
   });
 
   it("marks foreground compose failed when callback is missing", async () => {
@@ -220,7 +220,7 @@ describe("compose runner", () => {
     );
 
     expect(result.status).toBe("failed");
-    expect(result.callbackTimedOut).toBe(true);
+    expect(result.executionCallback?.outcome).toBe("missing");
     expect(result.error).toContain("MiMoCode exited before codex-mimo received session.post");
   });
 
@@ -258,7 +258,7 @@ describe("compose runner", () => {
     );
 
     expect(result.status).toBe("timeout");
-    expect(result.callbackTimedOut).toBe(true);
+    expect(result.executionCallback?.outcome).toBe("missing");
     expect(result.error).toContain("configured process timeout");
   });
 
@@ -299,7 +299,7 @@ describe("compose runner", () => {
 
     expect(result.status).toBe("failed");
     expect(result.error).toContain("Cancelled by MiMoCode");
-    expect(result.callback).toMatchObject({ outcome: "cancelled", sessionId: "ses_cancelled" });
+    expect(result.executionCallback).toMatchObject({ outcome: "cancelled", sessionId: "ses_cancelled" });
   });
 
   it("writes report on dry-run", async () => {
@@ -655,7 +655,7 @@ describe("compose runner", () => {
       "7770acb test: add discount code test cases",
       "1672c89 feat: add discount code support"
     ]);
-    expect(result.callbackTimedOut).toBe(true);
+    expect(result.executionCallback?.outcome).toBe("missing");
     expect(result.error).toContain("Read-only workflow plan changed HEAD from 2662087 to 1672c89");
     expect(result.error).toContain("src/pricing.js, test/pricing.test.js");
     expect(result.error).toContain("MiMoCode exited before codex-mimo received session.post");
@@ -1182,7 +1182,7 @@ describe("compose runner", () => {
     });
 
     expect(report.sessionId).toBe("ses_callback");
-    expect(report.callback?.outcome).toBe("completed");
+    expect(report.executionCallback?.outcome).toBe("completed");
   });
 
   it("does not treat compose startup chatter as planText", () => {

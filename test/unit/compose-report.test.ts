@@ -167,9 +167,8 @@ describe("compose report", () => {
       changedFiles: [],
       diffStat: "",
       verification: [],
-      callback: {
+      executionCallback: {
         invocationId: "compose-dev-1",
-        event: "session.post",
         outcome: "completed",
         sessionId: "ses_callback",
         receivedAt: "2026-06-21T18:41:00.000Z"
@@ -181,7 +180,7 @@ describe("compose report", () => {
       }
     });
 
-    expect(markdown).toContain("## Completion Callback");
+    expect(markdown).toContain("## Execution Callback");
     expect(markdown).toContain("Outcome: `completed`");
     expect(markdown).toContain("Session ID: `ses_callback`");
     expect(markdown).toContain("Received At: `2026-06-21T18:41:00.000Z`");
@@ -201,7 +200,10 @@ describe("compose report", () => {
       changedFiles: [],
       diffStat: "",
       verification: [],
-      callbackTimedOut: true,
+      executionCallback: {
+        invocationId: "compose-dev-timeout",
+        outcome: "missing"
+      },
       reportPaths: {
         json: "report.json",
         markdown: "report.md",
@@ -209,7 +211,7 @@ describe("compose report", () => {
       }
     });
 
-    expect(markdown).toContain("## Completion Callback");
+    expect(markdown).toContain("## Execution Callback");
     expect(markdown).toContain("No session.post callback was received");
   });
 });

@@ -2,6 +2,7 @@ import { execa } from "execa";
 import fs from "node:fs";
 import path from "node:path";
 import { withUtf8ProcessEnv } from "../core/encoding.js";
+import type { JobVerification } from "../core/jobs.js";
 
 export interface VerificationResult {
   command: string;
@@ -67,4 +68,13 @@ export async function runVerificationCommands(
   }
 
   return results;
+}
+
+export function compactVerification(results: VerificationResult[]): JobVerification[] {
+  return results.map(({ command, exitCode, passed, durationMs }) => ({
+    command,
+    exitCode,
+    passed,
+    durationMs
+  }));
 }

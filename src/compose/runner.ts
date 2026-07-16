@@ -1,5 +1,4 @@
 import path from "node:path";
-import fs from "node:fs";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
 import {
   captureGitCommitChanges,
@@ -12,13 +11,14 @@ import {
   type GitStatusSnapshot
 } from "../git/diff.js";
 import { extractSessionIdFromEvents, parseMimoJsonLines } from "./events.js";
-import { writeComposeReport, type ComposeReport } from "./report.js";
-import { runMimoCliStreaming } from "./streaming-runner.js";
+import { createComposeReport, writeComposeReport, type ComposeReport } from "./report.js";
+import { runMimoCliStreaming } from "../mimo/streaming-runner.js";
 import { normalizeVerificationCommands, runVerificationCommands, type VerificationResult } from "./verify.js";
 import { buildComposePrompt, getComposeWorkflow, type ComposeWorkflowName } from "./workflow.js";
 import { preparePromptTransport } from "../mimo/prompt-transport.js";
 import {
   createHookCallbackController,
+  toExecutionCallback,
   type HookCallbackController,
   type MimoHookCallbackSummary
 } from "../mimo/hook-callback.js";
@@ -29,7 +29,7 @@ import {
   detectNewFilesFromStatus
 } from "./post-checks.js";
 
-import type { TerminationReason } from "./streaming-runner.js";
+import type { TerminationReason } from "../mimo/streaming-runner.js";
 
 export interface ComposeRunInput {
   cwd: string;
@@ -433,14 +433,7 @@ interface BuildComposeReportFromRunInput {
 export function buildComposeReportFromRun(input: BuildComposeReportFromRunInput): ComposeReport {
   const events = parseMimoJsonLines(input.eventsStdout);
   const sessionId = input.callback?.sessionId ?? extractSessionIdFromEvents(events);
-  const diffPath = input.diff.diff ? path.join(input.diffsDir, `${input.id}.diff`) : undefined;
-
-  if (diffPath && input.diff.diff) {
-    fs.mkdirSync(input.diffsDir, { recursive: true });
-    fs.writeFileSync(diffPath, input.diff.diff, "utf-8");
-  }
-
-  return {
+  return createComposeReport({
     id: input.id,
     createdAt: input.createdAt,
     workflow: input.input.workflow,
@@ -450,62 +443,21 @@ export function buildComposeReportFromRun(input: BuildComposeReportFromRunInput)
     requestedSkills: input.requestedSkills,
     status: input.status,
     events,
-    changedFiles: input.diff.changedFiles,
-    diffStat: input.diff.diffStat,
-    diffPath,
+    diff: input.diff,
     terminationReason: input.terminationReason,
     sessionId,
-    callback: input.callback,
-    callbackTimedOut: input.callbackTimedOut,
+    executionCallback: input.callback || input.callbackTimedOut
+      ? toExecutionCallback(input.callback?.invocationId ?? `compose-${input.input.workflow}`, input.callback ?? null)
+      : undefined,
     gitStatusBefore: input.gitStatusBefore,
     gitStatusAfter: input.gitStatusAfter,
     gitHeadBefore: input.gitHeadBefore,
     gitHeadAfter: input.gitHeadAfter,
     gitCommits: input.gitCommits,
     verification: input.verification,
-    reviewText: extractReviewText(events),
-    planText: extractPlanText(events),
     error: input.error,
-    reportPaths: {
-      json: path.join(input.reportDir, `${input.id}.json`),
-      markdown: path.join(input.reportDir, `${input.id}.md`),
-      eventsJsonl: path.join(input.eventsDir, `${input.id}.jsonl`)
-    }
-  };
-}
-
-function extractReviewText(events: ReturnType<typeof parseMimoJsonLines>): string | undefined {
-  const messages = events
-    .filter((event) => event.type === "message" && event.text)
-    .map((event) => event.text)
-    .filter(Boolean);
-  return messages.length > 0 ? messages.join("\n\n") : undefined;
-}
-
-function extractPlanText(events: ReturnType<typeof parseMimoJsonLines>): string | undefined {
-  const planMessages = events
-    .filter((event) => event.type === "message" && event.text)
-    .map((event) => event.text!)
-    .filter(isStructuredPlanText);
-  return planMessages.length > 0 ? planMessages.join("\n\n") : undefined;
-}
-
-function isStructuredPlanText(text: string): boolean {
-  const hasStructure =
-    /^##\s+task\b/m.test(text) ||
-    /^###\s+task\b/m.test(text) ||
-    /^##\s+step\b/m.test(text) ||
-    /^###\s+step\b/m.test(text) ||
-    /^##\s+phase\b/m.test(text) ||
-    /^-\s+\[[ x]\]/m.test(text) ||
-    /^\d+\.\s+/m.test(text);
-  if (!hasStructure) return false;
-  const chatterPatterns = [
-    /i'm using the compose:/i,
-    /i'll use the compose:/i,
-    /using the .* skill/i,
-    /skill to create/i,
-    /skill to generate/i,
-  ];
-  return !chatterPatterns.some((p) => p.test(text));
+    reportDir: input.reportDir,
+    eventsDir: input.eventsDir,
+    diffsDir: input.diffsDir
+  });
 }

@@ -1,4 +1,4 @@
-import type { GitStatusSnapshot } from "../git/diff.js";
+import type { GitHeadSnapshot, GitStatusSnapshot } from "../git/diff.js";
 import { parseMimoJsonLines } from "./events.js";
 
 const SEMANTIC_FAILURE_PATTERNS = [
@@ -119,4 +119,30 @@ export function parseGitStatusFiles(status: string): Set<string> {
       .map((line) => (line.length > 3 ? line.slice(3).trim() : line.trim()))
       .filter(Boolean)
   );
+}
+
+export function gitHeadChanged(before?: GitHeadSnapshot, after?: GitHeadSnapshot): boolean {
+  return Boolean(before && after && before.oid !== after.oid);
+}
+
+export function mergeChangedFiles(...groups: string[][]): string[] {
+  return [...new Set(groups.flat())];
+}
+
+export function readOnlyViolationError(
+  workflowName: string,
+  files: string[],
+  before?: GitHeadSnapshot,
+  after?: GitHeadSnapshot
+): string {
+  const details: string[] = [];
+  if (gitHeadChanged(before, after)) {
+    details.push(
+      `Read-only workflow ${workflowName} changed HEAD from ${before?.short || "unknown"} to ${after?.short || "unknown"}.`
+    );
+  }
+  if (files.length > 0) {
+    details.push(`Read-only workflow ${workflowName} modified files: ${files.join(", ")}`);
+  }
+  return details.join(" ");
 }

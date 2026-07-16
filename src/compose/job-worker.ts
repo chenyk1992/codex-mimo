@@ -14,7 +14,7 @@ import { normalizeVerificationCommands, runVerificationCommands, type Verificati
 import { buildComposePrompt, getComposeWorkflow, type ComposeWorkflowName } from "./workflow.js";
 import { buildComposeReportFromRun, timeoutError } from "./runner.js";
 import { writeComposeReport } from "./report.js";
-import { runMimoCliStreaming, type StreamingRunResult } from "./streaming-runner.js";
+import { runMimoCliStreaming, type StreamingRunResult } from "../mimo/streaming-runner.js";
 import { appendRuntimeEvent, completeRuntimeJob, failRuntimeJob, startRuntimeJob } from "../core/job-runtime.js";
 import { readJob, updateJob } from "../core/job-store.js";
 import { isActiveJobStatus, type JobCallbackSummary } from "../core/jobs.js";

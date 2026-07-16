@@ -290,21 +290,7 @@ export async function mimoCompose(
     summary: report.error ?? `Compose ${parsed.workflow} ${report.status}.`,
     sessionId: report.sessionId,
     changedFiles: report.changedFiles,
-    callback: report.callback
-      ? {
-          invocationId: report.callback.invocationId,
-          outcome: report.callback.outcome ?? "error",
-          sessionId: report.callback.sessionId ?? null,
-          receivedAt: report.callback.receivedAt,
-          error: report.callback.error
-        }
-      : report.callbackTimedOut
-      ? {
-          invocationId: "foreground-compose",
-          outcome: "missing",
-          error: "MiMoCode exited before codex-mimo received session.post."
-        }
-      : undefined,
+    executionCallback: report.executionCallback,
     reportPaths: report.reportPaths
   });
 

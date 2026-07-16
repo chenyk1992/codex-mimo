@@ -129,6 +129,49 @@ export function extractSessionIdFromEvents(events: NormalizedMimoEvent[]): strin
   return null;
 }
 
+export function extractFinalText(events: NormalizedMimoEvent[]): string {
+  return [...events]
+    .reverse()
+    .find((event) => event.type === "message" && event.text?.trim())
+    ?.text?.trim() ?? "";
+}
+
+export function extractReviewText(events: NormalizedMimoEvent[]): string | undefined {
+  const messages = events
+    .filter((event) => event.type === "message" && event.text)
+    .map((event) => event.text)
+    .filter((text): text is string => Boolean(text));
+  return messages.length > 0 ? messages.join("\n\n") : undefined;
+}
+
+export function extractPlanText(events: NormalizedMimoEvent[]): string | undefined {
+  const messages = events
+    .filter((event) => event.type === "message" && event.text)
+    .map((event) => event.text)
+    .filter((text): text is string => Boolean(text))
+    .filter(isStructuredPlanText);
+  return messages.length > 0 ? messages.join("\n\n") : undefined;
+}
+
+function isStructuredPlanText(text: string): boolean {
+  const hasStructure =
+    /^##\s+task\b/m.test(text) ||
+    /^###\s+task\b/m.test(text) ||
+    /^##\s+step\b/m.test(text) ||
+    /^###\s+step\b/m.test(text) ||
+    /^##\s+phase\b/m.test(text) ||
+    /^-\s+\[[ x]\]/m.test(text) ||
+    /^\d+\.\s+/m.test(text);
+  if (!hasStructure) return false;
+  return ![
+    /i'm using the compose:/i,
+    /i'll use the compose:/i,
+    /using the .* skill/i,
+    /skill to create/i,
+    /skill to generate/i
+  ].some((pattern) => pattern.test(text));
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

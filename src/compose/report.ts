@@ -1,11 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { NormalizedMimoEvent } from "./events.js";
+import { extractPlanText, extractReviewText, type NormalizedMimoEvent } from "./events.js";
 import type { ComposeWorkflowName } from "./workflow.js";
 import type { VerificationResult } from "./verify.js";
-import type { GitHeadSnapshot, GitStatusSnapshot } from "../git/diff.js";
-import type { MimoHookCallbackSummary } from "../mimo/hook-callback.js";
-import type { TerminationReason } from "./streaming-runner.js";
+import type { GitDiffSnapshot, GitHeadSnapshot, GitStatusSnapshot } from "../git/diff.js";
+import type { ExecutionCallbackSummary } from "../core/jobs.js";
+import type { TerminationReason } from "../mimo/streaming-runner.js";
 
 export interface ComposeReport {
   id: string;
@@ -22,8 +22,7 @@ export interface ComposeReport {
   diffPath?: string;
   terminationReason?: TerminationReason;
   sessionId?: string | null;
-  callback?: MimoHookCallbackSummary | null;
-  callbackTimedOut?: boolean;
+  executionCallback?: ExecutionCallbackSummary;
   gitStatusBefore?: GitStatusSnapshot;
   gitStatusAfter?: GitStatusSnapshot;
   gitHeadBefore?: GitHeadSnapshot;
@@ -37,6 +36,72 @@ export interface ComposeReport {
     json: string;
     markdown: string;
     eventsJsonl: string;
+  };
+}
+
+export interface CreateComposeReportInput {
+  id: string;
+  createdAt: string;
+  workflow: ComposeWorkflowName;
+  cwd: string;
+  task: string;
+  mimoArgs: string[];
+  requestedSkills: string[];
+  status: ComposeReport["status"];
+  events: NormalizedMimoEvent[];
+  diff: GitDiffSnapshot;
+  terminationReason?: TerminationReason;
+  sessionId?: string | null;
+  executionCallback?: ExecutionCallbackSummary;
+  gitStatusBefore?: GitStatusSnapshot;
+  gitStatusAfter?: GitStatusSnapshot;
+  gitHeadBefore?: GitHeadSnapshot;
+  gitHeadAfter?: GitHeadSnapshot;
+  gitCommits?: string[];
+  verification: VerificationResult[];
+  error?: string;
+  reportDir: string;
+  eventsDir: string;
+  diffsDir: string;
+}
+
+export function createComposeReport(input: CreateComposeReportInput): ComposeReport {
+  const diffPath = input.diff.diff ? path.join(input.diffsDir, `${input.id}.diff`) : undefined;
+  if (diffPath) {
+    fs.mkdirSync(input.diffsDir, { recursive: true });
+    fs.writeFileSync(diffPath, input.diff.diff, "utf-8");
+  }
+
+  return {
+    id: input.id,
+    createdAt: input.createdAt,
+    workflow: input.workflow,
+    cwd: input.cwd,
+    task: input.task,
+    mimoArgs: input.mimoArgs,
+    requestedSkills: input.requestedSkills,
+    status: input.status,
+    events: input.events,
+    changedFiles: input.diff.changedFiles,
+    diffStat: input.diff.diffStat,
+    diffPath,
+    terminationReason: input.terminationReason,
+    sessionId: input.sessionId,
+    executionCallback: input.executionCallback,
+    gitStatusBefore: input.gitStatusBefore,
+    gitStatusAfter: input.gitStatusAfter,
+    gitHeadBefore: input.gitHeadBefore,
+    gitHeadAfter: input.gitHeadAfter,
+    gitCommits: input.gitCommits,
+    verification: input.verification,
+    reviewText: extractReviewText(input.events),
+    planText: extractPlanText(input.events),
+    error: input.error,
+    reportPaths: {
+      json: path.join(input.reportDir, `${input.id}.json`),
+      markdown: path.join(input.reportDir, `${input.id}.md`),
+      eventsJsonl: path.join(input.eventsDir, `${input.id}.jsonl`)
+    }
   };
 }
 
@@ -118,18 +183,18 @@ export function renderMarkdownReport(report: ComposeReport): string {
     );
   }
 
-  if (report.callback || report.callbackTimedOut) {
+  if (report.executionCallback) {
     lines.push(
-      "## Completion Callback",
+      "## Execution Callback",
       ""
     );
-    if (report.callback) {
+    if (report.executionCallback.outcome !== "missing") {
       lines.push(
-        `Outcome: \`${report.callback.outcome ?? "unknown"}\``,
-        `Invocation ID: \`${report.callback.invocationId}\``,
-        ...(report.callback.sessionId ? [`Session ID: \`${report.callback.sessionId}\``] : []),
-        `Received At: \`${report.callback.receivedAt}\``,
-        ...(report.callback.error ? [`Error: \`${report.callback.error}\``] : []),
+        `Outcome: \`${report.executionCallback.outcome}\``,
+        `Invocation ID: \`${report.executionCallback.invocationId}\``,
+        ...(report.executionCallback.sessionId ? [`Session ID: \`${report.executionCallback.sessionId}\``] : []),
+        ...(report.executionCallback.receivedAt ? [`Received At: \`${report.executionCallback.receivedAt}\``] : []),
+        ...(report.executionCallback.error ? [`Error: \`${report.executionCallback.error}\``] : []),
         ""
       );
     } else {

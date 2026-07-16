@@ -68,14 +68,14 @@ export function compactComposeReportForCodex(report: ComposeReport): CompactComp
 }
 
 function compactCallback(report: ComposeReport): CompactComposeReport["callback"] | undefined {
-  if (report.callback) {
+  if (report.executionCallback && report.executionCallback.outcome !== "missing") {
     return {
-      outcome: report.callback.outcome ?? "unknown",
-      sessionId: report.callback.sessionId ?? null,
-      receivedAt: report.callback.receivedAt,
-      ...(report.callback.error ? { error: report.callback.error } : {})
+      outcome: report.executionCallback.outcome,
+      sessionId: report.executionCallback.sessionId ?? null,
+      receivedAt: report.executionCallback.receivedAt,
+      ...(report.executionCallback.error ? { error: report.executionCallback.error } : {})
     };
   }
-  if (report.callbackTimedOut) return { outcome: "missing" };
+  if (report.executionCallback?.outcome === "missing") return { outcome: "missing" };
   return undefined;
 }

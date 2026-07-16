@@ -8,6 +8,7 @@ import {
   buildCallbackSummary,
   createHookCallbackController,
   createInvocationId,
+  toExecutionCallback,
   writeHookConfig
 } from "../../src/mimo/hook-callback.js";
 
@@ -73,6 +74,30 @@ describe("hook callback payload helpers", () => {
       assistantMessageId: "message-1",
       trajectoryLength: 12
     });
+  });
+
+  it("converts the wire hook summary into the stored execution callback", () => {
+    expect(toExecutionCallback("fallback-invocation", {
+      invocationId: "hook-invocation",
+      event: "session.post",
+      receivedAt: "2026-07-16T00:00:00.000Z",
+      sessionId: "ses-1",
+      outcome: "completed"
+    })).toEqual({
+      invocationId: "hook-invocation",
+      receivedAt: "2026-07-16T00:00:00.000Z",
+      sessionId: "ses-1",
+      outcome: "completed"
+    });
+  });
+
+  it("records a missing execution callback without changing wire identifiers", () => {
+    expect(toExecutionCallback("fallback-invocation", null)).toEqual({
+      invocationId: "fallback-invocation",
+      outcome: "missing",
+      error: "MiMoCode exited before codex-mimo received session.post."
+    });
+    expect(CALLBACK_HEADER).toBe("x-codex-mimo-callback-token");
   });
 
   it("writes a MiMoCode file-hook object under a runtime config directory", () => {

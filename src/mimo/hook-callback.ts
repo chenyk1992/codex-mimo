@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import type { ExecutionCallbackSummary } from "../core/jobs.js";
 
 export const CALLBACK_HEADER = "x-codex-mimo-callback-token";
 export type MimoHookEventName = "session.post";
@@ -82,6 +83,26 @@ export function buildCallbackSummary(payload: MimoHookCallbackPayload): MimoHook
     finalText: payload.finalText,
     assistantMessageId: payload.assistantMessageID,
     trajectoryLength: payload.metadata?.trajectoryLength
+  };
+}
+
+export function toExecutionCallback(
+  invocationId: string,
+  callback: MimoHookCallbackSummary | null
+): ExecutionCallbackSummary {
+  if (!callback) {
+    return {
+      invocationId,
+      outcome: "missing",
+      error: "MiMoCode exited before codex-mimo received session.post."
+    };
+  }
+  return {
+    invocationId: callback.invocationId,
+    outcome: callback.outcome ?? "error",
+    sessionId: callback.sessionId ?? null,
+    receivedAt: callback.receivedAt,
+    error: callback.error
   };
 }
 
