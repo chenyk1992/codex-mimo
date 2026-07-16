@@ -15,7 +15,8 @@ import {
   finalizePendingJobTransition,
   readJob,
   resolveJobPaths,
-  savePendingJobTransition
+  savePendingJobTransition,
+  updateJob
 } from "./job-store.js";
 import {
   nowIso,
@@ -110,6 +111,18 @@ export async function appendJobProgress(
       job = (await applyPendingTransition(cwd, job, job.pendingTransition, {})).job;
     }
     return appendJobSignal(job.signalsFile, { ...progress, jobId });
+  });
+}
+
+export async function updateRunningJobPid(
+  cwd: string,
+  jobId: string,
+  pid: number | null
+): Promise<JobRecord> {
+  return withProcessLock(resolveJobStateLock(cwd, jobId), () => {
+    const job = requireJob(cwd, jobId);
+    if (job.status !== "running") return job;
+    return updateJob(cwd, jobId, { pid });
   });
 }
 

@@ -1,7 +1,12 @@
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { terminateProcessTree } from "../../../src/mimo/streaming-runner.js";
+import { createJobStore, readJob } from "../../../src/core/job-store.js";
+import { transitionJob, updateRunningJobPid } from "../../../src/core/job-transition.js";
 
 function makeChild(pid: number, killFn?: () => boolean) {
   const child = new EventEmitter() as EventEmitter & {
@@ -90,5 +95,23 @@ describe("process management - terminateProcessTree", () => {
     expect(killProcess).toHaveBeenNthCalledWith(1, -700, "SIGTERM");
     expect(killProcess).toHaveBeenNthCalledWith(2, 700, "SIGTERM");
     expect(killProcess).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("process management - unified job PID", () => {
+  it("updates PID only while the job is running", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-worker-pid-"));
+    try {
+      const job = createJobStore(cwd).create({ kind: "implement", task: "work", request: { cwd } });
+      await transitionJob(cwd, job.id, { status: "running", phase: "starting", summary: "starting" });
+      await updateRunningJobPid(cwd, job.id, 444);
+      expect(readJob(cwd, job.id)?.pid).toBe(444);
+
+      await transitionJob(cwd, job.id, { status: "cancelled", summary: "cancelled" });
+      await updateRunningJobPid(cwd, job.id, 555);
+      expect(readJob(cwd, job.id)).toMatchObject({ status: "cancelled", pid: null });
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });
