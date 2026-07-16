@@ -308,11 +308,11 @@ function isJobRecord(value: unknown, expectedJobId: string): value is JobRecord 
     typeof value.id === "string" &&
     value.id === expectedJobId &&
     isValidJobId(value.id) &&
-    typeof value.kind === "string" &&
+    isJobKind(value.kind) &&
     typeof value.cwd === "string" &&
     typeof value.task === "string" &&
     isJobStatus(value.status) &&
-    (value.phase === undefined || typeof value.phase === "string") &&
+    (value.phase === undefined || isJobPhase(value.phase)) &&
     isPersistedProcessState(value.status, value.pid, value.processIdentity) &&
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string" &&
@@ -452,6 +452,15 @@ function transitionRecordPatch(
   };
 }
 
+const JOB_KINDS = new Set([
+  "plan",
+  "implement",
+  "review",
+  "fix-ci",
+  "resume",
+  "compose"
+]);
+
 const JOB_STATUSES = new Set([
   "queued",
   "running",
@@ -483,6 +492,10 @@ const LEGAL_TRANSITIONS: Record<string, readonly string[]> = {
   cancelled: [],
   timeout: []
 };
+
+function isJobKind(value: unknown): value is JobRecord["kind"] {
+  return typeof value === "string" && JOB_KINDS.has(value);
+}
 
 function isJobStatus(value: unknown): value is JobRecord["status"] {
   return typeof value === "string" && JOB_STATUSES.has(value);

@@ -10,6 +10,14 @@ import {
   mimoReview
 } from "../../src/codex/tools.js";
 import { MIMO_TOOL_NAMES } from "../../src/codex/tool-names.js";
+import {
+  ComposeInput,
+  FixCiInput,
+  ImplementInput,
+  PlanInput,
+  ResumeInput,
+  ReviewInput
+} from "../../src/codex/tool-schemas.js";
 import type { JobKind } from "../../src/core/jobs.js";
 
 const dirs: string[] = [];
@@ -65,4 +73,40 @@ describe("codex work tool handlers", () => {
     expect(MIMO_TOOL_NAMES).not.toContain("mimo_wake");
     expect(MIMO_TOOL_NAMES).not.toContain("mimo_resume_job");
   });
+
+  it("contains no superseded runtime identifiers in source", () => {
+    const sourceFiles = collectTypeScriptFiles(path.resolve("src"));
+    const forbidden = [
+      /mimo_wake/g,
+      /mimo_resume_job/g,
+      /compose-worker/g,
+      /runAndCapture/g,
+      /runComposeWorkflow/g,
+      /runComposeJobWorker/g,
+      /JobWakeHint/g,
+      /JobKind[^\n]*["']acp["']/g
+    ];
+    const matches = sourceFiles.flatMap((file) => {
+      const contents = fs.readFileSync(file, "utf8");
+      return forbidden.flatMap((pattern) =>
+        [...contents.matchAll(pattern)].map((match) => `${path.relative(process.cwd(), file)}:${match[0]}`)
+      );
+    });
+    expect(matches).toEqual([]);
+  });
+
+  it("keeps background and wait out of every work tool schema", () => {
+    for (const schema of [PlanInput, ImplementInput, ReviewInput, FixCiInput, ResumeInput, ComposeInput]) {
+      expect(schema.keyof().options).not.toContain("background");
+      expect(schema.keyof().options).not.toContain("wait");
+    }
+  });
 });
+
+function collectTypeScriptFiles(directory: string): string[] {
+  return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) return collectTypeScriptFiles(target);
+    return entry.isFile() && entry.name.endsWith(".ts") ? [target] : [];
+  });
+}

@@ -1,9 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createJobStore, listJobs, readJob, updateJob, failStaleJobs, resolveJobPaths, resolveJobStateFile } from "../../../src/core/job-store.js";
-import { startRuntimeJob, appendRuntimeEvent, completeRuntimeJob, failRuntimeJob } from "../../../src/core/job-runtime.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { createJobStore, listJobs, readJob, updateJob, resolveJobPaths, resolveJobStateFile } from "../../../src/core/job-store.js";
 
 const tempDirs: string[] = [];
 
@@ -71,80 +70,4 @@ describe("job lifecycle", () => {
     expect(jobs).toHaveLength(1);
   });
 
-  it("5.24: startRuntimeJob → status running, phase starting", () => {
-    const cwd = tempWorkspace();
-    const store = createJobStore(cwd);
-    const job = store.create({ kind: "compose", task: "Test", request: {} });
-
-    const started = startRuntimeJob(cwd, job.id, { pid: 123, processIdentity: "start-123" });
-
-    expect(started.status).toBe("running");
-    expect(started.phase).toBe("starting");
-    expect(started.pid).toBe(123);
-  });
-
-  it("5.25: appendRuntimeEvent → parses event, infers phase, writes log", () => {
-    const cwd = tempWorkspace();
-    const store = createJobStore(cwd);
-    const job = store.create({ kind: "compose", task: "Test", request: {} });
-    startRuntimeJob(cwd, job.id);
-
-    const event = JSON.stringify({ type: "message", text: "Looking at code" });
-    const updated = appendRuntimeEvent(cwd, job.id, event);
-
-    expect(updated.phase).toBe("investigating");
-    expect(updated.summary).toBe("Looking at code");
-  });
-
-  it("5.26: completeRuntimeJob → status completed, phase done", () => {
-    const cwd = tempWorkspace();
-    const store = createJobStore(cwd);
-    const job = store.create({ kind: "compose", task: "Test", request: {} });
-    startRuntimeJob(cwd, job.id);
-
-    const completed = completeRuntimeJob(cwd, job.id, {
-      summary: "Done",
-      sessionId: "sess_1",
-      changedFiles: ["src/a.ts"],
-      verification: []
-    });
-
-    expect(completed.status).toBe("completed");
-    expect(completed.phase).toBe("done");
-    expect(completed.sessionId).toBe("sess_1");
-    expect(completed.changedFiles).toEqual(["src/a.ts"]);
-  });
-
-  it("5.27: failRuntimeJob → status failed, phase failed", () => {
-    const cwd = tempWorkspace();
-    const store = createJobStore(cwd);
-    const job = store.create({ kind: "compose", task: "Test", request: {} });
-    startRuntimeJob(cwd, job.id);
-
-    const failed = failRuntimeJob(cwd, job.id, {
-      errorCode: "nonzero_exit",
-      error: "Process exited with code 1"
-    });
-
-    expect(failed.status).toBe("failed");
-    expect(failed.phase).toBe("failed");
-    expect(failed.errorCode).toBe("nonzero_exit");
-    expect(failed.error).toBe("Process exited with code 1");
-  });
-
-  it("5.28: appendRuntimeEvent on non-active → silent skip", () => {
-    const cwd = tempWorkspace();
-    const store = createJobStore(cwd);
-    const job = store.create({ kind: "compose", task: "Test", request: {} });
-    completeRuntimeJob(cwd, job.id, {
-      summary: "Done",
-      changedFiles: [],
-      verification: []
-    });
-
-    const event = JSON.stringify({ type: "message", text: "Should not append" });
-    const result = appendRuntimeEvent(cwd, job.id, event);
-
-    expect(result.status).toBe("completed");
-  });
 });

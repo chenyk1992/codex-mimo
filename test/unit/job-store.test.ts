@@ -170,6 +170,25 @@ describe("job store", () => {
   });
 
   it.each([
+    ["removed ACP kind", { kind: "acp" }],
+    ["removed terminal phase", { phase: "done" }],
+    ["unknown status", { status: "pending" }]
+  ])("rejects persisted records with an invalid exact union: %s", (_label, patch) => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "validate exact unions",
+      request: { cwd }
+    });
+    fs.writeFileSync(resolveJobPaths(cwd, job.id).jobFile, JSON.stringify({
+      ...job,
+      ...patch
+    }), "utf8");
+
+    expect(() => readJob(cwd, job.id)).toThrow(/malformed job/i);
+  });
+
+  it.each([
     ["queued with a process", { status: "queued", pid: 42, processIdentity: "start-42" }],
     ["completed with an identity", { status: "completed", pid: null, processIdentity: "start-42" }],
     ["running with only a pid", { status: "running", pid: 42, processIdentity: null }],

@@ -57,7 +57,6 @@ const WORK_COMMANDS = new Set(["plan", "implement", "review", "fix-ci", "resume"
 const CONTROL_COMMANDS = new Set(["status", "events", "wait", "result", "cancel", "jobs"]);
 const PUBLIC_COMMANDS = new Set([...WORK_COMMANDS, ...CONTROL_COMMANDS, "doctor", "healthcheck"]);
 const INTERNAL_COMMANDS = new Set(["job-worker", "notify-worker"]);
-const REMOVED_COMMANDS = new Set(["compose-worker", "sessions"]);
 const REMOVED_FLAGS = new Set([
   "--background", "--wait", "--session", "--attach", "--fork", "--continue", "--dry-run"
 ]);
@@ -77,7 +76,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
     stderr(`Usage: ${CLI_USAGE}`);
     return 2;
   }
-  if (REMOVED_COMMANDS.has(command) || (!PUBLIC_COMMANDS.has(command) && !INTERNAL_COMMANDS.has(command))) {
+  if (!PUBLIC_COMMANDS.has(command) && !INTERNAL_COMMANDS.has(command)) {
     stderr(`Unknown command: ${command}`);
     return 2;
   }

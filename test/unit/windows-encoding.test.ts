@@ -2,8 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildComposeReportFromRun } from "../../src/compose/runner.js";
-import { writeComposeReport } from "../../src/compose/report.js";
+import { parseMimoJsonLines } from "../../src/compose/events.js";
+import { createComposeReport, writeComposeReport } from "../../src/compose/report.js";
 import { buildComposePrompt, getComposeWorkflow } from "../../src/compose/workflow.js";
 import { preparePromptTransport } from "../../src/mimo/prompt-transport.js";
 
@@ -33,13 +33,15 @@ describe("Windows UTF-8 encoding regressions", () => {
     expect(transported.message).toContain("UTF-8");
     expect(transported.message).toContain("Get-Content -Encoding UTF8");
 
-    const report = buildComposeReportFromRun({
+    const report = createComposeReport({
       id: "utf8-run",
       createdAt: "2026-06-29T00:00:00.000Z",
-      input: { cwd, workflow: "fix", task: prompt },
+      cwd,
+      workflow: "fix",
+      task: prompt,
       mimoArgs: ["run", "--format", "json"],
       requestedSkills: ["compose:debug", "compose:tdd", "compose:verify", "compose:feedback"],
-      eventsStdout: `${JSON.stringify({ type: "message", text: sample })}\n`,
+      events: parseMimoJsonLines(`${JSON.stringify({ type: "message", text: sample })}\n`),
       diff: { changedFiles: [], diffStat: "", diff: "" },
       verification: [],
       reportDir: path.join(cwd, ".codex-mimo", "reports"),

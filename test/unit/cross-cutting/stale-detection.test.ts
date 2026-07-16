@@ -57,7 +57,7 @@ describe("job stale detection", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd);
     const job = store.create({ kind: "compose", workflow: "dev", task: "Done task", request: {} });
-    updateJob(cwd, job.id, { status: "completed", phase: "done" });
+    updateJob(cwd, job.id, { status: "completed", phase: undefined });
 
     const failed = failStaleJobs(cwd, { staleThresholdMs: 0 });
 
