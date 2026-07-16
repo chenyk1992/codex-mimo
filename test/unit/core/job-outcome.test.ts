@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { classifyRunOutcome, type RunEvidence } from "../../../src/core/job-outcome.js";
+import {
+  classifyRunOutcome,
+  detectUnacceptedTask,
+  type RunEvidence
+} from "../../../src/core/job-outcome.js";
 import type { ExecutionCallbackSummary } from "../../../src/core/jobs.js";
 
 const completedCallback: ExecutionCallbackSummary = {
@@ -118,6 +122,24 @@ describe("run outcome classification", () => {
     "Blocked: the registry was temporarily unavailable.\n\nImplementation completed successfully."
   ])("uses only the final meaningful paragraph: %s", (finalText) => {
     expect(classifyRunOutcome(evidence({ finalText }))).toMatchObject({ status: "completed" });
+  });
+
+  it.each([
+    "Hello! What would you like me to help with?",
+    "Hi, please share your task.",
+    "Hey, what can I help you with?",
+    "hELLo, Please share your task."
+  ])("normalizes one standalone greeting prefix before semantic matching: %s", (finalText) => {
+    expect(detectUnacceptedTask(finalText)).toBe("MiMoCode did not receive or accept the task objective.");
+  });
+
+  it.each([
+    "Hello world implementation completed successfully.",
+    "Hi, the requested change is complete.",
+    "Hey, implementation is done.",
+    "highlight implementation completed successfully."
+  ])("does not turn an ordinary completion into a missing-task response: %s", (finalText) => {
+    expect(detectUnacceptedTask(finalText)).toBeUndefined();
   });
 
   it("gives failed verification precedence over a nonzero exit", () => {

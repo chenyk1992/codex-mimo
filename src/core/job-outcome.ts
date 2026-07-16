@@ -43,8 +43,8 @@ const BLOCKED_PATTERNS = [
 ] as const;
 
 const UNACCEPTED_TASK_PATTERNS = [
-  /^(?:(?:hello|hi|hey)[!.,\s]+)?how (?:can|may) i (?:help|assist)(?: you)?[?!.\s]*$/i,
-  /^(?:(?:hello|hi|hey)[!.,\s]+)?what (?:task|objective|goal|problem)\b[\s\S]{0,120}[?!.\s]*$/i,
+  /^how (?:can|may) i (?:help|assist)(?: you)?[?!.\s]*$/i,
+  /^what (?:task|objective|goal|problem)\b[\s\S]{0,120}[?!.\s]*$/i,
   /^what (?:can i help|would you like)(?: me)?[\s\S]{0,120}[?!.\s]*$/i,
   /^please share (?:your|the) (?:task|objective|goal)[?!.\s]*$/i,
   /^(?:i )?(?:do not|don't|cannot|can't) (?:see|find|have).*(?:task|objective|goal)[\s\S]{0,200}$/i,
@@ -132,9 +132,14 @@ export function classifyRunOutcome(evidence: RunEvidence): JobOutcome {
 export function detectUnacceptedTask(finalText: string | undefined): string | undefined {
   const text = finalText?.trim();
   if (!text || text.length > 500 || text.includes("```")) return undefined;
-  return UNACCEPTED_TASK_PATTERNS.some((pattern) => pattern.test(text))
+  const normalized = normalizeGreetingPrefix(text);
+  return UNACCEPTED_TASK_PATTERNS.some((pattern) => pattern.test(normalized))
     ? UNACCEPTED_TASK_ERROR
     : undefined;
+}
+
+function normalizeGreetingPrefix(text: string): string {
+  return text.replace(/^(?:hello|hi|hey)\b(?:[!.,]+\s*|\s+)/i, "").trim();
 }
 
 function commonOutcomeFields(evidence: RunEvidence): Pick<

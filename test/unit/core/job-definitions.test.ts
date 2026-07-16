@@ -262,11 +262,16 @@ describe("job finalization", () => {
   it.each([
     ["How can I help you?", "failed", "semantic_failure"],
     ["Hello! How can I help you?", "failed", "semantic_failure"],
+    ["Hello! What would you like me to help with?", "failed", "semantic_failure"],
+    ["Hi, please share your task.", "failed", "semantic_failure"],
+    ["Hey, what can I help you with?", "failed", "semantic_failure"],
+    ["hELLo, Please share your task.", "failed", "semantic_failure"],
     ["Hi, what task would you like me to implement?", "failed", "semantic_failure"],
     ["您好，有什么可以帮您？", "failed", "semantic_failure"],
     ["Hello world implementation completed successfully.", "completed", undefined],
     ["Hi, the requested change is complete.", "completed", undefined],
     ["Hey, implementation is done.", "completed", undefined],
+    ["highlight implementation completed successfully.", "completed", undefined],
     ["The implementation preserves the normal question: How can I help users?", "completed", undefined]
   ] as const)("classifies direct and Compose final text identically: %s", async (finalText, status, errorCode) => {
     const cwd = tempDir();
