@@ -18,7 +18,13 @@ import {
   mimoJobs,
   mimoResumeJob
 } from "./tools.js";
-import { ComposeWorkflowSchema } from "./tool-schemas.js";
+import {
+  ComposeInput,
+  FixCiInput,
+  ImplementInput,
+  PlanInput,
+  ReviewInput
+} from "./tool-schemas.js";
 export { MIMO_TOOL_NAMES } from "./tool-names.js";
 
 export function createMcpServer(): McpServer {
@@ -42,13 +48,7 @@ export function createMcpServer(): McpServer {
   server.tool(
     "mimo_plan",
     "Create an implementation plan using MiMoCode planning agent",
-    {
-      cwd: z.string().describe("Project root directory"),
-      task: z.string().describe("Task description"),
-      agent: z.string().default("plan").describe("MiMoCode agent name"),
-      model: z.string().optional().describe("Model override"),
-      timeoutMs: z.number().int().positive().default(1_800_000).describe("MiMoCode process timeout in milliseconds")
-    },
+    PlanInput.shape,
     async (args) => {
       const result = await mimoPlan(args);
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
@@ -58,13 +58,7 @@ export function createMcpServer(): McpServer {
   server.tool(
     "mimo_implement",
     "Implement code changes using MiMoCode implementation agent",
-    {
-      cwd: z.string().describe("Project root directory"),
-      task: z.string().describe("Task description"),
-      allowWrite: z.boolean().default(false).describe("Allow MiMoCode to write files"),
-      allowInstall: z.boolean().default(false).describe("Allow package install"),
-      timeoutMs: z.number().int().positive().default(1_800_000).describe("MiMoCode process timeout in milliseconds")
-    },
+    ImplementInput.shape,
     async (args) => {
       const result = await mimoImplement(args);
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
@@ -74,11 +68,7 @@ export function createMcpServer(): McpServer {
   server.tool(
     "mimo_review",
     "Review the current diff using MiMoCode review agent",
-    {
-      cwd: z.string().describe("Project root directory"),
-      base: z.string().default("HEAD").describe("Git base ref to diff against"),
-      timeoutMs: z.number().int().positive().default(1_800_000).describe("MiMoCode process timeout in milliseconds")
-    },
+    ReviewInput.shape,
     async (args) => {
       const result = await mimoReview(args);
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
@@ -88,12 +78,7 @@ export function createMcpServer(): McpServer {
   server.tool(
     "mimo_fix_ci",
     "Fix CI failures using MiMoCode with a CI log file",
-    {
-      cwd: z.string().describe("Project root directory"),
-      file: z.string().describe("Path to CI log file"),
-      task: z.string().optional().describe("Additional task context"),
-      timeoutMs: z.number().int().positive().default(1_800_000).describe("MiMoCode process timeout in milliseconds")
-    },
+    FixCiInput.shape,
     async (args) => {
       const result = await mimoFixCi(args);
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
@@ -118,26 +103,9 @@ export function createMcpServer(): McpServer {
   server.tool(
     "mimo_compose",
     "Run a MiMoCode Compose workflow and return a structured report",
-    {
-      cwd: z.string().describe("Project root directory"),
-      workflow: ComposeWorkflowSchema,
-      task: z.string().optional().describe("Task description"),
-      file: z.string().optional().describe("Attached file such as CI log or plan document"),
-      since: z.string().optional().describe("Git ref for diff comparison"),
-      model: z.string().optional().describe("Model override"),
-      attach: z.string().optional().describe("Running MiMoCode server URL"),
-      session: z.string().optional().describe("MiMoCode session ID"),
-      fork: z.boolean().default(false),
-      continue: z.boolean().default(false).describe("Continue previous session"),
-      verification: z.array(z.string()).optional().describe("Verification commands"),
-      dryRun: z.boolean().default(false),
-      reportDir: z.string().optional().describe("Report directory"),
-      timeoutMs: z.number().int().positive().default(1_800_000).describe("MiMoCode process timeout in milliseconds (default: 30 minutes)"),
-      background: z.boolean().default(false).describe("Run as background job"),
-      wait: z.boolean().default(false).describe("Wait for background job to complete")
-    },
-    async (args, extra) => {
-      const result = await mimoCompose(args, {}, { signal: extra.signal });
+    ComposeInput.shape,
+    async (args) => {
+      const result = await mimoCompose(args);
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
     }
   );

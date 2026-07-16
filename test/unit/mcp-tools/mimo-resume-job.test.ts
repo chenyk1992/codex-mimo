@@ -47,11 +47,6 @@ describe("mimo_resume_job", () => {
       { spawnJobWorker }
     );
     expect(result.status).toBe("queued");
-    expect(spawnJobWorker).toHaveBeenCalledWith(
-      cwd,
-      "compose",
-      expect.any(String),
-      expect.objectContaining({ onExit: expect.any(Function) })
-    );
+    expect(spawnJobWorker).toHaveBeenCalledWith(cwd, expect.any(String));
   });
 });

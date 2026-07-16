@@ -1,7 +1,4 @@
 import { execa } from "execa";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import {
   ComposeInput,
   FixCiInput,
@@ -19,18 +16,16 @@ import {
   ResumeJobInput,
   ReviewInput
 } from "./tool-schemas.js";
-import { implementPrompt, planPrompt, reviewPrompt } from "../core/prompt.js";
+import { launchJob, type LaunchJobDependencies } from "../core/job-launcher.js";
+import { implementPrompt } from "../core/prompt.js";
 import { runAndCapture, type MimoRunResult } from "../mimo/mimo-runner.js";
-import { runComposeWorkflow } from "../compose/runner.js";
-import { compactComposeReportForCodex } from "./compact.js";
-import type { CompactComposeReport } from "./compact.js";
-import { createJobStore, listJobs, readJob, updateJob } from "../core/job-store.js";
+import { createJobStore, listJobs, readJob } from "../core/job-store.js";
 import { spawnJobWorker, terminateJobProcess } from "../core/job-process.js";
 import { isActiveJobStatus, type JobRecord } from "../core/jobs.js";
 import { renderJobLaunch, renderJobResult, renderJobStatus } from "../core/job-render.js";
 import { readRecentJobLogLines } from "../core/job-log.js";
 import { readJobSignals } from "../core/job-signals.js";
-import { cancelRuntimeJob, failRuntimeJob } from "../core/job-runtime.js";
+import { cancelRuntimeJob } from "../core/job-runtime.js";
 import { SessionStore } from "../core/sessions.js";
 import { resolveMimoCommand } from "../mimo/run-json.js";
 import { detectDirectSemanticFailure } from "../compose/post-checks.js";
@@ -51,173 +46,67 @@ export async function mimoHealthcheck(input: unknown) {
   }
 }
 
-export async function mimoPlan(input: unknown) {
+export async function mimoPlan(input: unknown, deps: LaunchJobDependencies = {}) {
   const parsed = PlanInput.parse(input);
-  const result = await runAndCapture({
+  const { notify, ...request } = parsed;
+  return launchJob({
+    kind: "plan",
     cwd: parsed.cwd,
-    agent: parsed.agent,
-    model: parsed.model,
-    message: planPrompt(parsed.task),
-    timeoutMs: parsed.timeoutMs
-  });
-  assertMimoRunSucceeded(result, "plan");
-  return {
-    summary: result.summary,
-    sessionId: result.sessionId,
-    changedFiles: result.changedFiles,
-    verification: result.commands
-  };
-}
-
-export async function mimoImplement(input: unknown) {
-  const parsed = ImplementInput.parse(input);
-  if (!parsed.allowWrite) {
-    throw new Error("mimo_implement requires allowWrite=true.");
-  }
-  const store = createJobStore(parsed.cwd);
-  const job = store.create({
-    kind: "implement",
     task: parsed.task,
-    request: parsed
-  });
-  updateJob(parsed.cwd, job.id, { status: "running", phase: "starting", startedAt: new Date().toISOString() });
-
-  const before = await captureWorktreeFiles(parsed.cwd);
-  let result: Awaited<ReturnType<typeof runAndCapture>>;
-  try {
-    result = await runAndCapture({
-      cwd: parsed.cwd,
-      agent: "build",
-      message: implementPrompt(parsed.task),
-      timeoutMs: parsed.timeoutMs
-    });
-  } catch (error) {
-    updateJob(parsed.cwd, job.id, {
-      status: "failed",
-      phase: "failed",
-      completedAt: new Date().toISOString(),
-      error: error instanceof Error ? error.message : String(error)
-    });
-    throw error;
-  }
-
-  const after = await captureWorktreeFiles(parsed.cwd);
-  const failure = mimoRunFailureMessage(result, "implement");
-  if (failure) {
-    updateJob(parsed.cwd, job.id, {
-      status: "failed",
-      phase: "failed",
-      completedAt: new Date().toISOString(),
-      summary: failure,
-      error: failure
-    });
-    throw new Error(failure);
-  }
-
-  const changedFiles = mergeChangedFiles(result.changedFiles, diffAddedFiles(before, after));
-
-  updateJob(parsed.cwd, job.id, {
-    status: "completed",
-    phase: "done",
-    completedAt: new Date().toISOString(),
-    summary: result.summary,
-    sessionId: result.sessionId,
-    changedFiles
-  });
-
-  return {
-    summary: result.summary,
-    sessionId: result.sessionId,
-    changedFiles,
-    commands: result.commands,
-    risks: result.errors
-  };
+    request,
+    notify
+  }, deps);
 }
 
-export async function mimoReview(input: unknown) {
+export async function mimoImplement(input: unknown, deps: LaunchJobDependencies = {}) {
+  const parsed = ImplementInput.parse(input);
+  const { notify, ...request } = parsed;
+  return launchJob({
+    kind: "implement",
+    cwd: parsed.cwd,
+    task: parsed.task,
+    request,
+    notify
+  }, deps);
+}
+
+export async function mimoReview(input: unknown, deps: LaunchJobDependencies = {}) {
   const parsed = ReviewInput.parse(input);
-  const diffResult = await execa("git", ["diff", parsed.base], { cwd: parsed.cwd, reject: false });
-  if (diffResult.exitCode !== 0) {
-    throw new Error(`Git diff capture failed: ${diffResult.stderr || `exit ${diffResult.exitCode}`}`);
-  }
-
-  const diffFile = diffResult.stdout ? writeReviewDiffInput(parsed.base, diffResult.stdout) : undefined;
-  const prompt = reviewPrompt(
-    diffFile ? `The current diff is attached as @${diffFile}. Review that attached diff.` : "No changes found."
-  );
-
-  const result = await runAndCapture({
+  const { notify, ...request } = parsed;
+  return launchJob({
+    kind: "review",
     cwd: parsed.cwd,
-    agent: "plan",
-    message: prompt,
-    files: diffFile ? [diffFile] : undefined,
-    timeoutMs: parsed.timeoutMs
-  });
-
-  if (result.exitCode !== 0 || result.errors.length > 0) {
-    throw new Error(`MiMoCode review failed: ${result.errors.join("\n") || `exit ${result.exitCode}`}`);
-  }
-
-  if (result.summary === "Completed." && result.raw.length === 0) {
-    throw new Error("MiMoCode review produced no review output.");
-  }
-
-  if (isGreetingResponse(result.summary)) {
-    throw new Error("MiMoCode review returned a greeting instead of review content. Agent may not have initialized properly.");
-  }
-  
-  const findings = result.summary && result.summary !== "Completed."
-    ? [{ severity: "info", title: "Review Summary", body: result.summary }]
-    : [];
-
-  return {
-    summary: result.summary,
-    sessionId: result.sessionId,
-    findings
-  };
+    task: `Review changes since ${parsed.base}.`,
+    request,
+    notify
+  }, deps);
 }
 
-function isGreetingResponse(summary: string | undefined): boolean {
-  if (!summary) return false;
-  const text = summary.toLowerCase().trim();
-  if (text.length > 300) return false;
-  const patterns = [
-    /您好/,
-    /消息.*空/,
-    /有什么.*帮/,
-    /^hello[!\s.]/i,
-    /^hi[!\s.]/i,
-    /^hey[!\s.]/i,
-    /how can i help/i,
-    /how may i help/i,
-    /what can i help/i,
-    /what would you like/i,
-    /how can i assist/i,
-  ];
-  return patterns.some((p) => p.test(text));
-}
-
-function writeReviewDiffInput(base: string, diff: string): string {
-  const dir = path.join(os.tmpdir(), "codex-mimo-review-inputs");
-  fs.mkdirSync(dir, { recursive: true });
-  const safeBase = base.replace(/[^a-zA-Z0-9_.-]/g, "_") || "HEAD";
-  const file = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${safeBase}.diff`);
-  fs.writeFileSync(file, diff, "utf-8");
-  return file;
-}
-
-export async function mimoFixCi(input: unknown) {
+export async function mimoFixCi(input: unknown, deps: LaunchJobDependencies = {}) {
   const parsed = FixCiInput.parse(input);
-  const { result, changedFiles } = await runWritableMimo({
+  const { notify, ...request } = parsed;
+  return launchJob({
+    kind: "fix-ci",
     cwd: parsed.cwd,
-    label: "fix-ci",
-    message: implementPrompt(parsed.task ?? "Fix the CI failures shown in the attached log."),
-    files: [parsed.file],
-    timeoutMs: parsed.timeoutMs
-  });
-  return renderWritableMimoResult(result, changedFiles);
+    task: parsed.task ?? "Fix the CI failures shown in the attached log.",
+    request,
+    notify
+  }, deps);
 }
 
+export async function mimoCompose(input: unknown, deps: LaunchJobDependencies = {}) {
+  const parsed = ComposeInput.parse(input);
+  const { notify, ...request } = parsed;
+  return launchJob({
+    kind: "compose",
+    cwd: parsed.cwd,
+    task: parsed.task ?? `Run ${parsed.workflow} workflow.`,
+    request,
+    notify
+  }, deps);
+}
+
+/* Task 10 migrates resume to the parent-job contract. */
 export async function mimoResume(input: unknown) {
   const parsed = ResumeInput.parse(input);
   const { result, changedFiles } = await runWritableMimo({
@@ -228,73 +117,6 @@ export async function mimoResume(input: unknown) {
     timeoutMs: parsed.timeoutMs
   });
   return renderWritableMimoResult(result, changedFiles);
-}
-
-export async function mimoCompose(
-  input: unknown,
-  deps: { spawnJobWorker?: typeof spawnJobWorker } = {},
-  options: { signal?: AbortSignal } = {}
-): Promise<CompactComposeReport | ReturnType<typeof renderJobLaunch> | ReturnType<typeof renderJobStatus>> {
-  const parsed = ComposeInput.parse(input);
-  if (parsed.background) {
-    const store = createJobStore(parsed.cwd);
-    const job = store.create({
-      kind: "compose",
-      workflow: parsed.workflow,
-      task: parsed.task ?? `Run ${parsed.workflow} workflow.`,
-      request: parsed
-    });
-    const spawnFn = deps.spawnJobWorker ?? spawnJobWorker;
-    spawnFn(parsed.cwd, "compose", job.id, {
-      onExit: (code, signal) => {
-        failJobOnUnexpectedWorkerExit(parsed.cwd, job.id, code, signal);
-      }
-    });
-    const queued = readJob(parsed.cwd, job.id) ?? job;
-    if (parsed.wait) {
-      const settled = await waitForJobToSettle(parsed.cwd, job.id, parsed.timeoutMs);
-      return renderJobStatus(settled ?? queued, {
-        progress: readRecentJobLogLines((settled ?? queued).logFile, 5)
-      });
-    }
-    return renderJobLaunch(queued);
-  }
-
-  const store = createJobStore(parsed.cwd);
-  const job = store.create({
-    kind: "compose",
-    workflow: parsed.workflow,
-    task: parsed.task ?? `Run ${parsed.workflow} workflow.`,
-    request: parsed
-  });
-  updateJob(parsed.cwd, job.id, { status: "running", phase: "starting", startedAt: new Date().toISOString() });
-
-  let report;
-  try {
-    report = await runComposeWorkflow({ ...parsed, signal: options.signal });
-  } catch (error) {
-    updateJob(parsed.cwd, job.id, {
-      status: "failed",
-      phase: "failed",
-      completedAt: new Date().toISOString(),
-      error: error instanceof Error ? error.message : String(error)
-    });
-    throw error;
-  }
-
-  const failedStatus = report.status === "failed" || report.status === "timeout";
-  updateJob(parsed.cwd, job.id, {
-    status: failedStatus ? "failed" : "completed",
-    phase: failedStatus ? "failed" : "done",
-    completedAt: new Date().toISOString(),
-    summary: report.error ?? `Compose ${parsed.workflow} ${report.status}.`,
-    sessionId: report.sessionId,
-    changedFiles: report.changedFiles,
-    executionCallback: report.executionCallback,
-    reportPaths: report.reportPaths
-  });
-
-  return compactComposeReportForCodex(report);
 }
 
 export async function mimoStatus(input: unknown) {
@@ -393,7 +215,7 @@ export async function mimoResult(input: unknown) {
   if (job.sessionId) {
     new SessionStore(job.cwd).save({
       sessionId: job.sessionId,
-      workflow: job.workflow ?? job.kind,
+      workflow: job.kind,
       task: job.task,
       cwd: job.cwd,
       jobId: job.id,
@@ -439,11 +261,9 @@ export async function mimoResumeJob(
   const store = createJobStore(parsed.cwd);
   const child = store.create({
     kind: "resume",
-    workflow: parent.workflow,
     task: parsed.task,
     request: {
       cwd: parsed.cwd,
-      workflow: parent.workflow ?? "dev",
       task: parsed.task,
       session: parent.sessionId,
       continue: true,
@@ -453,11 +273,7 @@ export async function mimoResumeJob(
   });
   if (parsed.background) {
     const spawnFn = deps.spawnJobWorker ?? spawnJobWorker;
-    spawnFn(parsed.cwd, "compose", child.id, {
-      onExit: (code, signal) => {
-        failJobOnUnexpectedWorkerExit(parsed.cwd, child.id, code, signal);
-      }
-    });
+    spawnFn(parsed.cwd, child.id);
     return renderJobLaunch(readJob(parsed.cwd, child.id) ?? child);
   }
   return {
@@ -524,15 +340,6 @@ async function captureWorktreeFiles(cwd: string): Promise<Set<string> | undefine
   }
 }
 
-function failJobOnUnexpectedWorkerExit(cwd: string, jobId: string, code: number | null, signal: string | null): void {
-  const current = readJob(cwd, jobId);
-  if (!current || !isActiveJobStatus(current.status)) return;
-  failRuntimeJob(cwd, jobId, {
-    errorCode: "worker_exit",
-    error: `Worker process exited unexpectedly (code=${code}, signal=${signal}).`
-  });
-}
-
 function diffAddedFiles(before: Set<string> | undefined, after: Set<string> | undefined): string[] {
   if (!before || !after) return [];
   return [...after].filter((file) => !before.has(file));
@@ -552,17 +359,4 @@ function mimoRunFailureMessage(result: MimoRunResult, label: string): string | n
   if (semanticFailure) return `MiMoCode ${label} failed: ${semanticFailure}`;
   if (result.exitCode === 0) return null;
   return `MiMoCode ${label} failed: ${result.errors.join("\n") || `exit ${result.exitCode}`}`;
-}
-
-const BACKGROUND_WAIT_POLL_MS = 250;
-const BACKGROUND_WAIT_CALLBACK_GRACE_MS = 10_000;
-
-async function waitForJobToSettle(cwd: string, jobId: string, waitMs: number) {
-  const deadline = Date.now() + waitMs + BACKGROUND_WAIT_CALLBACK_GRACE_MS;
-  while (Date.now() < deadline) {
-    const job = readJob(cwd, jobId);
-    if (!job || !isActiveJobStatus(job.status)) return job;
-    await new Promise((resolve) => setTimeout(resolve, BACKGROUND_WAIT_POLL_MS));
-  }
-  return readJob(cwd, jobId);
 }
