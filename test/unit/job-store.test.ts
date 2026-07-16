@@ -11,6 +11,7 @@ import {
   resolveJobStateFile,
   updateJob
 } from "../../src/core/job-store.js";
+import { withProcessLock } from "../../src/core/process-lock.js";
 
 const tempDirs: string[] = [];
 
@@ -98,6 +99,39 @@ describe("job store", () => {
     const second = store.create({ kind: "compose", task: "Second", request: { workflow: "dev" } });
 
     expect(listJobs(cwd).map((entry) => entry.id)).toEqual([second.id, first.id]);
+  });
+
+  it("creates and lists an authoritative job when the state cache cannot be written", async () => {
+    const cwd = tempWorkspace();
+    fs.mkdirSync(resolveJobStateFile(cwd), { recursive: true });
+
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "cache independent",
+      request: { cwd }
+    });
+
+    expect(readJob(cwd, job.id)).toEqual(job);
+    expect(listJobs(cwd).map((entry) => entry.id)).toContain(job.id);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+
+  it("does not leave a cache refresh waiting after an authoritative synchronous write", async () => {
+    const cwd = tempWorkspace();
+    const stateFile = resolveJobStateFile(cwd);
+
+    await withProcessLock(stateFile, async () => {
+      createJobStore(cwd).create({
+        kind: "implement",
+        task: "no lingering refresh",
+        request: { cwd }
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      fs.rmSync(cwd, { recursive: true, force: true });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(fs.existsSync(cwd)).toBe(false);
   });
 
   it("throws when reading an existing malformed job file directly", () => {

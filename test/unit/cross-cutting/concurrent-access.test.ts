@@ -17,7 +17,7 @@ import {
   readDeliveries
 } from "../../../src/notify/outbox.js";
 import { readJobSignals } from "../../../src/core/job-signals.js";
-import { appendJobProgress, transitionJob, updateRunningJobPid } from "../../../src/core/job-transition.js";
+import { appendJobProgress, transitionJob, updateRunningJobProcess } from "../../../src/core/job-transition.js";
 
 const tempDirs: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -72,6 +72,75 @@ describe("concurrent access", () => {
 
     expect(midList).toHaveLength(1);
     expect(finalList).toHaveLength(3);
+  });
+
+  it("keeps both authoritative records across cross-process create/create", async () => {
+    const cwd = tempWorkspace();
+    const storeModule = pathToFileURL(path.resolve("src/core/job-store.ts")).href;
+    const script = `
+      import { createJobStore } from ${JSON.stringify(storeModule)};
+      const delay = Number(process.argv[2]) - Date.now();
+      if (delay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+      const job = createJobStore(process.argv[3]).create({
+        kind: "implement", task: process.argv[4], request: { cwd: process.argv[3] }
+      });
+      process.stdout.write(job.id);
+    `;
+    const childScript = path.join(cwd, "create-child.ts");
+    fs.writeFileSync(childScript, script, "utf8");
+    const viteNode = path.resolve("node_modules/vite-node/vite-node.mjs");
+    const startAt = Date.now() + 300;
+    const create = (task: string) => execFileAsync(process.execPath, [
+      viteNode, childScript, String(startAt), cwd, task
+    ]);
+
+    const outputs = await Promise.all([create("first"), create("second")]);
+    const ids = outputs.map(({ stdout }) => stdout.trim());
+
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+    expect(ids.every((id) => readJob(cwd, id) !== undefined)).toBe(true);
+    expect(listJobs(cwd).map((job) => job.id)).toEqual(expect.arrayContaining(ids));
+  });
+
+  it("keeps create and update records across processes without a stale cache orphan", async () => {
+    const cwd = tempWorkspace();
+    const existing = createJobStore(cwd).create({
+      kind: "implement",
+      task: "existing",
+      request: { cwd }
+    });
+    const storeModule = pathToFileURL(path.resolve("src/core/job-store.ts")).href;
+    const script = `
+      import { createJobStore, updateJob } from ${JSON.stringify(storeModule)};
+      const delay = Number(process.argv[2]) - Date.now();
+      if (delay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+      if (process.argv[4] === "create") {
+        const job = createJobStore(process.argv[3]).create({
+          kind: "implement", task: "new", request: { cwd: process.argv[3] }
+        });
+        process.stdout.write(job.id);
+      } else {
+        const job = updateJob(process.argv[3], process.argv[5], { summary: "updated" });
+        process.stdout.write(job.id);
+      }
+    `;
+    const childScript = path.join(cwd, "create-update-child.ts");
+    fs.writeFileSync(childScript, script, "utf8");
+    const viteNode = path.resolve("node_modules/vite-node/vite-node.mjs");
+    const startAt = Date.now() + 300;
+    const run = (mode: "create" | "update") => execFileAsync(process.execPath, [
+      viteNode, childScript, String(startAt), cwd, mode, existing.id
+    ]);
+
+    const [created] = await Promise.all([run("create"), run("update")]);
+    const createdId = created.stdout.trim();
+
+    expect(readJob(cwd, existing.id)?.summary).toBe("updated");
+    expect(readJob(cwd, createdId)).toBeDefined();
+    expect(listJobs(cwd).map((job) => job.id)).toEqual(
+      expect.arrayContaining([existing.id, createdId])
+    );
   });
 
   it("only one concurrent claimant receives a delivery", async () => {
@@ -211,7 +280,7 @@ describe("concurrent access", () => {
     await transitionJob(cwd, second.id, { status: "running", phase: "starting", summary: "second" });
 
     await Promise.all([
-      updateRunningJobPid(cwd, first.id, 111),
+      updateRunningJobProcess(cwd, first.id, 111, "start-111"),
       appendJobProgress(cwd, second.id, {
         kind: "milestone",
         level: "info",

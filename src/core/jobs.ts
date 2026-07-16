@@ -67,6 +67,7 @@ export interface JobTransitionFields {
   summary: string;
   phase?: JobPhase;
   pid?: number | null;
+  processIdentity?: string | null;
   startedAt?: string;
   completedAt?: string;
   sessionId?: string | null;
@@ -96,6 +97,7 @@ export interface JobRecord {
   status: JobStatus;
   phase?: JobPhase;
   pid?: number | null;
+  processIdentity: string | null;
   sessionId?: string | null;
   parentJobId?: string | null;
   createdAt: string;

@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 describe("job lifecycle", () => {
-  it("5.16: create writes .json + .log + .events.jsonl + state.json", () => {
+  it("5.16: create writes the authoritative job record and listJobs rebuilds its cache", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd);
     const job = store.create({ kind: "compose", task: "Test task", request: {} });
@@ -27,7 +27,7 @@ describe("job lifecycle", () => {
     expect(fs.existsSync(paths.jobFile)).toBe(true);
     expect(fs.existsSync(paths.logFile)).toBe(false);
     expect(fs.existsSync(paths.eventsFile)).toBe(false);
-    expect(fs.existsSync(resolveJobStateFile(cwd))).toBe(true);
+    expect(listJobs(cwd).map((entry) => entry.id)).toContain(job.id);
   });
 
   it("5.17: listJobs calls failStaleJobs first", () => {

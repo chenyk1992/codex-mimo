@@ -13,6 +13,7 @@ import type { ExecutionCallbackSummary, JobKind, JobRecord } from "../../../src/
 import { captureGitDiff } from "../../../src/git/diff.js";
 
 const tempDirs: string[] = [];
+const ACTIVE_SIGNAL = new AbortController().signal;
 
 function tempDir(): string {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-definitions-"));
@@ -197,6 +198,7 @@ describe("job finalization", () => {
       receivedAt: "2026-07-16T00:00:01.000Z"
     };
     const outcome = await getJobDefinition("implement").finalize({
+      signal: ACTIVE_SIGNAL,
       job,
       request: job.request as JobRequestByKind["implement"],
       run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 10 },
@@ -232,6 +234,7 @@ describe("job finalization", () => {
     }]);
 
     const outcome = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
       job,
       request,
       mimoArgs: ["run", "--format", "json"],
@@ -246,7 +249,7 @@ describe("job finalization", () => {
       deps: { runVerification, writeComposeReport: writeReport }
     });
 
-    expect(runVerification).toHaveBeenCalledWith(cwd, []);
+    expect(runVerification).toHaveBeenCalledWith(cwd, [], { signal: ACTIVE_SIGNAL });
     expect(writeReport).toHaveBeenCalledOnce();
     const report = writeReport.mock.calls[0][0];
     expect(report.executionCallback).toMatchObject({
@@ -281,9 +284,11 @@ describe("job finalization", () => {
     const directRequest: JobRequestByKind["implement"] = { cwd, task: "implement", allowWrite: true };
     const composeRequest: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "implement" };
     const direct = await getJobDefinition("implement").finalize({
+      signal: ACTIVE_SIGNAL,
       job: makeJob("implement", directRequest), request: directRequest, run, events, executionCallback, verification: []
     });
     const compose = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
       job: makeJob("compose", composeRequest), request: composeRequest, run, events, executionCallback,
       verification: [], deps: { runVerification: async () => [], writeComposeReport: () => undefined }
     });
@@ -306,6 +311,7 @@ describe("job finalization", () => {
     const request: JobRequestByKind["plan"] = { cwd, task: "plan it" };
     const executionCallback: ExecutionCallbackSummary = { invocationId: "inv", outcome: "completed" };
     const outcome = await getJobDefinition("plan").finalize({
+      signal: ACTIVE_SIGNAL,
       job: makeJob("plan", request),
       request,
       run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
@@ -324,6 +330,7 @@ describe("job finalization", () => {
     const composeRequest: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "compose" };
     let reportJson = "";
     const compose = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
       job: makeJob("compose", composeRequest),
       request: composeRequest,
       run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
@@ -347,6 +354,7 @@ describe("job finalization", () => {
     const cwd = tempDir();
     const request: JobRequestByKind["plan"] = { cwd, task: "plan" };
     const outcome = await getJobDefinition("plan").finalize({
+      signal: ACTIVE_SIGNAL,
       job: makeJob("plan", request), request,
       run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
       events: [{ type: "message", text: "done", raw: {} }],
@@ -379,6 +387,7 @@ describe("job finalization", () => {
       const before = structuredClone(job);
       const bound = bindJobDefinition(job);
       const outcome = await bound.finalize({
+        signal: ACTIVE_SIGNAL,
         run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
         events: [{ type: "message", text: "done", raw: {} }],
         executionCallback: { invocationId: "inv", outcome: "completed" },
@@ -398,6 +407,7 @@ describe("job finalization", () => {
     const error = new Error(`${failure} exploded`);
 
     await expect(bound.finalize({
+      signal: ACTIVE_SIGNAL,
       run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
       events: [{ type: "message", text: "done", raw: {} }],
       executionCallback: { invocationId: "inv", outcome: "completed" },

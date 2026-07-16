@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BoundJobDefinition } from "../../../src/core/job-definitions.js";
 import { runJobWorker, type JobWorkerDependencies } from "../../../src/core/job-worker.js";
 import { readJob, createJobStore, resolveJobStateFile } from "../../../src/core/job-store.js";
-import { transitionJob, updateRunningJobPid } from "../../../src/core/job-transition.js";
+import { transitionJob, updateRunningJobProcess } from "../../../src/core/job-transition.js";
 import type { JobKind, JobRecord } from "../../../src/core/jobs.js";
 import { readJobSignals } from "../../../src/core/job-signals.js";
 import { readDeliveries } from "../../../src/notify/outbox.js";
@@ -115,6 +115,11 @@ function workerDeps(overrides: Partial<JobWorkerDependencies> = {}): JobWorkerDe
     captureHead: vi.fn(async () => ({ oid: "abc", short: "abc", subject: "base" })),
     captureDiff: vi.fn(async () => ({ changedFiles: [], diffStat: "", diff: "" })),
     captureCommitChanges: vi.fn(async () => ({ commits: [], changedFiles: [] })),
+    captureProcessIdentity: vi.fn(() => ({
+      status: "running" as const,
+      identity: "start-321",
+      evidence: "test process"
+    })),
     spawnNotificationWorker: vi.fn(() => 999),
     ...overrides
   };
@@ -166,12 +171,16 @@ describe("runJobWorker", () => {
       status: "running",
       phase: "starting",
       summary: "started",
-      pid
+      pid,
+      processIdentity: pid === null ? null : `start-${pid}`
     });
-    const terminateProcessTree = vi.fn();
+    const terminateOwnedProcess = vi.fn(() => ({
+      status: "terminated" as const,
+      evidence: "confirmed gone"
+    }));
     const deps = {
       ...workerDeps(),
-      terminateProcessTree
+      terminateOwnedProcess
     } as JobWorkerDependencies;
 
     await runJobWorker(cwd, job.id, deps);
@@ -183,34 +192,37 @@ describe("runJobWorker", () => {
       errorCode: "worker_restarted",
       pid: null
     });
-    expect(terminateProcessTree).toHaveBeenCalledTimes(1);
-    expect(terminateProcessTree).toHaveBeenCalledWith(pid);
+    expect(terminateOwnedProcess).toHaveBeenCalledTimes(1);
+    expect(terminateOwnedProcess).toHaveBeenCalledWith(pid, pid === null ? null : `start-${pid}`);
     expect(deps.runMimoStreaming).not.toHaveBeenCalled();
     expect(readJobSignals(stored.signalsFile).signals.filter((signal) => signal.kind === "failed")).toHaveLength(1);
     expect(readDeliveries(stored.notificationOutboxFile)).toHaveLength(1);
     expect(deps.spawnNotificationWorker).toHaveBeenCalledTimes(2);
   });
 
-  it("records worker_restarted even when terminating the stale process fails", async () => {
+  it("blocks stale recovery when process termination cannot be confirmed", async () => {
     const cwd = tempWorkspace();
     const job = seedJob(cwd, "implement", true);
     await transitionJob(cwd, job.id, {
       status: "running",
       phase: "starting",
       summary: "started",
-      pid: 808
+      pid: 808,
+      processIdentity: "start-808"
     });
     const deps = workerDeps({
-      terminateProcessTree: vi.fn(() => {
-        throw new Error("access denied");
-      })
+      terminateOwnedProcess: vi.fn(() => ({
+        status: "unconfirmed",
+        evidence: "access denied"
+      }))
     });
 
     await runJobWorker(cwd, job.id, deps);
 
     expect(readJob(cwd, job.id)).toMatchObject({
-      status: "failed",
-      errorCode: "worker_restarted",
+      status: "blocked",
+      errorCode: "worker_recovery_unconfirmed",
+      error: expect.stringContaining("access denied"),
       pid: null
     });
     expect(deps.runMimoStreaming).not.toHaveBeenCalled();
@@ -304,28 +316,114 @@ describe("runJobWorker", () => {
     expect(readJob(cwd, job.id)).toMatchObject({ status: "cancelled", pid: null });
   });
 
+  it("continuously aborts a hanging MiMo run when the authoritative job is cancelled", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    let observedSignal: AbortSignal | undefined;
+    const bound = definition();
+    const deps = workerDeps({
+      bindJobDefinition: () => bound,
+      statusPollMs: 5,
+      runMimoStreaming: async (_cwd, _args, options) => {
+        observedSignal = options.signal;
+        await options.onStart?.(909);
+        started();
+        await new Promise<void>((resolve) => {
+          options.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return { ...completedRun, exitCode: 124, pid: 909, terminationReason: "host_abort" };
+      }
+    });
+
+    const worker = runJobWorker(cwd, job.id, deps);
+    await running;
+    await transitionJob(cwd, job.id, { status: "cancelled", summary: "cancelled" });
+    await worker;
+
+    expect(observedSignal?.aborted).toBe(true);
+    expect(bound.finalize).not.toHaveBeenCalled();
+    expect(deps.captureDiff).not.toHaveBeenCalled();
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "cancelled",
+      pid: null,
+      processIdentity: null
+    });
+  });
+
+  it("checks cancellation between every final Git capture", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    const bound = definition();
+    let statusCalls = 0;
+    const captureStatus = vi.fn(async () => {
+      statusCalls += 1;
+      if (statusCalls === 2) {
+        await transitionJob(cwd, job.id, { status: "cancelled", summary: "cancelled" });
+      }
+      return { short: "", dirty: false, fingerprints: {} };
+    });
+    const captureHead = vi.fn(async () => ({ oid: "abc", short: "abc", subject: "base" }));
+    const deps = workerDeps({ bindJobDefinition: () => bound, captureStatus, captureHead });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(captureStatus).toHaveBeenCalledTimes(2);
+    expect(captureHead).toHaveBeenCalledTimes(1);
+    expect(deps.captureDiff).not.toHaveBeenCalled();
+    expect(deps.captureCommitChanges).not.toHaveBeenCalled();
+    expect(bound.finalize).not.toHaveBeenCalled();
+  });
+
+  it("aborts a hanging finalizer verification and never reaches its later writer", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "compose");
+    let verificationStarted!: () => void;
+    const started = new Promise<void>((resolve) => { verificationStarted = resolve; });
+    const laterWriter = vi.fn();
+    const bound = definition();
+    vi.mocked(bound.finalize).mockImplementationOnce(async (context) => {
+      verificationStarted();
+      await new Promise<void>((_resolve, reject) => {
+        context.signal.addEventListener("abort", () => reject(context.signal.reason), { once: true });
+      });
+      laterWriter();
+      return { status: "completed", summary: "done" };
+    });
+    const deps = workerDeps({ bindJobDefinition: () => bound, statusPollMs: 5 });
+
+    const worker = runJobWorker(cwd, job.id, deps);
+    await started;
+    await transitionJob(cwd, job.id, { status: "cancelled", summary: "cancelled" });
+    await worker;
+
+    expect(laterWriter).not.toHaveBeenCalled();
+    expect(readJob(cwd, job.id)?.status).toBe("cancelled");
+  });
+
   it("stops a pending callback wait when the authoritative job becomes cancelled", async () => {
     const cwd = tempWorkspace();
     const job = seedJob(cwd, "implement");
     const controller = hook();
-    vi.mocked(controller.waitForCallback).mockImplementationOnce(() => new Promise(() => {}));
-    let cancelled = false;
+    let callbackStarted!: () => void;
+    const started = new Promise<void>((resolve) => { callbackStarted = resolve; });
+    vi.mocked(controller.waitForCallback).mockImplementationOnce(() => {
+      callbackStarted();
+      return new Promise(() => {});
+    });
     const bound = definition();
-    const deps = {
-      ...workerDeps({
-        bindJobDefinition: () => bound,
-        createHookCallbackController: async () => controller
-      }),
-      sleep: async () => {
-        if (!cancelled) {
-          cancelled = true;
-          await transitionJob(cwd, job.id, { status: "cancelled", summary: "cancelled" });
-        }
-      }
-    } as JobWorkerDependencies;
+    const deps = workerDeps({
+      bindJobDefinition: () => bound,
+      createHookCallbackController: async () => controller,
+      statusPollMs: 5
+    });
 
+    const worker = runJobWorker(cwd, job.id, deps);
+    await started;
+    await transitionJob(cwd, job.id, { status: "cancelled", summary: "cancelled" });
     const settled = await Promise.race([
-      runJobWorker(cwd, job.id, deps).then(() => "done"),
+      worker.then(() => "done"),
       new Promise<"stuck">((resolve) => setTimeout(() => resolve("stuck"), 100))
     ]);
 
@@ -333,6 +431,30 @@ describe("runJobWorker", () => {
     expect(bound.finalize).not.toHaveBeenCalled();
     expect(deps.captureDiff).not.toHaveBeenCalled();
     expect(controller.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("detaches the callback abort listener when cancellation wins", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    const controller = hook();
+    let callbackStarted!: () => void;
+    const started = new Promise<void>((resolve) => { callbackStarted = resolve; });
+    vi.mocked(controller.waitForCallback).mockImplementationOnce(() => {
+      callbackStarted();
+      return new Promise(() => {});
+    });
+    const removeListener = vi.spyOn(AbortSignal.prototype, "removeEventListener");
+    const deps = workerDeps({
+      createHookCallbackController: async () => controller,
+      statusPollMs: 5
+    });
+
+    const worker = runJobWorker(cwd, job.id, deps);
+    await started;
+    await transitionJob(cwd, job.id, { status: "cancelled", summary: "cancelled" });
+    await worker;
+
+    expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
   });
 
   it("completes when auxiliary state.json refresh fails after authoritative job writes", async () => {

@@ -13,6 +13,14 @@ import { withProcessLock } from "./process-lock.js";
 
 const DEFAULT_MAX_JOBS = 100;
 
+interface ObservedStateRefresh {
+  requested: boolean;
+  maxJobs: number;
+  promise: Promise<void>;
+}
+
+const observedStateRefreshes = new Map<string, ObservedStateRefresh>();
+
 interface JobState {
   jobs: string[];
 }
@@ -86,6 +94,7 @@ export function createJobStore(cwd: string, options: JobStoreOptions = {}): {
         request: input.request,
         status: "queued",
         pid: null,
+        processIdentity: null,
         sessionId: null,
         parentJobId: input.parentJobId ?? null,
         createdAt: timestamp,
@@ -100,9 +109,8 @@ export function createJobStore(cwd: string, options: JobStoreOptions = {}): {
       };
 
       writeJobRecord(cwd, record);
-      const state = readState(cwd);
-      state.jobs = [id, ...state.jobs.filter((jobId) => jobId !== id)];
-      writeState(cwd, pruneState(cwd, state, maxJobs));
+      pruneRecordsBestEffort(cwd, maxJobs);
+      observeStateRefresh(cwd, maxJobs);
 
       return record;
     }
@@ -111,7 +119,9 @@ export function createJobStore(cwd: string, options: JobStoreOptions = {}): {
 
 export function listJobs(cwd: string): JobRecord[] {
   failStaleJobs(cwd);
-  return readState(cwd)
+  const rebuilt = rebuildState(cwd);
+  observeStateRefresh(cwd, DEFAULT_MAX_JOBS);
+  return rebuilt
     .jobs.map((jobId) => readJobFile(cwd, jobId, { skipMalformed: true }))
     .filter((job): job is JobRecord => job !== undefined);
 }
@@ -171,9 +181,9 @@ export function updateJob(
   }
 
   writeJobRecord(cwd, updated);
-  const state = readState(cwd);
-  state.jobs = [jobId, ...state.jobs.filter((id) => id !== jobId)];
-  writeState(cwd, pruneState(cwd, state, options.maxJobs ?? DEFAULT_MAX_JOBS));
+  const maxJobs = options.maxJobs ?? DEFAULT_MAX_JOBS;
+  pruneRecordsBestEffort(cwd, maxJobs);
+  observeStateRefresh(cwd, maxJobs);
 
   return updated;
 }
@@ -303,6 +313,7 @@ function isJobRecord(value: unknown, expectedJobId: string): value is JobRecord 
     typeof value.task === "string" &&
     typeof value.status === "string" &&
     (value.phase === undefined || typeof value.phase === "string") &&
+    (value.processIdentity === null || typeof value.processIdentity === "string") &&
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string" &&
     Array.isArray(value.changedFiles) &&
@@ -325,25 +336,16 @@ function ensureJobDir(cwd: string): void {
   fs.mkdirSync(resolveJobDir(cwd), { recursive: true });
 }
 
-function readState(cwd: string): JobState {
-  try {
-    const raw = fs.readFileSync(resolveJobStateFile(cwd), "utf-8");
-    const state = JSON.parse(raw) as JobState;
-    if (
-      !Array.isArray(state.jobs) ||
-      !state.jobs.every((jobId) => typeof jobId === "string" && isValidJobId(jobId))
-    ) {
-      return rebuildState(cwd);
-    }
-    return state;
-  } catch {
-    return rebuildState(cwd);
-  }
-}
-
 function writeState(cwd: string, state: JobState): void {
   ensureJobDir(cwd);
-  fs.writeFileSync(resolveJobStateFile(cwd), JSON.stringify(state, null, 2), "utf-8");
+  const stateFile = resolveJobStateFile(cwd);
+  const temporary = `${stateFile}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(state, null, 2), "utf-8");
+    fs.renameSync(temporary, stateFile);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
 }
 
 function writeJobRecord(cwd: string, record: JobRecord): void {
@@ -358,41 +360,53 @@ function writeJobRecord(cwd: string, record: JobRecord): void {
   }
 }
 
-function writeUpdatedJob(cwd: string, record: JobRecord): JobRecord {
-  writeJobRecord(cwd, record);
-  try {
-    const state = readState(cwd);
-    state.jobs = [record.id, ...state.jobs.filter((id) => id !== record.id)];
-    writeState(cwd, pruneState(cwd, state, DEFAULT_MAX_JOBS));
-  } catch {
-    // The per-job record is authoritative; the auxiliary index can be rebuilt later.
-  }
-  return record;
-}
-
 async function persistAuthoritativeRecord(
   cwd: string,
   record: JobRecord,
   maxJobs = DEFAULT_MAX_JOBS
 ): Promise<JobRecord> {
   writeJobRecord(cwd, record);
-  await refreshStateIndexBestEffort(cwd, record.id, maxJobs);
+  pruneRecordsBestEffort(cwd, maxJobs);
+  await refreshStateCacheBestEffort(cwd, maxJobs);
   return record;
 }
 
-async function refreshStateIndexBestEffort(
-  cwd: string,
-  jobId: string,
-  maxJobs: number
-): Promise<void> {
+function observeStateRefresh(cwd: string, maxJobs: number): void {
+  const key = resolveJobStateFile(cwd);
+  const existing = observedStateRefreshes.get(key);
+  if (existing) {
+    existing.requested = true;
+    existing.maxJobs = maxJobs;
+    return;
+  }
+  const observed = { requested: false, maxJobs, promise: Promise.resolve() };
+  observed.promise = (async () => {
+    do {
+      observed.requested = false;
+      await refreshStateCacheBestEffort(cwd, observed.maxJobs);
+    } while (observed.requested);
+  })().finally(() => {
+    if (observedStateRefreshes.get(key) === observed) observedStateRefreshes.delete(key);
+  });
+  observedStateRefreshes.set(key, observed);
+  void observed.promise;
+}
+
+async function refreshStateCacheBestEffort(cwd: string, maxJobs: number): Promise<void> {
   try {
     await withProcessLock(resolveJobStateFile(cwd), () => {
-      const state = readState(cwd);
-      state.jobs = [jobId, ...state.jobs.filter((id) => id !== jobId)];
-      writeState(cwd, pruneState(cwd, state, maxJobs));
-    });
+      writeState(cwd, pruneState(cwd, rebuildState(cwd), maxJobs));
+    }, { timeoutMs: 0 });
   } catch {
     // The atomic per-job record is authoritative; the shared index is rebuildable.
+  }
+}
+
+function pruneRecordsBestEffort(cwd: string, maxJobs: number): void {
+  try {
+    pruneState(cwd, rebuildState(cwd), maxJobs);
+  } catch {
+    // Retention cleanup is auxiliary and must never invalidate an authoritative write.
   }
 }
 
@@ -411,6 +425,7 @@ function transitionRecordPatch(
     summary: transition.summary,
     phase: transition.phase,
     pid: transition.pid,
+    processIdentity: transition.processIdentity,
     ...(transition.startedAt !== undefined ? { startedAt: transition.startedAt } : {}),
     ...(transition.completedAt !== undefined ? { completedAt: transition.completedAt } : {}),
     ...(transition.sessionId !== undefined ? { sessionId: transition.sessionId } : {}),
@@ -504,9 +519,10 @@ function isPendingJobTransition(
 function isNormalizedTransitionState(value: Record<string, unknown>): boolean {
   if (value.status === "running") {
     return (value.phase === undefined || isJobPhase(value.phase)) &&
-      (value.pid === null || isPositiveInteger(value.pid));
+      (value.pid === null || isPositiveInteger(value.pid)) &&
+      (value.processIdentity === null || typeof value.processIdentity === "string");
   }
-  return value.phase === undefined && value.pid === null;
+  return value.phase === undefined && value.pid === null && value.processIdentity === null;
 }
 
 function isOptionalVerificationArray(value: unknown): boolean {
@@ -630,7 +646,7 @@ export function failStaleJobs(
 ): JobRecord[] {
   const threshold = options.staleThresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
   const cutoff = Date.now() - threshold;
-  const jobs = readState(cwd)
+  const jobs = rebuildState(cwd)
     .jobs.map((jobId) => readJobFile(cwd, jobId, { skipMalformed: true }))
     .filter((job): job is JobRecord => job !== undefined);
   const failed: JobRecord[] = [];
@@ -644,6 +660,7 @@ export function failStaleJobs(
       status: "failed",
       phase: undefined,
       pid: null,
+      processIdentity: null,
       completedAt: nowIso(),
       errorCode: "stale_queued",
       error: `Job stuck in queued state for longer than ${Math.round(threshold / 1000)}s. Worker process may have failed to start.`

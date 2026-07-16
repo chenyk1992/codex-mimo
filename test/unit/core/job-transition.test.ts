@@ -93,20 +93,26 @@ describe("job transitions", () => {
     })).rejects.toThrow("Illegal job transition completed -> running");
   });
 
-  it("clears phase and pid outside running", async () => {
+  it("clears phase, pid, and process identity outside running", async () => {
     const { cwd, jobId } = seedJob("running");
 
     const { job } = await transitionJob(cwd, jobId, {
       status: "completed",
       phase: "finalizing",
       pid: 999,
+      processIdentity: "must-not-survive",
       summary: "done"
     });
 
     expect(job.phase).toBeUndefined();
     expect(job).not.toHaveProperty("phase");
     expect(job.pid).toBeNull();
-    expect(readJob(cwd, jobId)).toMatchObject({ status: "completed", pid: null });
+    expect(job.processIdentity).toBeNull();
+    expect(readJob(cwd, jobId)).toMatchObject({
+      status: "completed",
+      pid: null,
+      processIdentity: null
+    });
     expect(readJob(cwd, jobId)).not.toHaveProperty("phase");
   });
 
@@ -257,7 +263,7 @@ describe("job transitions", () => {
     const original = fs.writeFileSync.bind(fs);
     let failed = false;
     vi.spyOn(fs, "writeFileSync").mockImplementation(((file, data, options) => {
-      if (!failed && String(file) === stateFile &&
+      if (!failed && String(file).startsWith(`${stateFile}.`) &&
           (rawJob(cwd, jobId).pendingTransition as { stage?: unknown } | undefined)?.stage === "finalized") {
         failed = true;
         throw new Error("state index unavailable");
@@ -279,7 +285,7 @@ describe("job transitions", () => {
     const original = fs.writeFileSync.bind(fs);
     let failed = false;
     vi.spyOn(fs, "writeFileSync").mockImplementation(((file, data, options) => {
-      if (!failed && String(file) === stateFile &&
+      if (!failed && String(file).startsWith(`${stateFile}.`) &&
           (rawJob(cwd, jobId).pendingTransition as { stage?: unknown } | undefined)?.stage === "finalized") {
         failed = true;
         throw new Error("state index unavailable");

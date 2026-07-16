@@ -114,15 +114,16 @@ export async function appendJobProgress(
   });
 }
 
-export async function updateRunningJobPid(
+export async function updateRunningJobProcess(
   cwd: string,
   jobId: string,
-  pid: number | null
+  pid: number | null,
+  processIdentity: string | null
 ): Promise<JobRecord> {
   return withProcessLock(resolveJobStateLock(cwd, jobId), async () => {
     const job = requireJob(cwd, jobId);
     if (job.status !== "running") return job;
-    return updateJobAuthoritative(cwd, jobId, { pid });
+    return updateJobAuthoritative(cwd, jobId, { pid, processIdentity });
   });
 }
 
@@ -216,6 +217,9 @@ function buildPendingTransition(
     summary: transition.summary,
     phase: running ? transition.phase : undefined,
     pid: running ? (transition.pid ?? job.pid ?? null) : null,
+    processIdentity: running
+      ? (transition.processIdentity ?? job.processIdentity ?? null)
+      : null,
     ...(running
       ? { startedAt: transition.startedAt ?? job.startedAt ?? timestamp }
       : { completedAt: transition.completedAt ?? timestamp }),

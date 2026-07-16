@@ -17,7 +17,8 @@ import {
   compactVerification,
   normalizeVerificationCommands,
   runVerificationCommands,
-  type VerificationResult
+  type VerificationResult,
+  type VerificationRunOptions
 } from "../compose/verify.js";
 import {
   buildComposePrompt,
@@ -110,11 +111,16 @@ export interface JobRequestByKind {
 }
 
 export interface JobFinalizeDependencies {
-  runVerification?: (cwd: string, commands: string[]) => Promise<VerificationResult[]>;
+  runVerification?: (
+    cwd: string,
+    commands: string[],
+    options?: VerificationRunOptions
+  ) => Promise<VerificationResult[]>;
   writeComposeReport?: (report: ComposeReport) => void;
 }
 
 export interface JobExecutionFinalizeContext {
+  signal: AbortSignal;
   mimoArgs?: string[];
   run: StreamingRunResult;
   events: NormalizedMimoEvent[];
@@ -376,7 +382,9 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     workflow.defaultVerification,
     context.request.cwd
   );
-  const verification = await runVerification(context.request.cwd, commands);
+  context.signal.throwIfAborted();
+  const verification = await runVerification(context.request.cwd, commands, { signal: context.signal });
+  context.signal.throwIfAborted();
 
   const changedFiles = collectChangedFiles(context, workflow.writesAllowed);
   let reportDiff = context.diff ?? emptyDiff();
@@ -440,6 +448,7 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     eventsDir: path.join(context.request.cwd, ".codex-mimo", "events"),
     diffsDir: path.join(context.request.cwd, ".codex-mimo", "diffs")
   });
+  context.signal.throwIfAborted();
   (context.deps?.writeComposeReport ?? writeComposeReport)(report);
 
   return {

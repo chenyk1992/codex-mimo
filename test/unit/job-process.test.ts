@@ -8,10 +8,13 @@ vi.mock("node:child_process", async (importOriginal) => {
 });
 
 import {
+  captureProcessIdentity,
   spawnJobWorker,
   spawnNotificationWorker,
   spawnWorker,
-  terminateJobProcess
+  terminateJobProcess,
+  terminateOwnedJobProcess,
+  verifyProcessIdentity
 } from "../../src/core/job-process.js";
 
 function fakeChild(pid: number) {
@@ -79,5 +82,112 @@ describe("terminateJobProcess", () => {
     const killProcess = vi.fn();
     terminateJobProcess(123, { platform: "linux", killProcess });
     expect(killProcess).toHaveBeenCalledWith(-123);
+  });
+});
+
+describe("owned process identity", () => {
+  it("does not kill a reused PID whose startup identity differs", () => {
+    const killProcessTree = vi.fn();
+
+    const result = terminateOwnedJobProcess(123, "start-1", {
+      captureIdentity: vi.fn(() => ({
+        status: "running" as const,
+        identity: "start-2",
+        evidence: "pid 123 now belongs to start-2"
+      })),
+      killProcessTree
+    });
+
+    expect(result).toMatchObject({ status: "identity_mismatch" });
+    expect(killProcessTree).not.toHaveBeenCalled();
+  });
+
+  it("does not claim safe termination when killing fails", () => {
+    const result = terminateOwnedJobProcess(123, "start-1", {
+      captureIdentity: vi.fn(() => ({
+        status: "running" as const,
+        identity: "start-1",
+        evidence: "matched"
+      })),
+      killProcessTree: vi.fn(() => ({ ok: false, evidence: "taskkill exit 1" }))
+    });
+
+    expect(result).toEqual({ status: "unconfirmed", evidence: "taskkill exit 1" });
+  });
+
+  it("does not claim safe termination while the same process remains alive", () => {
+    const captureIdentity = vi.fn(() => ({
+      status: "running" as const,
+      identity: "start-1",
+      evidence: "still alive"
+    }));
+
+    const result = terminateOwnedJobProcess(123, "start-1", {
+      captureIdentity,
+      killProcessTree: vi.fn(() => ({ ok: true, evidence: "kill sent" }))
+    });
+
+    expect(result).toEqual({ status: "unconfirmed", evidence: "still alive" });
+    expect(captureIdentity).toHaveBeenCalledTimes(2);
+  });
+
+  it("kills only a matching process and confirms that it exited", () => {
+    const captureIdentity = vi.fn()
+      .mockReturnValueOnce({ status: "running", identity: "start-1", evidence: "matched" })
+      .mockReturnValueOnce({ status: "not_running", evidence: "gone" });
+    const killProcessTree = vi.fn(() => ({ ok: true, evidence: "kill sent" }));
+
+    const result = terminateOwnedJobProcess(123, "start-1", {
+      captureIdentity,
+      killProcessTree
+    });
+
+    expect(result).toEqual({ status: "terminated", evidence: "gone" });
+    expect(killProcessTree).toHaveBeenCalledWith(123);
+  });
+
+  it("exposes independently injectable capture and verification", () => {
+    const query = vi.fn(() => ({
+      status: "running" as const,
+      identity: "start-1",
+      evidence: "query"
+    }));
+
+    expect(captureProcessIdentity(123, { query })).toMatchObject({
+      status: "running",
+      identity: "start-1"
+    });
+    expect(verifyProcessIdentity(123, "start-1", { captureIdentity: query })).toMatchObject({
+      status: "match"
+    });
+  });
+
+  it("captures a macOS process identity from its stable start time", () => {
+    const spawnSync = vi.fn(() => ({
+      status: 0,
+      stdout: "Wed Jul 16 12:34:56 2026\n",
+      stderr: ""
+    }));
+
+    expect(captureProcessIdentity(123, { platform: "darwin", spawnSync })).toEqual({
+      status: "running",
+      identity: "darwin:Wed Jul 16 12:34:56 2026",
+      evidence: "POSIX process start time Wed Jul 16 12:34:56 2026."
+    });
+    expect(spawnSync).toHaveBeenCalledWith(
+      "ps",
+      ["-o", "lstart=", "-p", "123"],
+      { encoding: "utf8" }
+    );
+  });
+
+  it("fails safe without querying an unsupported platform", () => {
+    const spawnSync = vi.fn();
+
+    expect(captureProcessIdentity(123, { platform: "aix", spawnSync })).toEqual({
+      status: "unconfirmed",
+      evidence: "Process identity is unsupported on platform aix."
+    });
+    expect(spawnSync).not.toHaveBeenCalled();
   });
 });
