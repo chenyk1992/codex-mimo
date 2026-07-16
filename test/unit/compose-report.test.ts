@@ -1,7 +1,37 @@
 import { describe, expect, it } from "vitest";
-import { renderMarkdownReport } from "../../src/compose/report.js";
+import { parseMimoJsonLines } from "../../src/compose/events.js";
+import { createComposeReport, renderMarkdownReport } from "../../src/compose/report.js";
 
 describe("compose report", () => {
+  it("extracts structured plan text from normalized events", () => {
+    const plan = "# Implementation Plan\n\n## Task 1: Setup\n\n- [ ] Create files\n- [ ] Run tests";
+    const report = createReport([
+      "Analyzing codebase...",
+      plan
+    ]);
+
+    expect(report.planText).toBe(plan);
+    expect(report.reviewText).toContain("Analyzing codebase...");
+    expect(report.reviewText).toContain("Implementation Plan");
+  });
+
+  it("leaves plan text absent for ordinary result messages", () => {
+    const report = createReport(["Found the bug in line 42"]);
+
+    expect(report.planText).toBeUndefined();
+    expect(report.reviewText).toBe("Found the bug in line 42");
+  });
+
+  it("excludes Compose startup chatter from structured plan text", () => {
+    const report = createReport([
+      "I'm using the compose:plan skill to create an implementation plan for your task.",
+      "# Implementation Plan\n\n## Task 1: Setup\n\n- [ ] Create files"
+    ]);
+
+    expect(report.planText).toContain("Implementation Plan");
+    expect(report.planText).not.toContain("compose:plan skill");
+  });
+
   it("renders workflow, status, changed files, and verification", () => {
     const markdown = renderMarkdownReport({
       id: "run_1",
@@ -215,3 +245,22 @@ describe("compose report", () => {
     expect(markdown).toContain("No session.post callback was received");
   });
 });
+
+function createReport(messages: string[]) {
+  return createComposeReport({
+    id: "plan-report",
+    createdAt: "2026-06-23T00:00:00.000Z",
+    workflow: "plan",
+    cwd: "E:/project/app",
+    task: "Write a plan",
+    mimoArgs: ["run", "--format", "json"],
+    requestedSkills: ["compose:plan"],
+    status: "passed",
+    events: parseMimoJsonLines(messages.map((text) => JSON.stringify({ type: "message", text })).join("\n")),
+    diff: { changedFiles: [], diffStat: "", diff: "" },
+    verification: [],
+    reportDir: "E:/project/app/.codex-mimo/reports",
+    eventsDir: "E:/project/app/.codex-mimo/events",
+    diffsDir: "E:/project/app/.codex-mimo/diffs"
+  });
+}

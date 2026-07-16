@@ -189,6 +189,58 @@ describe("job store", () => {
   });
 
   it.each([
+    "queued",
+    "needs_input",
+    "blocked",
+    "completed",
+    "failed",
+    "cancelled",
+    "timeout"
+  ])("rejects a persisted %s record with an active phase", (status) => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "validate normalized record state",
+      request: { cwd }
+    });
+    fs.writeFileSync(resolveJobPaths(cwd, job.id).jobFile, JSON.stringify({
+      ...job,
+      status,
+      phase: "starting",
+      pid: null,
+      processIdentity: null
+    }), "utf8");
+
+    expect(() => readJob(cwd, job.id)).toThrow(/malformed job/i);
+  });
+
+  it.each([
+    ["queued", "queued", undefined, null, null],
+    ["needs_input", "needs_input", undefined, null, null],
+    ["blocked", "blocked", undefined, null, null],
+    ["completed", "completed", undefined, null, null],
+    ["failed", "failed", undefined, null, null],
+    ["cancelled", "cancelled", undefined, null, null],
+    ["timeout", "timeout", undefined, null, null],
+    ["running before spawn", "running", undefined, null, null],
+    ["running in an active phase", "running", "verifying", null, null],
+    ["running with an owned process", "running", "editing", 42, "start-42"]
+  ])("reads normalized persisted state: %s", (_label, status, phase, pid, processIdentity) => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "validate normalized record state",
+      request: { cwd }
+    });
+    const record = { ...job, status, pid, processIdentity } as Record<string, unknown>;
+    if (phase !== undefined) record.phase = phase;
+    fs.writeFileSync(resolveJobPaths(cwd, job.id).jobFile, JSON.stringify(record), "utf8");
+
+    expect(readJob(cwd, job.id)).toMatchObject({ status, pid, processIdentity });
+    expect(readJob(cwd, job.id)?.phase).toBe(phase);
+  });
+
+  it.each([
     ["queued with a process", { status: "queued", pid: 42, processIdentity: "start-42" }],
     ["completed with an identity", { status: "completed", pid: null, processIdentity: "start-42" }],
     ["running with only a pid", { status: "running", pid: 42, processIdentity: null }],

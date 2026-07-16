@@ -76,7 +76,7 @@ export function normalizeMimoEvent(raw: unknown): NormalizedMimoEvent {
   }
 
   if (type === "error") {
-    return { type: "error", text: stringValue(raw.error ?? raw.message), raw };
+    return { type: "error", text: errorText(raw), raw };
   }
 
   if (type === "tool_use") {
@@ -208,6 +208,13 @@ function nestedToolCommandText(part: Record<string, unknown>): string | undefine
   const input = state.input;
   if (!isRecord(input)) return undefined;
   return stringValue(input.command ?? input.file_path ?? input.filepath ?? input.filePath ?? input.path);
+}
+
+function errorText(raw: Record<string, unknown>): string | undefined {
+  const direct = stringValue(raw.error ?? raw.message);
+  if (direct) return direct;
+  const part = raw.part;
+  return isRecord(part) ? stringValue(part.message ?? part.text) : undefined;
 }
 
 function describeEvent(event: NormalizedMimoEvent): string {

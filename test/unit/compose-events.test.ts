@@ -21,6 +21,14 @@ describe("compose event parsing", () => {
     expect(events).toEqual([{ type: "raw", raw: { unexpected: true } }]);
   });
 
+  it.each([
+    [{ type: "error", message: "model failed" }, "model failed"],
+    [{ type: "error", part: { message: "tool failed" } }, "tool failed"],
+    [{ type: "error", part: { text: "command failed" } }, "command failed"]
+  ])("extracts canonical text from MiMo type:error JSONL %#", (raw, text) => {
+    expect(normalizeMimoEvent(raw)).toMatchObject({ type: "error", text });
+  });
+
   it("summarizes message and tool counts", () => {
     const events = parseMimoJsonLines('{"type":"message","text":"hello"}\n{"type":"tool","tool":"edit","status":"completed"}\n');
     expect(summarizeEvents(events)).toMatchObject({
