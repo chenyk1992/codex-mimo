@@ -404,9 +404,12 @@ describe("unified background jobs", () => {
     }
   });
 
-  it("keeps a frozen webhook secret available to notification delivery but out of MiMo and persisted artifacts", async () => {
+  (process.platform === "win32" ? it : it.skip)(
+    "handles Windows webhook-secret casing while keeping the secret out of MiMo and persisted artifacts",
+    async () => {
     const cwd = workspace();
-    const secretName = "INTEGRATION_ISOLATED_WEBHOOK_SECRET";
+    const actualSecretName = "INTEGRATION_ISOLATED_WEBHOOK_SECRET";
+    const targetSecretName = "integration_isolated_webhook_secret";
     const secret = "isolated-secret-value-never-persist";
     const probeFile = path.join(cwd, "mimo-secret-probe.txt");
     let body = "";
@@ -422,16 +425,16 @@ describe("unified background jobs", () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("webhook fixture did not bind");
-    const previous = process.env[secretName];
-    process.env[secretName] = secret;
+    const previous = process.env[actualSecretName];
+    process.env[actualSecretName] = secret;
     try {
       const target = {
         type: "webhook" as const,
         url: `http://127.0.0.1:${address.port}/notify`,
-        secretEnv: secretName
+        secretEnv: targetSecretName
       };
       const completed = await runFake(cwd, seed(cwd, "implement", target), {
-        secretProbeName: secretName,
+        secretProbeName: targetSecretName,
         secretProbeFile: probeFile
       });
 
@@ -444,8 +447,8 @@ describe("unified background jobs", () => {
       expect(persisted).not.toContain(secret);
       expect(readDeliveries(completed.notificationOutboxFile)[0].status).toBe("delivered");
     } finally {
-      if (previous === undefined) delete process.env[secretName];
-      else process.env[secretName] = previous;
+      if (previous === undefined) delete process.env[actualSecretName];
+      else process.env[actualSecretName] = previous;
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   });

@@ -153,7 +153,7 @@ export async function runMimoCliStreaming(
   args: string[],
   options: StreamingRunOptions = {}
 ): Promise<StreamingRunResult> {
-  const childEnv = withUtf8ProcessEnv(options.env, process.env, options.omitEnv);
+  const childEnv = withUtf8ProcessEnv(options.env, { omit: options.omitEnv });
   const child = (options.spawnProcess ?? defaultSpawn)(cwd, args, childEnv);
   const stdoutParts: string[] = [];
   const stderrParts: string[] = [];

@@ -6,6 +6,7 @@ import { parseMimoJsonLines } from "../../src/compose/events.js";
 import { createComposeReport, writeComposeReport } from "../../src/compose/report.js";
 import { buildComposePrompt, getComposeWorkflow } from "../../src/compose/workflow.js";
 import { preparePromptTransport } from "../../src/mimo/prompt-transport.js";
+import { omitEnvironmentVariables, withUtf8ProcessEnv } from "../../src/core/encoding.js";
 
 describe("Windows UTF-8 encoding regressions", () => {
   const sample = "基于 Windows 本地执行器 — 🎬";
@@ -56,5 +57,53 @@ describe("Windows UTF-8 encoding regressions", () => {
     expect(fs.readFileSync(report.reportPaths.markdown).indexOf(Buffer.from(sample, "utf-8"))).not.toBe(-1);
     expect(fs.readFileSync(report.reportPaths.markdown, "utf-8")).toContain(sample);
     expect(fs.readFileSync(report.reportPaths.eventsJsonl, "utf-8")).toContain(sample);
+  });
+});
+
+describe("process environment omission semantics", () => {
+  it("omits a lower-case Windows secret when its configured name is upper-case", () => {
+    const source = { webhook_secret: "secret", UNRELATED_VALUE: "kept" };
+    const result = omitEnvironmentVariables(source, ["WEBHOOK_SECRET"], { caseInsensitive: true });
+
+    expect(result).toEqual({ UNRELATED_VALUE: "kept" });
+    expect(source).toEqual({ webhook_secret: "secret", UNRELATED_VALUE: "kept" });
+  });
+
+  it("omits every Windows casing when the configured secret name is lower-case", () => {
+    const source = {
+      WEBHOOK_SECRET: "upper-secret",
+      WebHook_Secret: "mixed-secret",
+      webhook_secret: "lower-secret",
+      CODEX_MIMO_CALLBACK_TOKEN: "callback-token"
+    };
+    const base = { webhook_secret: "base-secret", BASE_VALUE: "kept" };
+    const beforeProcessEnv = { ...process.env };
+    const result = withUtf8ProcessEnv(source, {
+      base,
+      omit: ["webhook_secret"],
+      platform: "win32"
+    });
+
+    expect(Object.keys(result).filter((key) => key.toLowerCase() === "webhook_secret")).toEqual([]);
+    expect(result.CODEX_MIMO_CALLBACK_TOKEN).toBe("callback-token");
+    expect(result).toMatchObject({ PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" });
+    expect(source).toEqual({
+      WEBHOOK_SECRET: "upper-secret",
+      WebHook_Secret: "mixed-secret",
+      webhook_secret: "lower-secret",
+      CODEX_MIMO_CALLBACK_TOKEN: "callback-token"
+    });
+    expect(base).toEqual({ webhook_secret: "base-secret", BASE_VALUE: "kept" });
+    expect(process.env).toEqual(beforeProcessEnv);
+  });
+
+  it("keeps POSIX environment omission case-sensitive", () => {
+    const result = withUtf8ProcessEnv(
+      { WEBHOOK_SECRET: "keep-upper", webhook_secret: "remove-lower" },
+      { base: {}, omit: ["webhook_secret"], platform: "linux" }
+    );
+
+    expect(result.WEBHOOK_SECRET).toBe("keep-upper");
+    expect(result.webhook_secret).toBeUndefined();
   });
 });
