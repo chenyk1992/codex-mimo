@@ -6,6 +6,7 @@ import * as transitionApi from "../../../src/core/job-transition.js";
 import { readJobSignals } from "../../../src/core/job-signals.js";
 import {
   createJobStore,
+  listJobs,
   readJob,
   resolveJobPaths,
   resolveJobStateFile,
@@ -191,6 +192,56 @@ describe("job transitions", () => {
         .toMatchObject({ jobId, signalCursor: 1 });
     }
   );
+
+  it("temporarily retains a finalized intent at saturated default retention capacity", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-transition-retention-"));
+    tempDirs.push(cwd);
+    const store = createJobStore(cwd);
+    const transitioning = store.create({
+      kind: "implement",
+      task: "finish with notification",
+      request: { cwd, task: "finish with notification", allowWrite: true },
+      notificationTarget: { type: "codex", threadId: "thread-retention" }
+    });
+    for (let index = 0; index < 100; index += 1) {
+      store.create({
+        kind: "plan",
+        task: `active ${index}`,
+        request: { cwd, task: `active ${index}` }
+      });
+    }
+    await transitionJob(cwd, transitioning.id, {
+      status: "running",
+      phase: "starting",
+      summary: "starting"
+    });
+
+    await expect(transitionJob(cwd, transitioning.id, {
+      status: "completed",
+      summary: "done"
+    }, {
+      afterJobFinalized: () => { throw new Error("simulated worker crash"); }
+    })).rejects.toThrow("simulated worker crash");
+
+    expect(readJob(cwd, transitioning.id)).toMatchObject({
+      status: "completed",
+      pendingTransition: { stage: "finalized" }
+    });
+    expect(readDeliveries(transitioning.notificationOutboxFile)).toEqual([]);
+    expect(listJobs(cwd)).toHaveLength(101);
+
+    const recovered = await recoverPendingTransition(cwd, transitioning.id);
+
+    expect(recovered).toMatchObject({
+      deliveryCreated: true,
+      job: { status: "completed" }
+    });
+    expect(recovered?.job).not.toHaveProperty("pendingTransition");
+    expect(readDeliveries(transitioning.notificationOutboxFile)).toHaveLength(1);
+    expect(readJob(cwd, transitioning.id)).toBeUndefined();
+    expect(listJobs(cwd)).toHaveLength(100);
+    expect(listJobs(cwd).every((job) => job.status === "queued")).toBe(true);
+  });
 
   it("publishes delivery only after the finalized job status is visible", async () => {
     const { cwd, jobId } = seedJob("running", true);

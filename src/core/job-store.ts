@@ -653,13 +653,13 @@ function pruneState(cwd: string, state: JobState, maxJobs: number): JobState {
   const records = state.jobs
     .map((jobId) => readJobFile(cwd, jobId, { skipMalformed: true }))
     .filter((job): job is JobRecord => job !== undefined);
-  const terminal = records.filter((job) => !isActiveJobStatus(job.status));
-  const activeCount = records.length - terminal.length;
-  const terminalSlots = Math.max(0, maxJobs - activeCount);
-  const terminalIds = new Set(terminal.slice(0, terminalSlots).map((job) => job.id));
-  const kept = records.filter((job) => isActiveJobStatus(job.status) || terminalIds.has(job.id));
+  const prunable = records.filter((job) => !isRetentionProtectedJob(job));
+  const protectedCount = records.length - prunable.length;
+  const prunableSlots = Math.max(0, maxJobs - protectedCount);
+  const prunableIds = new Set(prunable.slice(0, prunableSlots).map((job) => job.id));
+  const kept = records.filter((job) => isRetentionProtectedJob(job) || prunableIds.has(job.id));
 
-  for (const job of terminal.slice(terminalSlots)) {
+  for (const job of prunable.slice(prunableSlots)) {
     const paths = resolveJobPaths(cwd, job.id);
     fs.rmSync(paths.jobFile, { force: true });
     fs.rmSync(paths.logFile, { force: true });
@@ -667,6 +667,10 @@ function pruneState(cwd: string, state: JobState, maxJobs: number): JobState {
     fs.rmSync(paths.signalsFile, { force: true });
   }
   return { jobs: kept.map((job) => job.id) };
+}
+
+function isRetentionProtectedJob(job: JobRecord): boolean {
+  return isActiveJobStatus(job.status) || job.pendingTransition !== undefined;
 }
 
 function rebuildState(cwd: string): JobState {
