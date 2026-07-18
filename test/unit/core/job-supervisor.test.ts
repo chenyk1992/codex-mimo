@@ -2,9 +2,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveJobDir } from "../../../src/core/job-store.js";
+import {
+  createJobStore,
+  readJob,
+  resolveJobDir
+} from "../../../src/core/job-store.js";
+import { readJobSignals } from "../../../src/core/job-signals.js";
+import { transitionJob } from "../../../src/core/job-transition.js";
+import { runJobWorker } from "../../../src/core/job-worker.js";
 import type { JobRecord } from "../../../src/core/jobs.js";
 import { withProcessLock } from "../../../src/core/process-lock.js";
+import { readDeliveries } from "../../../src/notify/outbox.js";
 import type { NotificationDelivery } from "../../../src/notify/types.js";
 import { runJobSupervisor } from "../../../src/core/job-supervisor.js";
 
@@ -105,6 +113,64 @@ describe("job supervisor", () => {
     });
 
     expect(spawnNotificationWorker.mock.calls).toEqual([[cwd], [cwd]]);
+  });
+
+  it("recovers a terminal job paused before delivery enqueue through the existing job worker", async () => {
+    const cwd = workspace();
+    const stored = createJobStore(cwd).create({
+      kind: "implement",
+      task: "work",
+      request: { cwd, task: "work", allowWrite: true },
+      notificationTarget: { type: "codex", threadId: "thread-recovery" }
+    });
+    await transitionJob(cwd, stored.id, {
+      status: "running",
+      phase: "starting",
+      summary: "starting"
+    });
+    await expect(transitionJob(cwd, stored.id, {
+      status: "completed",
+      summary: "done"
+    }, {
+      afterJobFinalized: () => { throw new Error("simulated worker crash"); }
+    })).rejects.toThrow("simulated worker crash");
+    expect(readJob(cwd, stored.id)).toMatchObject({
+      status: "completed",
+      pendingTransition: { stage: "finalized" }
+    });
+    expect(readDeliveries(stored.notificationOutboxFile)).toEqual([]);
+
+    let recovery: Promise<void> | undefined;
+    let workerRunning = false;
+    const runMimoStreaming = vi.fn();
+    const spawnNotificationWorker = vi.fn(() => 701);
+    const spawnJobWorker = vi.fn((workerCwd: string, jobId: string) => {
+      workerRunning = true;
+      recovery = runJobWorker(workerCwd, jobId, {
+        runMimoStreaming,
+        spawnNotificationWorker
+      }).finally(() => { workerRunning = false; });
+      return 700;
+    });
+
+    await runJobSupervisor(cwd, {
+      readNotificationDeliveries: () => [],
+      spawnJobWorker,
+      processIsRunning: () => workerRunning,
+      sleep: async () => { await recovery; }
+    });
+    await recovery;
+
+    expect(spawnJobWorker).toHaveBeenCalledOnce();
+    expect(spawnJobWorker).toHaveBeenCalledWith(cwd, stored.id);
+    expect(runMimoStreaming).not.toHaveBeenCalled();
+    expect(readJob(cwd, stored.id)).toMatchObject({ status: "completed" });
+    expect(readJob(cwd, stored.id)).not.toHaveProperty("pendingTransition");
+    expect(readJobSignals(stored.signalsFile).signals.filter(
+      (signal) => signal.kind === "completed"
+    )).toHaveLength(1);
+    expect(readDeliveries(stored.notificationOutboxFile)).toHaveLength(1);
+    expect(spawnNotificationWorker).toHaveBeenCalledOnce();
   });
 
   it("allows only one supervisor for the same physical workspace", async () => {

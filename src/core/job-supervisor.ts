@@ -59,7 +59,7 @@ function hasUnfinishedWork(
   dependencies: JobSupervisorDependencies
 ): boolean {
   const readJobs = dependencies.listJobs ?? listJobs;
-  if (readJobs(cwd).some(isExecutionActive)) return true;
+  if (readJobs(cwd).some(isSupervisedJob)) return true;
   const readDeliveries = dependencies.readNotificationDeliveries ?? readNotificationDeliveries;
   return readDeliveries(cwd).some(isDeliveryUnfinished);
 }
@@ -79,12 +79,12 @@ async function runOwnedSupervisor(
   let notificationWorker: number | undefined;
 
   while (true) {
-    const activeJobs = readJobs(cwd).filter(isExecutionActive);
-    const activeIds = new Set(activeJobs.map((job) => job.id));
+    const supervisedJobs = readJobs(cwd).filter(isSupervisedJob);
+    const supervisedIds = new Set(supervisedJobs.map((job) => job.id));
     for (const jobId of jobWorkers.keys()) {
-      if (!activeIds.has(jobId)) jobWorkers.delete(jobId);
+      if (!supervisedIds.has(jobId)) jobWorkers.delete(jobId);
     }
-    for (const job of activeJobs) {
+    for (const job of supervisedJobs) {
       const pid = jobWorkers.get(job.id);
       if (pid !== undefined && isRunning(pid)) continue;
       const replacement = trySpawn(() => startJobWorker(cwd, job.id));
@@ -98,13 +98,13 @@ async function runOwnedSupervisor(
       notificationWorker = trySpawn(() => startNotificationWorker(cwd));
     }
 
-    if (activeJobs.length === 0 && unfinishedDeliveries.length === 0) return;
+    if (supervisedJobs.length === 0 && unfinishedDeliveries.length === 0) return;
     await sleep(pollIntervalMs);
   }
 }
 
-function isExecutionActive(job: JobRecord): boolean {
-  return isActiveJobStatus(job.status);
+function isSupervisedJob(job: JobRecord): boolean {
+  return isActiveJobStatus(job.status) || job.pendingTransition !== undefined;
 }
 
 function isDeliveryUnfinished(delivery: { status: string }): boolean {
