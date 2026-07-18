@@ -17,6 +17,7 @@ import type {
   JobStatus,
   JobTransitionFields
 } from "../../../src/core/jobs.js";
+import { dispatchNextDelivery } from "../../../src/notify/dispatcher.js";
 import { claimDueDelivery, readDeliveries } from "../../../src/notify/outbox.js";
 
 const { appendJobProgress, recoverPendingTransition, requestJobCancellation, transitionJob } = transitionApi;
@@ -193,7 +194,7 @@ describe("job transitions", () => {
     }
   );
 
-  it("temporarily retains a finalized intent at saturated default retention capacity", async () => {
+  it("retains finalized notification context through delivery at saturated default retention capacity", async () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-transition-retention-"));
     tempDirs.push(cwd);
     const store = createJobStore(cwd);
@@ -203,7 +204,12 @@ describe("job transitions", () => {
       request: { cwd, task: "finish with notification", allowWrite: true },
       notificationTarget: { type: "codex", threadId: "thread-retention" }
     });
-    for (let index = 0; index < 100; index += 1) {
+    const retentionTrigger = store.create({
+      kind: "plan",
+      task: "active 0",
+      request: { cwd, task: "active 0" }
+    });
+    for (let index = 1; index < 100; index += 1) {
       store.create({
         kind: "plan",
         task: `active ${index}`,
@@ -237,7 +243,36 @@ describe("job transitions", () => {
       job: { status: "completed" }
     });
     expect(recovered?.job).not.toHaveProperty("pendingTransition");
-    expect(readDeliveries(transitioning.notificationOutboxFile)).toHaveLength(1);
+    expect(readDeliveries(transitioning.notificationOutboxFile)).toEqual([
+      expect.objectContaining({ jobId: transitioning.id, status: "pending" })
+    ]);
+
+    const deliver = vi.fn(async () => {
+      updateJob(cwd, retentionTrigger.id, { summary: "prune while delivery is claimed" });
+      expect(readDeliveries(transitioning.notificationOutboxFile)).toEqual([
+        expect.objectContaining({ jobId: transitioning.id, status: "delivering" })
+      ]);
+      expect(readJob(cwd, transitioning.id)).toMatchObject({ status: "completed" });
+      expect(readJobSignals(transitioning.signalsFile).signals).toEqual(expect.arrayContaining([
+        expect.objectContaining({ jobId: transitioning.id, kind: "completed" })
+      ]));
+      return { outcome: "delivered" as const };
+    });
+    const dispatched = await dispatchNextDelivery(cwd, { deliver });
+
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(dispatched).toMatchObject({
+      outcome: "settled",
+      delivery: { jobId: transitioning.id, status: "delivered" }
+    });
+    expect(readJob(cwd, transitioning.id)).toMatchObject({ status: "completed" });
+    expect(readJobSignals(transitioning.signalsFile).signals).toEqual(expect.arrayContaining([
+      expect.objectContaining({ jobId: transitioning.id, kind: "completed" })
+    ]));
+    expect(listJobs(cwd)).toHaveLength(101);
+
+    updateJob(cwd, retentionTrigger.id, { summary: "prune after delivery settles" });
+
     expect(readJob(cwd, transitioning.id)).toBeUndefined();
     expect(listJobs(cwd)).toHaveLength(100);
     expect(listJobs(cwd).every((job) => job.status === "queued")).toBe(true);

@@ -653,11 +653,18 @@ function pruneState(cwd: string, state: JobState, maxJobs: number): JobState {
   const records = state.jobs
     .map((jobId) => readJobFile(cwd, jobId, { skipMalformed: true }))
     .filter((job): job is JobRecord => job !== undefined);
-  const prunable = records.filter((job) => !isRetentionProtectedJob(job));
+  const unfinishedDeliveryJobIds = new Set(
+    readDeliveries(path.join(resolveJobDir(cwd), "notifications.jsonl"))
+      .filter((delivery) => delivery.status === "pending" || delivery.status === "delivering")
+      .map((delivery) => delivery.jobId)
+  );
+  const prunable = records.filter((job) => !isRetentionProtectedJob(job, unfinishedDeliveryJobIds));
   const protectedCount = records.length - prunable.length;
   const prunableSlots = Math.max(0, maxJobs - protectedCount);
   const prunableIds = new Set(prunable.slice(0, prunableSlots).map((job) => job.id));
-  const kept = records.filter((job) => isRetentionProtectedJob(job) || prunableIds.has(job.id));
+  const kept = records.filter((job) =>
+    isRetentionProtectedJob(job, unfinishedDeliveryJobIds) || prunableIds.has(job.id)
+  );
 
   for (const job of prunable.slice(prunableSlots)) {
     const paths = resolveJobPaths(cwd, job.id);
@@ -669,8 +676,13 @@ function pruneState(cwd: string, state: JobState, maxJobs: number): JobState {
   return { jobs: kept.map((job) => job.id) };
 }
 
-function isRetentionProtectedJob(job: JobRecord): boolean {
-  return isActiveJobStatus(job.status) || job.pendingTransition !== undefined;
+function isRetentionProtectedJob(
+  job: JobRecord,
+  unfinishedDeliveryJobIds: ReadonlySet<string>
+): boolean {
+  return isActiveJobStatus(job.status) ||
+    job.pendingTransition !== undefined ||
+    unfinishedDeliveryJobIds.has(job.id);
 }
 
 function rebuildState(cwd: string): JobState {
