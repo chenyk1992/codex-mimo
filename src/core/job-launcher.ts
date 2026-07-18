@@ -58,13 +58,13 @@ export async function launchJob(
   try {
     const pid = (dependencies.spawnJobSupervisor ?? spawnJobSupervisor)(input.cwd);
     if (!Number.isInteger(pid) || pid <= 0) {
-      throw new Error("Job worker spawn did not return a process ID.");
+      throw new Error("Job supervisor spawn did not return a process ID.");
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const failed = await (dependencies.transitionJob ?? transitionJob)(input.cwd, job.id, {
       status: "failed",
-      summary: `Job worker failed to start: ${message}`,
+      summary: `Job supervisor failed to start: ${message}`,
       error: message,
       errorCode: "worker_spawn_failed"
     });

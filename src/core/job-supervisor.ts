@@ -8,6 +8,7 @@ import {
   spawnJobWorker,
   spawnNotificationWorker
 } from "./job-process.js";
+import { isActiveJobStatus, type JobRecord } from "./jobs.js";
 import {
   ProcessLockUnavailableError,
   resolveProcessLockEndpoint,
@@ -33,21 +34,34 @@ export async function runJobSupervisor(
 ): Promise<void> {
   const ownershipKey = path.join(resolveJobDir(cwd), "supervisor-ownership");
   const endpoint = resolveProcessLockEndpoint(ownershipKey);
-  try {
-    await withProcessLock(
-      ownershipKey,
-      () => runOwnedSupervisor(cwd, dependencies),
-      { timeoutMs: OWNERSHIP_HANDOFF_TIMEOUT_MS }
-    );
-  } catch (error) {
-    if (error instanceof ProcessLockUnavailableError &&
-        error.key === ownershipKey &&
-        error.endpoint.host === endpoint.host &&
-        error.endpoint.port === endpoint.port) {
+  while (true) {
+    try {
+      await withProcessLock(
+        ownershipKey,
+        () => runOwnedSupervisor(cwd, dependencies),
+        { timeoutMs: OWNERSHIP_HANDOFF_TIMEOUT_MS }
+      );
       return;
+    } catch (error) {
+      if (!(error instanceof ProcessLockUnavailableError) ||
+          error.key !== ownershipKey ||
+          error.endpoint.host !== endpoint.host ||
+          error.endpoint.port !== endpoint.port) {
+        throw error;
+      }
+      if (!hasUnfinishedWork(cwd, dependencies)) return;
     }
-    throw error;
   }
+}
+
+function hasUnfinishedWork(
+  cwd: string,
+  dependencies: JobSupervisorDependencies
+): boolean {
+  const readJobs = dependencies.listJobs ?? listJobs;
+  if (readJobs(cwd).some(isExecutionActive)) return true;
+  const readDeliveries = dependencies.readNotificationDeliveries ?? readNotificationDeliveries;
+  return readDeliveries(cwd).some(isDeliveryUnfinished);
 }
 
 async function runOwnedSupervisor(
@@ -65,9 +79,7 @@ async function runOwnedSupervisor(
   let notificationWorker: number | undefined;
 
   while (true) {
-    const activeJobs = readJobs(cwd).filter((job) =>
-      job.status === "queued" || job.status === "running"
-    );
+    const activeJobs = readJobs(cwd).filter(isExecutionActive);
     const activeIds = new Set(activeJobs.map((job) => job.id));
     for (const jobId of jobWorkers.keys()) {
       if (!activeIds.has(jobId)) jobWorkers.delete(jobId);
@@ -80,9 +92,7 @@ async function runOwnedSupervisor(
       else jobWorkers.delete(job.id);
     }
 
-    const unfinishedDeliveries = readDeliveries(cwd).filter((delivery) =>
-      delivery.status === "pending" || delivery.status === "delivering"
-    );
+    const unfinishedDeliveries = readDeliveries(cwd).filter(isDeliveryUnfinished);
     if (unfinishedDeliveries.length > 0 &&
         (notificationWorker === undefined || !isRunning(notificationWorker))) {
       notificationWorker = trySpawn(() => startNotificationWorker(cwd));
@@ -91,6 +101,14 @@ async function runOwnedSupervisor(
     if (activeJobs.length === 0 && unfinishedDeliveries.length === 0) return;
     await sleep(pollIntervalMs);
   }
+}
+
+function isExecutionActive(job: JobRecord): boolean {
+  return isActiveJobStatus(job.status);
+}
+
+function isDeliveryUnfinished(delivery: { status: string }): boolean {
+  return delivery.status === "pending" || delivery.status === "delivering";
 }
 
 function trySpawn(spawn: () => number): number | undefined {

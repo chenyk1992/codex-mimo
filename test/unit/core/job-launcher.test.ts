@@ -89,6 +89,7 @@ describe("launchJob", () => {
       status: "failed",
       pid: null,
       processIdentity: null,
+      summary: "Job supervisor failed to start: spawn denied",
       error: "spawn denied",
       errorCode: "worker_spawn_failed"
     });
@@ -104,7 +105,9 @@ describe("launchJob", () => {
       cwd,
       task: "Review it",
       request: { cwd, base: "HEAD" }
-    }, { env: {}, spawnJobSupervisor: () => 0 })).rejects.toThrow("did not return a process ID");
+    }, { env: {}, spawnJobSupervisor: () => 0 })).rejects.toThrow(
+      "Job supervisor spawn did not return a process ID."
+    );
 
     const jobFile = fs.readdirSync(path.join(cwd, ".codex-mimo", "jobs"))
       .find((file) => /^review-.*\.json$/.test(file))!;

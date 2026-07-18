@@ -2,7 +2,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { resolveJobDir } from "../../../src/core/job-store.js";
 import type { JobRecord } from "../../../src/core/jobs.js";
+import { withProcessLock } from "../../../src/core/process-lock.js";
 import type { NotificationDelivery } from "../../../src/notify/types.js";
 import { runJobSupervisor } from "../../../src/core/job-supervisor.js";
 
@@ -122,18 +124,18 @@ describe("job supervisor", () => {
     });
     await vi.waitFor(() => expect(firstSpawn).toHaveBeenCalledOnce());
 
-    await runJobSupervisor(cwd, {
+    const second = runJobSupervisor(cwd, {
       listJobs: () => [current],
       readNotificationDeliveries: () => [],
       spawnJobWorker: secondSpawn,
       processIsRunning: () => true,
       sleep: async () => undefined
     });
-
+    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(secondSpawn).not.toHaveBeenCalled();
     current = { ...current, status: "completed" };
     release();
-    await first;
+    await Promise.all([first, second]);
   });
 
   it("hands off ownership when a launch arrives during idle shutdown", async () => {
@@ -173,5 +175,44 @@ describe("job supervisor", () => {
     await replacement;
 
     expect(replacementSpawn).toHaveBeenCalledWith(cwd, "implement-2");
+  });
+
+  it("keeps contending for unfinished work after a slow idle-owner release", async () => {
+    const cwd = workspace();
+    const ownershipKey = path.join(resolveJobDir(cwd), "supervisor-ownership");
+    let current: JobRecord[] = [];
+    let finalScan!: () => void;
+    let releaseOwner!: () => void;
+    const scanned = new Promise<void>((resolve) => { finalScan = resolve; });
+    const held = new Promise<void>((resolve) => { releaseOwner = resolve; });
+    const incumbent = withProcessLock(ownershipKey, async () => {
+      expect(current).toEqual([]);
+      finalScan();
+      await held;
+    });
+    await scanned;
+
+    current = [{ ...job(cwd, "queued"), id: "implement-late" }];
+    const spawnJobWorker = vi.fn(() => {
+      current = [];
+      return 501;
+    });
+    const contender = runJobSupervisor(cwd, {
+      listJobs: () => current,
+      readNotificationDeliveries: () => [],
+      spawnJobWorker,
+      processIsRunning: () => true,
+      sleep: async () => undefined
+    });
+    const stateBeforeRelease = await Promise.race([
+      contender.then(() => "settled" as const),
+      new Promise<"waiting">((resolve) => setTimeout(() => resolve("waiting"), 350))
+    ]);
+
+    releaseOwner();
+    await Promise.all([incumbent, contender]);
+
+    expect(stateBeforeRelease).toBe("waiting");
+    expect(spawnJobWorker).toHaveBeenCalledWith(cwd, "implement-late");
   });
 });
