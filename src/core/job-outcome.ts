@@ -66,50 +66,51 @@ const UNACCEPTED_TASK_PATTERNS = [
 const UNACCEPTED_TASK_ERROR = "MiMoCode did not receive or accept the task objective.";
 
 export function classifyRunOutcome(evidence: RunEvidence): JobOutcome {
-  const summary = evidence.finalText.trim();
+  const finalText = evidence.finalText.trim();
   const common = commonOutcomeFields(evidence);
 
   if (evidence.terminationReason === "user_cancelled") {
-    return failureOutcome("cancelled", summary || "Job cancelled by user.", "cancelled", common);
+    return failureOutcome("cancelled", "MiMoCode job was cancelled.", "cancelled", common);
   }
   if (
     evidence.terminationReason === "process_timeout" ||
     (evidence.terminationReason === undefined && evidence.exitCode === 124)
   ) {
-    return failureOutcome("timeout", summary || "Job timed out.", "timeout", common);
+    return failureOutcome("timeout", "MiMoCode job timed out.", "timeout", common);
   }
 
   const callbackCode = callbackFailureCode(evidence.executionCallback);
   if (callbackCode) {
-    const callbackError = evidence.executionCallback?.error
-      ?? (evidence.executionCallback
-        ? `MiMoCode completion callback reported ${evidence.executionCallback.outcome}.`
-        : "MiMoCode completion callback was not received.");
+    const callbackError = callbackCode === "callback_missing"
+      ? "MiMoCode completion callback was not received."
+      : callbackCode === "callback_cancelled"
+        ? "MiMoCode completion callback reported cancellation."
+        : "MiMoCode completion callback reported an error.";
     return {
       status: "failed",
-      summary: summary || callbackError,
+      summary: "MiMoCode completion callback was not accepted.",
       ...common,
       error: callbackError,
       errorCode: callbackCode
     };
   }
 
-  const semanticFailure = detectUnacceptedTask(summary);
+  const semanticFailure = detectUnacceptedTask(finalText);
   if (semanticFailure) {
     return failureOutcome("failed", semanticFailure, "semantic_failure", common, semanticFailure);
   }
 
-  if (matchesExplicitOutput(summary, NEEDS_INPUT_PATTERNS)) {
-    return { status: "needs_input", summary, ...common };
+  if (matchesExplicitOutput(finalText, NEEDS_INPUT_PATTERNS)) {
+    return { status: "needs_input", summary: "MiMoCode needs additional input.", ...common };
   }
-  if (matchesExplicitOutput(summary, BLOCKED_PATTERNS)) {
-    return { status: "blocked", summary, ...common };
+  if (matchesExplicitOutput(finalText, BLOCKED_PATTERNS)) {
+    return { status: "blocked", summary: "MiMoCode is blocked by an external condition.", ...common };
   }
 
   if (evidence.verification.some((result) => !result.passed)) {
     return failureOutcome(
       "failed",
-      summary || "Verification failed.",
+      "MiMoCode verification failed.",
       "verification_failed",
       common,
       "One or more verification commands failed."
@@ -119,12 +120,12 @@ export function classifyRunOutcome(evidence: RunEvidence): JobOutcome {
     const error = evidence.terminationReason === "host_abort"
       ? "MiMoCode run was aborted by the host."
       : `MiMoCode exited with code ${evidence.exitCode}.`;
-    return failureOutcome("failed", summary || error, "mimo_exit_nonzero", common, error);
+    return failureOutcome("failed", "MiMoCode execution failed.", "mimo_exit_nonzero", common, error);
   }
 
   return {
     status: "completed",
-    summary: summary || "Job completed.",
+    summary: "MiMoCode completed the job.",
     ...common
   };
 }
@@ -151,7 +152,25 @@ function commonOutcomeFields(evidence: RunEvidence): Pick<
       ? { sessionId: evidence.executionCallback.sessionId }
       : {}),
     verification: evidence.verification,
-    ...(evidence.executionCallback ? { executionCallback: evidence.executionCallback } : {})
+    ...(evidence.executionCallback
+      ? { executionCallback: toPublicExecutionCallback(evidence.executionCallback) }
+      : {})
+  };
+}
+
+function toPublicExecutionCallback(callback: ExecutionCallbackSummary): ExecutionCallbackSummary {
+  return {
+    invocationId: callback.invocationId,
+    outcome: callback.outcome,
+    ...(callback.sessionId !== undefined ? { sessionId: callback.sessionId } : {}),
+    ...(callback.receivedAt !== undefined ? { receivedAt: callback.receivedAt } : {}),
+    ...(callback.outcome === "missing"
+      ? { error: "MiMoCode completion callback was not received." }
+      : callback.outcome === "error"
+        ? { error: "MiMoCode completion callback reported an error." }
+        : callback.outcome === "cancelled"
+          ? { error: "MiMoCode completion callback reported cancellation." }
+          : {})
   };
 }
 

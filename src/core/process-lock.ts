@@ -63,6 +63,22 @@ export async function withProcessLock<T>(
   }
 }
 
+export async function isProcessLockHeld(key: string): Promise<boolean> {
+  const endpoint = resolveProcessLockEndpoint(key);
+  try {
+    await withProcessLock(key, () => undefined, { timeoutMs: 0 });
+    return false;
+  } catch (error) {
+    if (error instanceof ProcessLockUnavailableError &&
+        error.key === key &&
+        error.endpoint.host === endpoint.host &&
+        error.endpoint.port === endpoint.port) {
+      return true;
+    }
+    throw error;
+  }
+}
+
 function canonicalizeLockKey(key: string): string {
   let ancestor = path.resolve(key);
   const remaining: string[] = [];

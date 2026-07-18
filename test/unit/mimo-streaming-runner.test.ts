@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { runMimoCliStreaming, terminateProcessTree } from "../../src/mimo/streaming-runner.js";
@@ -19,6 +22,49 @@ function makeChild(pid: number, killFn?: () => boolean) {
 }
 
 describe("streaming MiMo CLI runner", () => {
+  (process.platform === "win32" ? it : it.skip)(
+    "preserves Windows command arguments without executing shell metacharacters",
+    async () => {
+      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-argv-"));
+      const marker = path.join(cwd, "shell-injection-marker.txt");
+      const captured = path.join(cwd, "captured-args.json");
+      const probe = path.join(cwd, "capture-args.mjs");
+      const command = path.join(cwd, "mimo-probe.cmd");
+      fs.writeFileSync(probe, [
+        'import fs from "node:fs";',
+        'fs.writeFileSync(process.env.ARG_CAPTURE_FILE, JSON.stringify(process.argv.slice(2)), "utf8");'
+      ].join("\n"), "utf8");
+      fs.writeFileSync(
+        command,
+        `@echo off\r\n"${process.execPath}" "${probe}" %*\r\n`,
+        "utf8"
+      );
+      const args = [
+        `task & echo SHELL_INJECTION_PROBE>"${marker}"`,
+        "pipe|value",
+        "input<value",
+        "output>value",
+        "caret^value",
+        "percent%PATH%value",
+        path.join(cwd, "file & | < > ^ %.txt")
+      ];
+
+      try {
+        await runMimoCliStreaming(cwd, args, {
+          env: {
+            CODEX_MIMO_COMMAND: command,
+            ARG_CAPTURE_FILE: captured
+          }
+        });
+
+        expect(fs.existsSync(marker)).toBe(false);
+        expect(JSON.parse(fs.readFileSync(captured, "utf8"))).toEqual(args);
+      } finally {
+        fs.rmSync(cwd, { recursive: true, force: true });
+      }
+    }
+  );
+
   it("streams JSONL events and returns captured stdout", async () => {
     const seen: string[] = [];
     const result = await runMimoCliStreaming("E:/project/app", ["run"], {
@@ -156,8 +202,8 @@ describe("streaming MiMo CLI runner", () => {
     });
   });
 
-  it("does not select a differently-cased protected Windows ComSpec as the shell", async () => {
-    let selection: { command: string; shell: boolean | string } | undefined;
+  it("does not select a differently-cased protected Windows ComSpec for MiMo", async () => {
+    let selection: { command: string } | undefined;
 
     await runMimoCliStreaming("E:/project/app", ["run"], {
       env: { cOmSpEc: "windows-shell-secret" },
@@ -172,7 +218,7 @@ describe("streaming MiMo CLI runner", () => {
       }
     } as Parameters<typeof runMimoCliStreaming>[2] & { platform: NodeJS.Platform });
 
-    expect(selection).toEqual({ command: "mimo", shell: "cmd.exe" });
+    expect(selection).toEqual({ command: "mimo" });
   });
 
   it("awaits asynchronous onStart before completing", async () => {

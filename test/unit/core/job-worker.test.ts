@@ -324,15 +324,19 @@ describe("runJobWorker", () => {
       errorCode: "worker_restarted",
       pid: null
     });
-    expect(terminateOwnedProcess).toHaveBeenCalledTimes(1);
-    expect(terminateOwnedProcess).toHaveBeenCalledWith(pid, pid === null ? null : `start-${pid}`);
+    if (pid === null) {
+      expect(terminateOwnedProcess).not.toHaveBeenCalled();
+    } else {
+      expect(terminateOwnedProcess).toHaveBeenCalledTimes(1);
+      expect(terminateOwnedProcess).toHaveBeenCalledWith(pid, `start-${pid}`);
+    }
     expect(deps.runMimoStreaming).not.toHaveBeenCalled();
     expect(readJobSignals(stored.signalsFile).signals.filter((signal) => signal.kind === "failed")).toHaveLength(1);
     expect(readDeliveries(stored.notificationOutboxFile)).toHaveLength(1);
     expect(deps.spawnNotificationWorker).toHaveBeenCalledTimes(2);
   });
 
-  it("blocks stale recovery when process termination cannot be confirmed", async () => {
+  it("keeps stale recovery running when process termination cannot be confirmed", async () => {
     const cwd = tempWorkspace();
     const job = seedJob(cwd, "implement", true);
     await transitionJob(cwd, job.id, {
@@ -352,12 +356,45 @@ describe("runJobWorker", () => {
     await runJobWorker(cwd, job.id, deps);
 
     expect(readJob(cwd, job.id)).toMatchObject({
-      status: "blocked",
-      errorCode: "worker_recovery_unconfirmed",
-      error: expect.stringContaining("access denied"),
-      pid: null
+      status: "running",
+      pid: 808,
+      processIdentity: "start-808"
     });
+    expect(readJobSignals(job.signalsFile).signals.filter((signal) => signal.kind === "blocked"))
+      .toHaveLength(0);
+    expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(0);
     expect(deps.runMimoStreaming).not.toHaveBeenCalled();
+  });
+
+  it("keeps a timed-out run owned until failed termination can be confirmed", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "Implement it",
+      request: { cwd, task: "Implement it", allowWrite: true, timeoutMs: 1 }
+    });
+    const terminationFailure = new Error("Windows process termination could not be confirmed");
+    const deps = workerDeps({
+      runMimoStreaming: async (_cwd, _args, options) => {
+        await options.onStart?.(911);
+        throw terminationFailure;
+      },
+      terminateOwnedProcess: vi.fn(() => ({
+        status: "unconfirmed",
+        evidence: "PID 911 remains alive"
+      }))
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "running",
+      pid: 911,
+      processIdentity: "start-321"
+    });
+    expect(readJobSignals(job.signalsFile).signals.filter((signal) =>
+      ["failed", "timeout", "blocked"].includes(signal.kind)
+    )).toHaveLength(0);
   });
 
   it.each([null, 808])(
@@ -591,6 +628,10 @@ describe("runJobWorker", () => {
     const failure = new Error("taskkill failed; tree still live");
     const deps = workerDeps({
       statusPollMs: 5,
+      terminateOwnedProcess: vi.fn(() => ({
+        status: "unconfirmed" as const,
+        evidence: "tree remains live"
+      })),
       runMimoStreaming: async (_cwd, _args, options) => {
         await options.onStart?.(910);
         started();
@@ -1167,7 +1208,7 @@ describe("runJobWorker", () => {
     }
   );
 
-  it("keeps callback final text transient through finalization", async () => {
+  it("does not put callback final text into finalization context", async () => {
     const cwd = tempWorkspace();
     const job = seedJob(cwd, "implement");
     const bound = definition({ summary: "done" });
@@ -1178,14 +1219,16 @@ describe("runJobWorker", () => {
       createHookCallbackController: async () => hook(callback)
     }));
 
-    expect(vi.mocked(bound.finalize).mock.calls[0][0]).toMatchObject({
-      callbackFinalText: "TRANSIENT_CALLBACK_ONLY",
+    const finalizeContext = vi.mocked(bound.finalize).mock.calls[0][0];
+    expect(finalizeContext).toMatchObject({
       executionCallback: {
         invocationId: "inv-worker",
         outcome: "completed"
       }
     });
-    expect(vi.mocked(bound.finalize).mock.calls[0][0].executionCallback).not.toHaveProperty("finalText");
+    expect(finalizeContext).not.toHaveProperty("callbackFinalText");
+    expect(finalizeContext.executionCallback).not.toHaveProperty("finalText");
+    expect(JSON.stringify(finalizeContext)).not.toContain("TRANSIENT_CALLBACK_ONLY");
     expect(fs.readFileSync(path.join(cwd, ".codex-mimo", "jobs", `${job.id}.json`), "utf8"))
       .not.toContain("TRANSIENT_CALLBACK_ONLY");
   });

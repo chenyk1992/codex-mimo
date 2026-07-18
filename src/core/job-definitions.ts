@@ -24,6 +24,7 @@ import {
   buildComposePrompt,
   COMPOSE_WORKFLOW_NAMES,
   getComposeWorkflow,
+  validateComposeWorkflowInput,
   type ComposeWorkflowName
 } from "../compose/workflow.js";
 import { extractFinalText, type NormalizedMimoEvent } from "../compose/events.js";
@@ -91,12 +92,8 @@ const ComposeRequestSchema = CommonRequestSchema.extend({
   verification: z.array(z.string().min(1)).optional(),
   reportDir: z.string().min(1).optional()
 }).superRefine((request, context) => {
-  const workflow = getComposeWorkflow(request.workflow);
-  if (workflow.requiresTask && !request.task?.trim()) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: `Workflow ${request.workflow} requires a task.` });
-  }
-  if (workflow.requiresFile && !request.file?.trim()) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: `Workflow ${request.workflow} requires --file.` });
+  for (const message of validateComposeWorkflowInput(request)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message });
   }
 });
 
@@ -132,7 +129,6 @@ export interface JobExecutionFinalizeContext {
   run: StreamingRunResult;
   events: NormalizedMimoEvent[];
   executionCallback?: ExecutionCallbackSummary;
-  callbackFinalText?: string;
   gitStatusBefore?: GitStatusSnapshot;
   gitStatusAfter?: GitStatusSnapshot;
   gitHeadBefore?: GitHeadSnapshot;
@@ -518,7 +514,7 @@ function hasReadOnlyViolation(context: JobExecutionFinalizeContext, changedFiles
 }
 
 function finalTextFrom(context: JobExecutionFinalizeContext): string {
-  return context.callbackFinalText?.trim() || extractFinalText(context.events);
+  return extractFinalText(context.events);
 }
 
 function emptyDiff(): GitDiffSnapshot {

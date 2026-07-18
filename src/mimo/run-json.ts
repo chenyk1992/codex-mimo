@@ -3,7 +3,6 @@ import { listWebhookSecretEnvironmentNames } from "../core/job-store.js";
 
 export interface MimoProcessSelection {
   command: string;
-  shell: false | string;
 }
 
 export function resolveMimoCommand(
@@ -20,10 +19,7 @@ export function resolveMimoProcessSelection(
   platform: NodeJS.Platform = process.platform
 ): MimoProcessSelection {
   return {
-    command: resolveMimoCommand(env, platform),
-    shell: platform === "win32"
-      ? readEnvironmentValue(env, "ComSpec", platform) || "cmd.exe"
-      : false
+    command: resolveMimoCommand(env, platform)
   };
 }
 

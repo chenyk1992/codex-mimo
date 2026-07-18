@@ -11,12 +11,22 @@ import {
 import { isActiveJobStatus, type JobRecord } from "./jobs.js";
 import {
   ProcessLockUnavailableError,
+  isProcessLockHeld,
   resolveProcessLockEndpoint,
   withProcessLock
 } from "./process-lock.js";
+import { transitionJob } from "./job-transition.js";
+import { runJobWorker } from "./job-worker.js";
+import { runNotificationWorker } from "../notify/worker.js";
+import { startNotificationDispatch } from "../notify/dispatch-process.js";
+import {
+  resolveJobWorkerOwnershipKey,
+  resolveNotificationWorkerOwnershipKey
+} from "./worker-ownership.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 100;
 const OWNERSHIP_HANDOFF_TIMEOUT_MS = 250;
+const DEFAULT_MAX_WORKER_START_FAILURES = 3;
 
 export interface JobSupervisorDependencies {
   listJobs?: typeof listJobs;
@@ -24,8 +34,13 @@ export interface JobSupervisorDependencies {
   spawnJobWorker?: typeof spawnJobWorker;
   spawnNotificationWorker?: typeof spawnNotificationWorker;
   processIsRunning?: (pid: number) => boolean;
+  workerOwnershipIsHeld?: typeof isProcessLockHeld;
+  transitionJob?: typeof transitionJob;
+  runJobWorker?: typeof runJobWorker;
+  runNotificationWorker?: typeof runNotificationWorker;
   sleep?: (delayMs: number) => Promise<void>;
   pollIntervalMs?: number;
+  maxWorkerStartFailures?: number;
 }
 
 export async function runJobSupervisor(
@@ -73,10 +88,17 @@ async function runOwnedSupervisor(
   const startJobWorker = dependencies.spawnJobWorker ?? spawnJobWorker;
   const startNotificationWorker = dependencies.spawnNotificationWorker ?? spawnNotificationWorker;
   const isRunning = dependencies.processIsRunning ?? processIsRunning;
+  const ownershipIsHeld = dependencies.workerOwnershipIsHeld ?? isProcessLockHeld;
   const sleep = dependencies.sleep ?? defaultSleep;
   const pollIntervalMs = dependencies.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const maxStartFailures = positiveIntegerOr(
+    dependencies.maxWorkerStartFailures,
+    DEFAULT_MAX_WORKER_START_FAILURES
+  );
   const jobWorkers = new Map<string, number>();
+  const jobStartFailures = new Map<string, number>();
   let notificationWorker: number | undefined;
+  let notificationStartFailures = 0;
 
   while (true) {
     const supervisedJobs = readJobs(cwd).filter(isSupervisedJob);
@@ -85,21 +107,74 @@ async function runOwnedSupervisor(
       if (!supervisedIds.has(jobId)) jobWorkers.delete(jobId);
     }
     for (const job of supervisedJobs) {
+      if (await ownershipIsHeld(resolveJobWorkerOwnershipKey(cwd, job.id))) {
+        jobWorkers.delete(job.id);
+        jobStartFailures.delete(job.id);
+        continue;
+      }
       const pid = jobWorkers.get(job.id);
       if (pid !== undefined && isRunning(pid)) continue;
+      if (pid !== undefined) {
+        jobWorkers.delete(job.id);
+        jobStartFailures.set(job.id, (jobStartFailures.get(job.id) ?? 0) + 1);
+      }
       const replacement = trySpawn(() => startJobWorker(cwd, job.id));
-      if (replacement !== undefined) jobWorkers.set(job.id, replacement);
-      else jobWorkers.delete(job.id);
+      if (replacement !== undefined) {
+        jobWorkers.set(job.id, replacement);
+        continue;
+      }
+      const failures = (jobStartFailures.get(job.id) ?? 0) + 1;
+      jobStartFailures.set(job.id, failures);
+      if (failures >= maxStartFailures) {
+        await settleJobWorkerStartFailure(cwd, job, dependencies);
+        jobStartFailures.delete(job.id);
+      }
     }
 
     const unfinishedDeliveries = readDeliveries(cwd).filter(isDeliveryUnfinished);
-    if (unfinishedDeliveries.length > 0 &&
-        (notificationWorker === undefined || !isRunning(notificationWorker))) {
-      notificationWorker = trySpawn(() => startNotificationWorker(cwd));
+    if (unfinishedDeliveries.length > 0) {
+      if (await ownershipIsHeld(resolveNotificationWorkerOwnershipKey(cwd))) {
+        notificationWorker = undefined;
+        notificationStartFailures = 0;
+      } else if (notificationWorker === undefined || !isRunning(notificationWorker)) {
+        if (notificationWorker !== undefined) notificationStartFailures += 1;
+        notificationWorker = trySpawn(() => startNotificationWorker(cwd));
+        if (notificationWorker === undefined) notificationStartFailures += 1;
+        if (notificationStartFailures >= maxStartFailures) {
+          await (dependencies.runNotificationWorker ?? runNotificationWorker)(cwd);
+          notificationStartFailures = 0;
+        }
+      }
+    } else {
+      notificationWorker = undefined;
+      notificationStartFailures = 0;
     }
 
     if (supervisedJobs.length === 0 && unfinishedDeliveries.length === 0) return;
     await sleep(pollIntervalMs);
+  }
+}
+
+async function settleJobWorkerStartFailure(
+  cwd: string,
+  job: JobRecord,
+  dependencies: JobSupervisorDependencies
+): Promise<void> {
+  if (job.status !== "queued") {
+    await (dependencies.runJobWorker ?? runJobWorker)(cwd, job.id);
+    return;
+  }
+  const message = "Job worker could not start after bounded retries.";
+  const result = await (dependencies.transitionJob ?? transitionJob)(cwd, job.id, {
+    status: "failed",
+    summary: message,
+    error: message,
+    errorCode: "worker_spawn_failed"
+  });
+  if (result.deliveryCreated) {
+    startNotificationDispatch(cwd, {
+      spawnNotificationWorker: dependencies.spawnNotificationWorker
+    });
   }
 }
 
@@ -135,4 +210,8 @@ function isErrorWithCode(error: unknown, code: string): boolean {
 
 function defaultSleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+function positiveIntegerOr(value: number | undefined, fallback: number): number {
+  return Number.isInteger(value) && (value as number) > 0 ? value as number : fallback;
 }

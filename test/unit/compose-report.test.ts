@@ -2,7 +2,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseMimoJsonLines } from "../../src/compose/events.js";
 import {
   createComposeReport,
   renderMarkdownReport,
@@ -10,33 +9,37 @@ import {
 } from "../../src/compose/report.js";
 
 describe("compose report", () => {
-  it("extracts structured plan text from normalized events", () => {
-    const plan = "# Implementation Plan\n\n## Task 1: Setup\n\n- [ ] Create files\n- [ ] Run tests";
-    const report = createReport([
-      "Analyzing codebase...",
-      plan
-    ]);
+  it("persists only structural event summaries, never arbitrary MiMo text or raw payloads", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-report-events-"));
+    const secret = "PROMPT_ECHO_REPORT_SECRET";
+    try {
+      const report = createComposeReport({
+        id: "safe-report",
+        createdAt: "2026-07-18T00:00:00.000Z",
+        workflow: "dev",
+        cwd: root,
+        requestedSkills: ["compose:execute"],
+        status: "passed",
+        events: [
+          { type: "message", text: secret, raw: { text: secret } },
+          { type: "error", text: secret, raw: { error: secret } },
+          { type: "tool", toolName: "bash", text: `echo ${secret}`, raw: { command: secret } }
+        ],
+        diff: { changedFiles: [], diffStat: "", diff: "" },
+        verification: [],
+        reportDir: path.join(root, "reports"),
+        eventsDir: path.join(root, "events"),
+        diffsDir: path.join(root, "diffs")
+      });
+      writeComposeReport(report);
 
-    expect(report.planText).toBe(plan);
-    expect(report.reviewText).toContain("Analyzing codebase...");
-    expect(report.reviewText).toContain("Implementation Plan");
-  });
-
-  it("leaves plan text absent for ordinary result messages", () => {
-    const report = createReport(["Found the bug in line 42"]);
-
-    expect(report.planText).toBeUndefined();
-    expect(report.reviewText).toBe("Found the bug in line 42");
-  });
-
-  it("excludes Compose startup chatter from structured plan text", () => {
-    const report = createReport([
-      "I'm using the compose:plan skill to create an implementation plan for your task.",
-      "# Implementation Plan\n\n## Task 1: Setup\n\n- [ ] Create files"
-    ]);
-
-    expect(report.planText).toContain("Implementation Plan");
-    expect(report.planText).not.toContain("compose:plan skill");
+      expect(JSON.stringify(report)).not.toContain(secret);
+      expect(fs.readFileSync(report.reportPaths.json, "utf8")).not.toContain(secret);
+      expect(fs.readFileSync(report.reportPaths.markdown, "utf8")).not.toContain(secret);
+      expect(fs.readFileSync(report.reportPaths.eventsJsonl, "utf8")).not.toContain(secret);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("omits task and prompt arguments from persisted JSON and Markdown reports", () => {
@@ -272,20 +275,3 @@ describe("compose report", () => {
     expect(markdown).toContain("No session.post callback was received");
   });
 });
-
-function createReport(messages: string[]) {
-  return createComposeReport({
-    id: "plan-report",
-    createdAt: "2026-06-23T00:00:00.000Z",
-    workflow: "plan",
-    cwd: "E:/project/app",
-    requestedSkills: ["compose:plan"],
-    status: "passed",
-    events: parseMimoJsonLines(messages.map((text) => JSON.stringify({ type: "message", text })).join("\n")),
-    diff: { changedFiles: [], diffStat: "", diff: "" },
-    verification: [],
-    reportDir: "E:/project/app/.codex-mimo/reports",
-    eventsDir: "E:/project/app/.codex-mimo/events",
-    diffsDir: "E:/project/app/.codex-mimo/diffs"
-  });
-}

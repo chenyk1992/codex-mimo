@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { extractPlanText, extractReviewText, type NormalizedMimoEvent } from "./events.js";
+import type { NormalizedMimoEvent } from "./events.js";
 import type { ComposeWorkflowName } from "./workflow.js";
 import type { VerificationResult } from "./verify.js";
 import type { GitDiffSnapshot, GitHeadSnapshot, GitStatusSnapshot } from "../git/diff.js";
@@ -14,7 +14,7 @@ export interface ComposeReport {
   cwd: string;
   requestedSkills: string[];
   status: "passed" | "failed" | "needs_review" | "timeout";
-  events: NormalizedMimoEvent[];
+  events: ComposeReportEvent[];
   changedFiles: string[];
   diffStat: string;
   diffPath?: string;
@@ -27,8 +27,6 @@ export interface ComposeReport {
   gitHeadAfter?: GitHeadSnapshot;
   gitCommits?: string[];
   verification: VerificationResult[];
-  reviewText?: string;
-  planText?: string;
   error?: string;
   reportPaths: {
     json: string;
@@ -75,7 +73,7 @@ export function createComposeReport(input: CreateComposeReportInput): ComposeRep
     cwd: input.cwd,
     requestedSkills: input.requestedSkills,
     status: input.status,
-    events: input.events,
+    events: input.events.map(toComposeReportEvent),
     changedFiles: input.diff.changedFiles,
     diffStat: input.diff.diffStat,
     diffPath,
@@ -88,8 +86,6 @@ export function createComposeReport(input: CreateComposeReportInput): ComposeRep
     gitHeadAfter: input.gitHeadAfter,
     gitCommits: input.gitCommits,
     verification: input.verification,
-    reviewText: extractReviewText(input.events),
-    planText: extractPlanText(input.events),
     error: input.error,
     reportPaths: {
       json: path.join(input.reportDir, `${input.id}.json`),
@@ -97,6 +93,12 @@ export function createComposeReport(input: CreateComposeReportInput): ComposeRep
       eventsJsonl: path.join(input.eventsDir, `${input.id}.jsonl`)
     }
   };
+}
+
+export interface ComposeReportEvent {
+  type: NormalizedMimoEvent["type"];
+  progressKind?: NormalizedMimoEvent["progressKind"];
+  usage?: NormalizedMimoEvent["usage"];
 }
 
 export function renderMarkdownReport(report: ComposeReport): string {
@@ -203,6 +205,20 @@ export function renderMarkdownReport(report: ComposeReport): string {
     ""
   );
 
+  const eventCounts = countReportEvents(report.events);
+  lines.push(
+    "## Event Summary",
+    "",
+    `Messages: ${eventCounts.message}`,
+    `Tools: ${eventCounts.tool}`,
+    `Diffs: ${eventCounts.diff}`,
+    `Errors: ${eventCounts.error}`,
+    `Progress: ${eventCounts.progress}`,
+    `Usage: ${eventCounts.usage}`,
+    `Raw: ${eventCounts.raw}`,
+    ""
+  );
+
   if (report.diffPath) {
     lines.push(
       "## Full Diff",
@@ -216,21 +232,8 @@ export function renderMarkdownReport(report: ComposeReport): string {
     "## Verification",
     "",
     verificationLines.join("\n"),
-    "",
-    "## Review",
-    "",
-    report.reviewText || "No review text was captured.",
     ""
   );
-
-  if (report.planText) {
-    lines.push(
-      "## Plan",
-      "",
-      report.planText,
-      ""
-    );
-  }
 
   if (report.terminationReason) {
     lines.push(
@@ -262,6 +265,30 @@ export function renderMarkdownReport(report: ComposeReport): string {
   );
 
   return lines.join("\n");
+}
+
+function toComposeReportEvent(event: NormalizedMimoEvent): ComposeReportEvent {
+  return {
+    type: event.type,
+    ...(event.progressKind ? { progressKind: event.progressKind } : {}),
+    ...(event.usage ? { usage: { ...event.usage } } : {})
+  };
+}
+
+function countReportEvents(
+  events: readonly ComposeReportEvent[]
+): Record<ComposeReportEvent["type"], number> {
+  const counts: Record<ComposeReportEvent["type"], number> = {
+    message: 0,
+    tool: 0,
+    diff: 0,
+    usage: 0,
+    error: 0,
+    progress: 0,
+    raw: 0
+  };
+  for (const event of events) counts[event.type] += 1;
+  return counts;
 }
 
 function formatGitHead(head?: GitHeadSnapshot): string {

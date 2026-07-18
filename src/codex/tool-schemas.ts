@@ -1,5 +1,8 @@
 import { z } from "zod";
-import { COMPOSE_WORKFLOW_NAMES } from "../compose/workflow.js";
+import {
+  COMPOSE_WORKFLOW_NAMES,
+  validateComposeWorkflowInput
+} from "../compose/workflow.js";
 
 const CodexNotifySchema = z.object({
   type: z.literal("codex"),
@@ -50,14 +53,27 @@ export const HealthcheckInput = z.object({
 
 export const ComposeWorkflowSchema = z.enum(COMPOSE_WORKFLOW_NAMES);
 
-export const ComposeInput = JobOptionsSchema.extend({
+export const ComposeInputShape = {
+  ...JobOptionsSchema.shape,
   workflow: ComposeWorkflowSchema,
   task: z.string().min(1).optional(),
   file: z.string().min(1).optional(),
   since: z.string().min(1).optional(),
   verification: z.array(z.string().min(1)).optional(),
   reportDir: z.string().min(1).optional()
-}).strict();
+};
+
+export const ComposeInput = z.object(ComposeInputShape).strict();
+
+const ComposeInputWithWorkflowRequirements = ComposeInput.superRefine((input, context) => {
+  for (const message of validateComposeWorkflowInput(input)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message });
+  }
+});
+
+export function parseComposeInput(input: unknown): z.infer<typeof ComposeInput> {
+  return ComposeInputWithWorkflowRequirements.parse(input);
+}
 
 export const JobStatusInput = z.object({
   cwd: z.string(),

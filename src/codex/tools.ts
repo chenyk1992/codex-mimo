@@ -1,6 +1,5 @@
 import { execa } from "execa";
 import {
-  ComposeInput,
   FixCiInput,
   HealthcheckInput,
   ImplementInput,
@@ -11,6 +10,7 @@ import {
   JobStatusInput,
   JobWaitInput,
   PlanInput,
+  parseComposeInput,
   ResumeInput,
   ReviewInput
 } from "./tool-schemas.js";
@@ -51,8 +51,7 @@ export async function mimoHealthcheck(input: unknown) {
     const selection = resolveMimoProcessSelection(env);
     const result = await execa(selection.command, ["--version"], {
       cwd,
-      env,
-      shell: selection.shell
+      env
     });
     return { ok: true, version: result.stdout.trim(), cwd };
   } catch {
@@ -97,7 +96,7 @@ export async function mimoFixCi(input: unknown, deps: LaunchJobDependencies = {}
 }
 
 export async function mimoCompose(input: unknown, deps: LaunchJobDependencies = {}) {
-  const parsed = ComposeInput.parse(input);
+  const parsed = parseComposeInput(input);
   const { notify, ...request } = parsed;
   return launchJob({
     kind: "compose",

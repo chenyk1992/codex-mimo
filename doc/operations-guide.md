@@ -86,7 +86,7 @@ Call `mimo_resume` with a `needs_input` or `blocked` parent `jobId` and the addi
 
 Authoritative records live at `.codex-mimo/jobs/<jobId>.json`; `state.json` is only a cache and is rebuilt from records. Writes use temporary files plus rename. Pending transition metadata allows an interrupted signal/job/outbox sequence to finish without duplicating the attention event.
 
-The workspace supervisor holds a physical-workspace process lock, replaces crashed workers while queued/running jobs or unfinished deliveries remain, and stops when no work remains. If a job worker restarts while a record says `running`, it verifies the PID and OS process identity. A confirmed inactive or terminated process becomes `failed` with restart evidence. Uncertain ownership becomes `blocked`; the worker does not kill or rerun an unverified process.
+The workspace supervisor holds a physical-workspace process lock, adopts existing job/notification worker ownership after handoff, replaces crashed workers while queued/running jobs or unfinished deliveries remain, and stops when no work remains. Worker startup retries are bounded; a permanently unstartable queued job is failed through the normal transition/signal/notification path. If a job worker restarts while a record says `running`, it verifies the PID and OS process identity. A confirmed inactive or terminated process becomes `failed` (or `timeout` after an expired deadline) with recovery evidence. Uncertain termination leaves the job `running` with PID and identity intact so a later replacement worker can retry confirmation safely; it does not emit a false terminal result.
 
 The notification worker scans unfinished outbox entries. It reclaims expired `delivering` leases, preserves attempt generation ownership, and deduplicates each delivery by event ID.
 
@@ -99,6 +99,7 @@ The notification worker scans unfinished outbox entries. It reclaims expired `de
   jobs/<jobId>.events.jsonl
   jobs/<jobId>.signals.jsonl
   jobs/notifications.jsonl
+  callbacks/<invocationId>.json
   reports/
   events/
   diffs/
@@ -106,14 +107,14 @@ The notification worker scans unfinished outbox entries. It reclaims expired `de
   runtime-hooks/
 ```
 
-The internal callback endpoint is temporary and authenticated. Missing, error, or cancelled `session.post` evidence affects execution success; it is separate from caller delivery.
+The internal callback endpoint is temporary and authenticated. Callback files contain only invocation/event/time/session/outcome fields; final text, raw metadata, unknown fields, and callback error strings are never persisted there. Missing, error, or cancelled `session.post` evidence affects execution success; it is separate from caller delivery.
 
 ## Troubleshooting
 
 | Symptom | Action |
 | --- | --- |
 | Work remains `queued` | Inspect the job log and worker spawn permissions; stale queued records become failed |
-| Restarted work is `blocked` | Read recovery evidence; process ownership could not be proved safely |
+| Restarted work remains `running` | Process exit or termination is not yet confirmed; keep the supervisor active and resolve OS permission/probe failures |
 | Job completed but notification failed | Inspect `notification.lastError`; job result remains valid |
 | Webhook gets duplicates | Deduplicate by `X-Codex-Mimo-Event-Id` |
 | Webhook signature mismatch | Compute HMAC over the exact raw body and verify the named environment secret |

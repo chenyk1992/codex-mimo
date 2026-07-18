@@ -154,7 +154,6 @@ async function defaultCheckMimoVersion(cwd: string): Promise<DoctorCheck> {
     const result = await execa(selection.command, ["--version"], {
       cwd,
       env,
-      shell: selection.shell,
       reject: false
     });
     if (result.exitCode !== 0) {

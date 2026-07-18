@@ -12,31 +12,16 @@ export interface MimoHookCallbackPayload {
   invocationId: string;
   event: MimoHookEventName;
   timestamp: string;
-  sessionID?: string;
-  agentID?: string;
-  task_id?: string;
-  outcome?: MimoHookOutcome;
-  error?: string;
-  finalText?: string;
-  assistantMessageID?: string;
-  metadata?: {
-    trajectoryLength?: number;
-    [key: string]: unknown;
-  };
+  sessionID: string;
+  outcome: MimoHookOutcome;
 }
 
 export interface MimoHookCallbackSummary {
   invocationId: string;
   event: MimoHookEventName;
   receivedAt: string;
-  sessionId?: string;
-  agentId?: string;
-  taskId?: string;
-  outcome?: MimoHookOutcome;
-  error?: string;
-  finalText?: string;
-  assistantMessageId?: string;
-  trajectoryLength?: number;
+  sessionId: string;
+  outcome: MimoHookOutcome;
 }
 
 export interface HookConfigPaths {
@@ -62,7 +47,6 @@ export interface HookCallbackControllerDeps {
 
 export interface ExecutionCallbackEvidence {
   executionCallback: ExecutionCallbackSummary;
-  callbackFinalText?: string;
 }
 
 export function createInvocationId(
@@ -80,13 +64,7 @@ export function buildCallbackSummary(payload: MimoHookCallbackPayload): MimoHook
     event: payload.event,
     receivedAt: payload.timestamp,
     sessionId: payload.sessionID,
-    agentId: payload.agentID,
-    taskId: payload.task_id,
-    outcome: payload.outcome,
-    error: payload.error,
-    finalText: payload.finalText,
-    assistantMessageId: payload.assistantMessageID,
-    trajectoryLength: payload.metadata?.trajectoryLength
+    outcome: payload.outcome
   };
 }
 
@@ -106,12 +84,15 @@ export function toExecutionCallbackEvidence(
   return {
     executionCallback: {
       invocationId: callback.invocationId,
-      outcome: callback.outcome ?? "error",
-      sessionId: callback.sessionId ?? null,
+      outcome: callback.outcome,
+      sessionId: callback.sessionId,
       receivedAt: callback.receivedAt,
-      ...(callback.error ? { error: callback.error } : {})
-    },
-    ...(callback.finalText ? { callbackFinalText: callback.finalText } : {})
+      ...(callback.outcome === "error"
+        ? { error: "MiMoCode completion callback reported an error." }
+        : callback.outcome === "cancelled"
+          ? { error: "MiMoCode completion callback reported cancellation." }
+          : {})
+    }
   };
 }
 
@@ -154,15 +135,7 @@ export default async function codexMimoCallbackPlugin() {
       event: "session.post",
       timestamp: new Date().toISOString(),
       sessionID: pick(input, "sessionID", "sessionId"),
-      agentID: pick(input, "agentID", "agentId"),
-      task_id: pick(input, "task_id", "taskId"),
-      outcome: input.outcome,
-      error: input.error,
-      finalText: input.finalText,
-      assistantMessageID: pick(input, "assistantMessageID", "assistantMessageId"),
-      metadata: {
-        trajectoryLength: Array.isArray(input.trajectory) ? input.trajectory.length : input.metadata?.trajectoryLength
-      }
+      outcome: input.outcome
     };
 
     await fetch(endpoint, {
@@ -257,9 +230,11 @@ export async function createHookCallbackController(input: {
 
         if (!settled) {
           const summary = buildCallbackSummary(payload);
-          const persistedPayload = { ...payload };
-          delete persistedPayload.finalText;
-          fs.writeFileSync(callbackFile, JSON.stringify(persistedPayload, null, 2), "utf-8");
+          fs.writeFileSync(
+            callbackFile,
+            JSON.stringify(summary, null, 2),
+            "utf-8"
+          );
           settled = true;
           clearCallbackTimer();
           resolveCallback(summary);

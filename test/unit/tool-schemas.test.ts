@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   ComposeInput,
+  ComposeInputShape,
   FixCiInput,
   ImplementInput,
   JobOptionsSchema,
   NotifySchema,
   PlanInput,
+  parseComposeInput,
   ResumeInput,
   JobWaitInput,
   ReviewInput
@@ -51,9 +53,21 @@ describe("work tool schemas", () => {
     expect(Object.keys(ReviewInput.shape).sort()).toEqual(["base", "cwd", "model", "notify", "timeoutMs"]);
     expect(Object.keys(FixCiInput.shape).sort()).toEqual(["cwd", "file", "model", "notify", "task", "timeoutMs"]);
     expect(Object.keys(ResumeInput.shape).sort()).toEqual(["cwd", "jobId", "model", "notify", "task", "timeoutMs"]);
-    expect(Object.keys(ComposeInput.shape).sort()).toEqual([
+    expect(Object.keys(ComposeInputShape).sort()).toEqual([
       "cwd", "file", "model", "notify", "reportDir", "since", "task", "timeoutMs", "verification", "workflow"
     ]);
+  });
+
+  it("enforces workflow requirements at the public parser while keeping an MCP object schema", () => {
+    expect(ComposeInput.shape).toEqual(ComposeInputShape);
+    expect(() => parseComposeInput({ cwd: "E:/project", workflow: "dev" }))
+      .toThrow(/requires a task/i);
+    expect(() => parseComposeInput({ cwd: "E:/project", workflow: "fix-ci" }))
+      .toThrow(/requires.*file/i);
+    expect(() => parseComposeInput({ cwd: "E:/project", workflow: "execute-plan", task: "run" }))
+      .toThrow(/requires.*file/i);
+    expect(parseComposeInput({ cwd: "E:/project", workflow: "review" }))
+      .toMatchObject({ workflow: "review" });
   });
 
   it("keeps the wait polling interval private", () => {

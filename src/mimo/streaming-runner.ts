@@ -1,5 +1,6 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { execa } from "execa";
 import readline from "node:readline";
 import type { Readable } from "node:stream";
 import { withUtf8ProcessEnv } from "../core/encoding.js";
@@ -56,13 +57,13 @@ function defaultSpawn(
   env: NodeJS.ProcessEnv,
   selection: MimoProcessSelection
 ): StreamingChildProcess {
-  return spawn(selection.command, args, {
+  return execa(selection.command, args, {
     cwd,
     detached: process.platform !== "win32",
     env,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
-    shell: selection.shell
+    reject: false
   });
 }
 

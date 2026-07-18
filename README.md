@@ -137,16 +137,18 @@ Runtime state is below `.codex-mimo/`:
 - `jobs/<jobId>.events.jsonl`: normalized raw MiMoCode events
 - `jobs/<jobId>.signals.jsonl`: cursor-addressed signals
 - `jobs/notifications.jsonl`: durable notification outbox
-- `reports/`, `events/`, `diffs/`: Compose artifacts
+- `callbacks/`: allowlisted internal callback receipts without final text, raw metadata, or callback error strings
+- `reports/`, `events/`, `diffs/`: Compose structural event summaries, verification, and Git artifacts
+- `inputs/`, `runtime-hooks/`: UTF-8 prompt transport and generated internal callback plugins
 
-The per-job JSON file is authoritative; `jobs/state.json` is a rebuildable cache. Each launch starts one workspace-scoped internal supervisor, which replaces crashed job or notification workers while execution or delivery remains unfinished and exits when the workspace is idle. A restarted job worker never blindly reruns an unknown process. It verifies process ownership, terminates only a confirmed owned process, then records a recoverable failure or blocked state. Pending transitions and outbox delivery identity remain stable across restart.
+The per-job JSON file is authoritative; `jobs/state.json` is a rebuildable cache. Each launch starts one workspace-scoped internal supervisor, which adopts an existing physical worker owner or replaces a crashed worker while execution or delivery remains unfinished, and exits when the workspace is idle. Worker startup retries are bounded. A restarted job worker never blindly reruns an unknown process: it verifies process ownership and keeps the job `running` with its PID/identity intact while termination remains unconfirmed. Only confirmed exit, identity mismatch, or confirmed termination permits a terminal transition. Pending transitions and outbox delivery identity remain stable across restart.
 
 ## Safety
 
-- Workspace reads/writes remain subject to the conservative policy layer.
-- Secret files and private keys are denied.
-- Destructive commands are denied by default.
-- Read-only jobs are checked against Git status, diff, and HEAD changes.
+- The active CLI/MCP path relies on explicit write authorization, MiMoCode invocation settings, authenticated internal callbacks, secret-environment isolation, and post-run Git checks.
+- Read-only jobs are checked against Git status, diff, untracked-file fingerprints, and HEAD changes.
+- Webhook secret values are removed from the MiMoCode child environment and are not written to job, signal, report, callback, audit, or notification payload files.
+- `src/core/policy.ts` is a reusable conservative policy engine with unit coverage, but it is not wired into the active MiMoCode process path. See [Policy guide](doc/policy-guide.md).
 - Large or non-ASCII prompts use UTF-8 attachment transport below `.codex-mimo/inputs/`.
 
 ## Development

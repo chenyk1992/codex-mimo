@@ -9,6 +9,18 @@ const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })));
 
 describe("mimo_compose", () => {
+  it("rejects missing workflow-required input without creating a job", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mimo-compose-"));
+    dirs.push(cwd);
+    const spawnJobSupervisor = vi.fn();
+
+    await expect(mimoCompose({ cwd, workflow: "dev" }, { env: {}, spawnJobSupervisor }))
+      .rejects.toThrow(/requires a task/i);
+
+    expect(spawnJobSupervisor).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(cwd, ".codex-mimo"))).toBe(false);
+  });
+
   it("stores the Compose request and returns only a queued receipt", async () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mimo-compose-"));
     dirs.push(cwd);

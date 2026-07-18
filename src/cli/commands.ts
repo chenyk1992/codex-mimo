@@ -18,6 +18,7 @@ import { runJobSupervisor as defaultRunJobSupervisor } from "../core/job-supervi
 import { formatZodError, InputValidationError } from "../core/input-validation.js";
 import { runNotificationWorker as defaultRunNotificationWorker } from "../notify/worker.js";
 import type { NotificationInput } from "../notify/types.js";
+import { parseComposeInput } from "../codex/tool-schemas.js";
 import { ZodError } from "zod";
 import {
   formatDoctorReport as defaultFormatDoctorReport,
@@ -171,7 +172,7 @@ async function runWork(
   const reportDir = parsed.takeValue("--report-dir");
   const task = parsed.takeOptionalTask();
   parsed.assertConsumed();
-  return (dependencies.mimoCompose ?? defaultMimoCompose)({
+  const input = parseComposeInput({
     ...common,
     workflow,
     ...(task ? { task } : {}),
@@ -180,6 +181,7 @@ async function runWork(
     ...(verification.length > 0 ? { verification } : {}),
     ...(reportDir ? { reportDir } : {})
   });
+  return (dependencies.mimoCompose ?? defaultMimoCompose)(input);
 }
 
 async function runControl(

@@ -23,7 +23,7 @@ describe("Windows UTF-8 encoding regressions", () => {
     expect(prompt).toContain("PYTHONIOENCODING=utf-8");
   });
 
-  it("preserves UTF-8 text through prompt files, MiMo JSONL, and Markdown reports", () => {
+  it("preserves UTF-8 prompt files without persisting MiMo message text in reports", () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-utf8-"));
     const prompt = `Objective: ${sample}`;
     const transported = preparePromptTransport(prompt, { cwd, forceFile: true });
@@ -51,10 +51,9 @@ describe("Windows UTF-8 encoding regressions", () => {
 
     writeComposeReport(report);
 
-    expect(report.reviewText).toBe(sample);
-    expect(fs.readFileSync(report.reportPaths.markdown).indexOf(Buffer.from(sample, "utf-8"))).not.toBe(-1);
-    expect(fs.readFileSync(report.reportPaths.markdown, "utf-8")).toContain(sample);
-    expect(fs.readFileSync(report.reportPaths.eventsJsonl, "utf-8")).toContain(sample);
+    expect(fs.readFileSync(report.reportPaths.markdown, "utf-8")).not.toContain(sample);
+    expect(fs.readFileSync(report.reportPaths.eventsJsonl, "utf-8")).not.toContain(sample);
+    expect(fs.readFileSync(report.reportPaths.eventsJsonl, "utf-8")).toContain('"type":"message"');
   });
 });
 

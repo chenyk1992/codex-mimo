@@ -27,7 +27,7 @@ Work tools:
 - `mimo_review`: review the current diff. Required: `cwd`; optional `base` defaults to `HEAD`.
 - `mimo_fix_ci`: repair failures from a log. Required: `cwd`, `file`; optional `task`.
 - `mimo_resume`: create a child job from a `needs_input` or `blocked` parent. Required: `cwd`, parent `jobId`, `task`.
-- `mimo_compose`: run a registered workflow. Required: `cwd`, `workflow`; optional `task`, `file`, `since`, `verification`, `reportDir`.
+- `mimo_compose`: run a registered workflow. Required for every request: `cwd`, `workflow`. `brainstorm`, `plan`, `dev`, `fix`, `parallel`, `worktree`, `merge`, and `new-skill` also require `task`; `fix-ci` and `execute-plan` require `file`; `review` requires neither. `fix-ci` may additionally include `task`. Optional fields where valid are `since`, `verification`, and `reportDir`.
 
 All work tools accept optional `model`, `timeoutMs`, and one notification target:
 

@@ -12,6 +12,10 @@ import { transitionJob } from "../../../src/core/job-transition.js";
 import { runJobWorker } from "../../../src/core/job-worker.js";
 import type { JobRecord } from "../../../src/core/jobs.js";
 import { withProcessLock } from "../../../src/core/process-lock.js";
+import {
+  resolveJobWorkerOwnershipKey,
+  resolveNotificationWorkerOwnershipKey
+} from "../../../src/core/worker-ownership.js";
 import { readDeliveries } from "../../../src/notify/outbox.js";
 import type { NotificationDelivery } from "../../../src/notify/types.js";
 import { runJobSupervisor } from "../../../src/core/job-supervisor.js";
@@ -280,5 +284,106 @@ describe("job supervisor", () => {
 
     expect(stateBeforeRelease).toBe("waiting");
     expect(spawnJobWorker).toHaveBeenCalledWith(cwd, "implement-late");
+  });
+
+  it("adopts a live job worker after supervisor handoff instead of spawning duplicates", async () => {
+    const cwd = workspace();
+    const stored = createJobStore(cwd).create({
+      kind: "implement",
+      task: "work",
+      request: { cwd, task: "work", allowWrite: true }
+    });
+    const ownershipKey = resolveJobWorkerOwnershipKey(cwd, stored.id);
+    let current: JobRecord[] = [readJob(cwd, stored.id)!];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const owner = withProcessLock(ownershipKey, async () => held);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const spawnJobWorker = vi.fn(() => 901);
+
+    await runJobSupervisor(cwd, {
+      listJobs: () => current,
+      readNotificationDeliveries: () => [],
+      spawnJobWorker,
+      sleep: async () => {
+        current = [];
+        release();
+      }
+    });
+    await owner;
+
+    expect(spawnJobWorker).not.toHaveBeenCalled();
+  });
+
+  it("adopts a live notification worker after supervisor handoff instead of spawning duplicates", async () => {
+    const cwd = workspace();
+    let unfinished: NotificationDelivery[] = [delivery()];
+    let release!: () => void;
+    let ownerStarted!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { ownerStarted = resolve; });
+    const owner = withProcessLock(resolveNotificationWorkerOwnershipKey(cwd), async () => {
+      ownerStarted();
+      await held;
+    });
+    await started;
+    const spawnNotificationWorker = vi.fn(() => 902);
+
+    await runJobSupervisor(cwd, {
+      listJobs: () => [],
+      readNotificationDeliveries: () => unfinished,
+      spawnNotificationWorker,
+      sleep: async () => {
+        unfinished = [];
+        release();
+      }
+    });
+    await owner;
+
+    expect(spawnNotificationWorker).not.toHaveBeenCalled();
+  });
+
+  it("settles a queued job after bounded permanent worker spawn failures", async () => {
+    const cwd = workspace();
+    const stored = createJobStore(cwd).create({
+      kind: "implement",
+      task: "work",
+      request: { cwd, task: "work", allowWrite: true }
+    });
+    const spawnJobWorker = vi.fn(() => { throw new Error("spawn denied"); });
+
+    await runJobSupervisor(cwd, {
+      spawnJobWorker,
+      readNotificationDeliveries: () => [],
+      sleep: async () => undefined,
+      maxWorkerStartFailures: 2
+    });
+
+    expect(spawnJobWorker).toHaveBeenCalledTimes(2);
+    expect(readJob(cwd, stored.id)).toMatchObject({
+      status: "failed",
+      errorCode: "worker_spawn_failed"
+    });
+    expect(readJobSignals(stored.signalsFile).signals.at(-1)?.kind).toBe("failed");
+  });
+
+  it("uses the in-process notification worker after bounded permanent spawn failures", async () => {
+    const cwd = workspace();
+    let unfinished: NotificationDelivery[] = [delivery()];
+    const spawnNotificationWorker = vi.fn(() => { throw new Error("spawn denied"); });
+    const runNotificationWorker = vi.fn(async () => { unfinished = []; });
+
+    await runJobSupervisor(cwd, {
+      listJobs: () => [],
+      readNotificationDeliveries: () => unfinished,
+      spawnNotificationWorker,
+      runNotificationWorker,
+      sleep: async () => undefined,
+      maxWorkerStartFailures: 2
+    });
+
+    expect(spawnNotificationWorker).toHaveBeenCalledTimes(2);
+    expect(runNotificationWorker).toHaveBeenCalledOnce();
+    expect(runNotificationWorker).toHaveBeenCalledWith(cwd);
   });
 });

@@ -66,7 +66,7 @@ Compose finalization writes:
 - `.codex-mimo/events/<jobId>.jsonl`
 - `.codex-mimo/diffs/<jobId>.diff` when a diff exists
 
-Reports include the workflow, requested skills, sanitized MiMoCode arguments, event summary, Git before/after evidence, changed files, verification, callback outcome, and errors. Notification payloads contain only a compact result summary and report paths; they do not contain raw events, complete prompts, or full diffs.
+Reports include the workflow, requested skills, structural event counts, Git before/after evidence, changed files, verification, allowlisted callback outcome, and sanitized errors. Report event entries omit message/error text, tool arguments, and raw payloads. Notification payloads contain only a bounded status summary and report paths; they do not contain raw events, final text, complete prompts, or full diffs.
 
 ## Read-Only Enforcement
 

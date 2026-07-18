@@ -148,13 +148,7 @@ describeSmoke("local MiMoCode hook payload shape", () => {
         callbackReceived: callback !== null,
         callbackKeys: callback ? Object.keys(callback) : null,
         callbackOutcome: callback?.outcome,
-        callbackError: callback?.error,
-        callbackSessionId: callback?.sessionId,
-        callbackAgentId: callback?.agentId,
-        callbackTaskId: callback?.taskId,
-        callbackAssistantMessageId: callback?.assistantMessageId,
-        callbackTrajectoryLength: callback?.trajectoryLength,
-        callbackFinalTextSample: callback?.finalText?.slice(0, 200) ?? null
+        callbackSessionId: callback?.sessionId
       };
       fs.writeFileSync(path.join(root, "runtime-report.json"), JSON.stringify(report, null, 2), "utf-8");
       // eslint-disable-next-line no-console
@@ -163,7 +157,9 @@ describeSmoke("local MiMoCode hook payload shape", () => {
       expect(result.exitCode).toBe(0);
       expect(callback).toBeTruthy();
       expect(callback?.sessionId).toBeTruthy();
-      expect(typeof callback?.finalText).toBe("string");
+      expect(Object.keys(callback ?? {}).sort()).toEqual([
+        "event", "invocationId", "outcome", "receivedAt", "sessionId"
+      ]);
     } finally {
       await hook.close();
     }

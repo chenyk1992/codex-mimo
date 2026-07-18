@@ -158,10 +158,24 @@ describe("run outcome classification", () => {
     const verification = [{ command: "npm test", exitCode: 0, passed: true }];
     expect(classifyRunOutcome(evidence({ verification }))).toEqual({
       status: "completed",
-      summary: "Implementation complete.",
+      summary: "MiMoCode completed the job.",
       sessionId: "ses-1",
       verification,
       executionCallback: completedCallback
     });
+  });
+
+  it.each([
+    ["completed", "Implementation complete.\n" + "PROMPT_ECHO_SECRET ".repeat(200)],
+    ["needs_input", "Please provide PROMPT_ECHO_SECRET before continuing."],
+    ["blocked", "Blocked: PROMPT_ECHO_SECRET external service unavailable."]
+  ] as const)("never exposes arbitrary final text in a %s public outcome", (status, finalText) => {
+    const outcome = classifyRunOutcome(evidence({ finalText }));
+
+    expect(outcome.status).toBe(status);
+    expect(outcome.summary).not.toContain("PROMPT_ECHO_SECRET");
+    expect(outcome.summary).not.toMatch(/[\r\n]/);
+    expect(outcome.summary.length).toBeLessThanOrEqual(160);
+    expect(JSON.stringify(outcome)).not.toContain("PROMPT_ECHO_SECRET");
   });
 });

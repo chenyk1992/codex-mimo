@@ -53,13 +53,7 @@ describe("hook callback payload helpers", () => {
       event: "session.post",
       timestamp: "2026-06-26T00:00:00.000Z",
       sessionID: "session-1",
-      agentID: "agent-1",
-      task_id: "task-1",
-      outcome: "completed",
-      error: "failed",
-      finalText: "Implementation complete",
-      assistantMessageID: "message-1",
-      metadata: { trajectoryLength: 12 }
+      outcome: "completed"
     });
 
     expect(summary).toEqual({
@@ -67,25 +61,20 @@ describe("hook callback payload helpers", () => {
       event: "session.post",
       receivedAt: "2026-06-26T00:00:00.000Z",
       sessionId: "session-1",
-      agentId: "agent-1",
-      taskId: "task-1",
-      outcome: "completed",
-      error: "failed",
-      finalText: "Implementation complete",
-      assistantMessageId: "message-1",
-      trajectoryLength: 12
+      outcome: "completed"
     });
   });
 
-  it("separates transient callback text from stored execution callback metadata", () => {
-    const evidence = toExecutionCallbackEvidence("fallback-invocation", {
+  it("does not retain callback final text in execution evidence", () => {
+    const callback = {
       invocationId: "hook-invocation",
       event: "session.post",
       receivedAt: "2026-07-16T00:00:00.000Z",
       sessionId: "ses-1",
       outcome: "completed",
       finalText: "Completed from callback with private-token."
-    });
+    } as const;
+    const evidence = toExecutionCallbackEvidence("fallback-invocation", callback);
 
     expect(evidence).toEqual({
       executionCallback: {
@@ -93,10 +82,9 @@ describe("hook callback payload helpers", () => {
         receivedAt: "2026-07-16T00:00:00.000Z",
         sessionId: "ses-1",
         outcome: "completed"
-      },
-      callbackFinalText: "Completed from callback with private-token."
+      }
     });
-    expect(JSON.stringify(evidence.executionCallback)).not.toContain("private-token");
+    expect(JSON.stringify(evidence)).not.toContain("private-token");
   });
 
   it("records a missing execution callback without changing wire identifiers", () => {
@@ -129,7 +117,7 @@ describe("hook callback payload helpers", () => {
     expect(source).toContain("return {");
     expect(source).toContain("\"session.post\"");
     expect(source).toContain(CALLBACK_HEADER);
-    expect(source).toContain("Array.isArray(input.trajectory)");
+    expect(source).not.toMatch(/finalText|trajectory|input\.error/);
     expect(source).not.toContain("export default {");
   });
 });
@@ -210,8 +198,7 @@ describe("hook callback controller", () => {
 
       await expect(controller.waitForCallback()).resolves.toMatchObject({
         sessionId: "ses_good",
-        outcome: "completed",
-        finalText: "done"
+        outcome: "completed"
       });
     } finally {
       await controller.close();
@@ -264,8 +251,7 @@ describe("hook callback controller", () => {
 
       await expect(controller.waitForCallback()).resolves.toMatchObject({
         sessionId: "ses_late_wait",
-        outcome: "completed",
-        finalText: "arrived before wait"
+        outcome: "completed"
       });
     } finally {
       await controller.close();
@@ -311,15 +297,14 @@ describe("hook callback controller", () => {
       expect(valid.status).toBe(200);
 
       await expect(controller.waitForCallback()).resolves.toMatchObject({
-        sessionId: "ses_valid",
-        finalText: "valid"
+        sessionId: "ses_valid"
       });
     } finally {
       await controller.close();
     }
   });
 
-  it("persists the accepted callback payload for debugging", async () => {
+  it("persists only the accepted callback allowlist", async () => {
     const cwd = tempWorkspace();
     const controller = await createHookCallbackController({
       cwd,
@@ -339,16 +324,27 @@ describe("hook callback controller", () => {
           timestamp: "2026-06-27T01:00:00.000Z",
           sessionID: "ses_persist",
           outcome: "cancelled",
-          error: "blocked",
-          finalText: "transient-private-token"
+          error: "private-error-token",
+          finalText: "transient-private-token",
+          unknownRoot: "private-root-token",
+          metadata: {
+            trajectoryLength: 7,
+            secret: "private-metadata-token"
+          }
         })
       });
 
       await controller.waitForCallback();
       expect(fs.existsSync(controller.callbackFile)).toBe(true);
       const persisted = fs.readFileSync(controller.callbackFile, "utf-8");
-      expect(persisted).toContain("ses_persist");
-      expect(persisted).not.toContain("transient-private-token");
+      expect(JSON.parse(persisted)).toEqual({
+        invocationId: controller.invocationId,
+        event: "session.post",
+        receivedAt: "2026-06-27T01:00:00.000Z",
+        sessionId: "ses_persist",
+        outcome: "cancelled"
+      });
+      expect(persisted).not.toMatch(/private-(?:error|root|metadata)-token|transient-private-token/);
     } finally {
       await controller.close();
     }

@@ -3,6 +3,12 @@ import {
   dispatchNextDelivery,
   readNotificationDeliveries
 } from "./dispatcher.js";
+import {
+  ProcessLockUnavailableError,
+  resolveProcessLockEndpoint,
+  withProcessLock
+} from "../core/process-lock.js";
+import { resolveNotificationWorkerOwnershipKey } from "../core/worker-ownership.js";
 
 const CONCURRENT_WORKER_RETRY_MS = 1;
 
@@ -13,6 +19,29 @@ export interface NotificationWorkerDependencies extends DispatcherDependencies {
 export async function runNotificationWorker(
   cwd: string,
   dependencies: NotificationWorkerDependencies = {}
+): Promise<void> {
+  const ownershipKey = resolveNotificationWorkerOwnershipKey(cwd);
+  const ownershipEndpoint = resolveProcessLockEndpoint(ownershipKey);
+  try {
+    await withProcessLock(
+      ownershipKey,
+      () => runOwnedNotificationWorker(cwd, dependencies),
+      { timeoutMs: 0 }
+    );
+  } catch (error) {
+    if (error instanceof ProcessLockUnavailableError &&
+        error.key === ownershipKey &&
+        error.endpoint.host === ownershipEndpoint.host &&
+        error.endpoint.port === ownershipEndpoint.port) {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function runOwnedNotificationWorker(
+  cwd: string,
+  dependencies: NotificationWorkerDependencies
 ): Promise<void> {
   const sleep = dependencies.sleep ?? defaultSleep;
 
