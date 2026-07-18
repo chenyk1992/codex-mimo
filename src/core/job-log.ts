@@ -5,13 +5,16 @@ import { appendJobSignal } from "./job-signals.js";
 import { readJob, resolveJobPaths, updateJobAuthoritative } from "./job-store.js";
 import type { JobPhase } from "./jobs.js";
 import { withProcessLock } from "./process-lock.js";
+import {
+  publicProgressSummary,
+  type PublicSummaryContext
+} from "./public-summary.js";
 
-export function appendJobLogLine(logFile: string, message: string): void {
-  const trimmed = message.trim();
-  if (!trimmed) return;
+export function appendJobLogLine(logFile: string, context: PublicSummaryContext): void {
+  const summary = publicProgressSummary(context);
 
   ensureParentDir(logFile);
-  fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${trimmed}\n`, "utf8");
+  fs.appendFileSync(logFile, `[${new Date().toISOString()}] ${summary}\n`, "utf8");
 }
 
 export function appendJobEventLine(eventsFile: string, line: string): void {
@@ -51,7 +54,11 @@ export async function appendRawAndNormalizedEvent(
 
     const phase = inferActivePhase(event);
     const summary = summarizeNormalizedEvent(event);
-    if (summary) appendJobLogLine(job.logFile, summary);
+    appendJobLogLine(job.logFile, {
+      type: "event",
+      eventType: event.type,
+      progressKind: event.progressKind
+    });
     const updated = phase || summary
       ? await updateJobAuthoritative(cwd, jobId, {
           ...(phase ? { phase } : {}),
@@ -103,16 +110,12 @@ function inferActivePhase(event: NormalizedMimoEvent): JobPhase | undefined {
   return "investigating";
 }
 
-function summarizeNormalizedEvent(event: NormalizedMimoEvent): string | undefined {
-  const text = event.text?.trim();
-  if (text) return text;
-  if (event.type === "tool" && event.toolName) {
-    return `Tool ${event.toolName}${event.status ? ` ${event.status}` : ""}.`;
-  }
-  if (event.type === "diff" && event.path) return `Changed ${event.path}.`;
-  if (event.type === "usage" && event.usage) return "Usage updated.";
-  if (event.type === "error") return "MiMoCode reported an error.";
-  return undefined;
+function summarizeNormalizedEvent(event: NormalizedMimoEvent): string {
+  return publicProgressSummary({
+    type: "event",
+    eventType: event.type,
+    progressKind: event.progressKind
+  });
 }
 
 const VERIFY_COMMAND_PATTERN =

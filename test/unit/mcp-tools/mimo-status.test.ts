@@ -58,7 +58,10 @@ describe("mimo_status", () => {
       sessionId: "ses_1"
     });
     expect(result.notification).toEqual({
-      targetType: "webhook", status: "pending", attempts: 1, lastError: "busy"
+      targetType: "webhook",
+      status: "pending",
+      attempts: 1,
+      lastError: "Notification delivery requires attention."
     });
     expect(JSON.stringify(result)).not.toContain("DO NOT LEAK");
   });

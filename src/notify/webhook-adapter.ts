@@ -8,6 +8,7 @@ import type {
   JobVerification
 } from "../core/jobs.js";
 import type { DeliveryAttemptResult, NotificationDelivery } from "./types.js";
+import { publicProgressSummary } from "../core/public-summary.js";
 
 export interface NotificationPayload {
   version: 1;
@@ -50,7 +51,11 @@ export function buildNotificationPayload(
       id: job.id,
       kind: job.kind,
       status: job.status,
-      summary: job.summary ?? signal.summary
+      summary: publicProgressSummary({
+        type: "job",
+        status: job.status,
+        phase: job.phase
+      })
     },
     result: {
       changedFiles: [...job.changedFiles],

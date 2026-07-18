@@ -45,6 +45,7 @@ import {
   withProcessLock
 } from "./process-lock.js";
 import { resolveJobWorkerOwnershipKey } from "./worker-ownership.js";
+import type { PublicSummaryContext } from "./public-summary.js";
 
 export interface JobWorkerDependencies {
   bindJobDefinition?: (job: JobRecord) => BoundJobDefinition;
@@ -62,6 +63,8 @@ export interface JobWorkerDependencies {
   captureProcessIdentity?: typeof captureProcessIdentity;
   terminateOwnedProcess?: typeof terminateOwnedJobProcess;
   statusPollMs?: number;
+  recoveryRetryMs?: number;
+  sleep?: (delayMs: number) => Promise<void>;
 }
 
 type WorkerStage = "starting" | "prompt" | "hook" | "run" | "callback" | "finalize";
@@ -110,31 +113,9 @@ async function runOwnedJobWorker(
 
   const transition = deps.transitionJob ?? transitionJob;
   if (initial.status === "running") {
-    let termination: OwnedProcessTermination;
-    if (initial.pid === null) {
-      termination = { status: "not_running", evidence: "No MiMoCode process was recorded." };
-    } else {
-      try {
-        termination = (deps.terminateOwnedProcess ?? terminateOwnedJobProcess)(
-          initial.pid ?? null,
-          initial.processIdentity
-        );
-      } catch (error) {
-        termination = {
-          status: "unconfirmed",
-          evidence: `Owned process recovery failed: ${errorMessage(error)}`
-        };
-      }
-    }
-    const safe = termination.status !== "unconfirmed";
-    if (!safe) {
-      bestEffortLog(
-        initial.logFile,
-        `Process recovery remains pending because termination was not confirmed: ${termination.evidence}`
-      );
-      return;
-    }
-    if (initial.cancellationRequestedAt) {
+    const recovered = await recoverOwnedProcess(cwd, jobId, deps);
+    if (!recovered) return;
+    if (recovered.job.cancellationRequestedAt) {
       const cancelled = await transitionRecoverably(cwd, jobId, {
         status: "cancelled",
         summary: `Cancelled ${jobId}.`,
@@ -143,15 +124,15 @@ async function runOwnedJobWorker(
       if (cancelled.deliveryCreated) startNotificationWorker(cwd, cancelled.job, deps);
       return;
     }
-    const timedOut = jobDeadlineExpired(initial);
+    const timedOut = jobDeadlineExpired(recovered.job);
     const summary = timedOut
       ? "MiMoCode job timed out."
-      : `A previous worker exited; its MiMoCode process is confirmed inactive. ${termination.evidence}`;
+      : "A previous worker exited; its MiMoCode process is confirmed inactive.";
     const failure: JobTransition = timedOut
       ? { status: "timeout", summary, error: summary, errorCode: "timeout" }
       : { status: "failed", summary, error: summary, errorCode: "worker_restarted" };
     const result = await transitionRecoverably(cwd, jobId, failure, deps);
-    bestEffortLog(result.job.logFile, failure.error!);
+    bestEffortLog(result.job.logFile, { type: "job", status: result.job.status });
     if (result.deliveryCreated) startNotificationWorker(cwd, result.job, deps);
     return;
   }
@@ -343,7 +324,7 @@ async function runOwnedJobWorker(
     assertJobActive(cwd, jobId, executionGuard.signal);
     executionGuard.stop();
     const result = await transition(cwd, jobId, outcome);
-    bestEffortLog(result.job.logFile, outcome.summary);
+    bestEffortLog(result.job.logFile, { type: "job", status: result.job.status });
     if (result.deliveryCreated) startNotificationWorker(cwd, result.job, deps);
   } catch (error) {
     if (executionGuard) {
@@ -493,7 +474,7 @@ async function failWorker(
   error: unknown,
   deps: JobWorkerDependencies
 ): Promise<void> {
-  const existing = requireJob(cwd, jobId);
+  let existing = requireJob(cwd, jobId);
   if (TERMINAL_STATUSES.has(existing.status)) {
     const recovered = await (deps.recoverPendingTransition ?? recoverPendingTransition)(cwd, jobId);
     if (recovered?.deliveryCreated) startNotificationWorker(cwd, recovered.job, deps);
@@ -501,25 +482,9 @@ async function failWorker(
   }
 
   if (existing.pid !== null) {
-    let termination: OwnedProcessTermination;
-    try {
-      termination = (deps.terminateOwnedProcess ?? terminateOwnedJobProcess)(
-        existing.pid,
-        existing.processIdentity
-      );
-    } catch (terminationError) {
-      termination = {
-        status: "unconfirmed",
-        evidence: `Owned process termination failed: ${errorMessage(terminationError)}`
-      };
-    }
-    if (termination.status === "unconfirmed") {
-      bestEffortLog(
-        existing.logFile,
-        `Job remains running because process termination was not confirmed: ${termination.evidence}`
-      );
-      return;
-    }
+    const recovered = await recoverOwnedProcess(cwd, jobId, deps);
+    if (!recovered) return;
+    existing = recovered.job;
   }
 
   if (existing.cancellationRequestedAt) {
@@ -558,7 +523,7 @@ async function failWorker(
     if (!recovered) throw error;
     result = recovered;
   }
-  bestEffortLog(result.job.logFile, failure.error!);
+  bestEffortLog(result.job.logFile, { type: "job", status: result.job.status });
   if (result.deliveryCreated) startNotificationWorker(cwd, result.job, deps);
 }
 
@@ -569,11 +534,42 @@ function startNotificationWorker(
 ): void {
   startNotificationDispatch(cwd, {
     spawnNotificationWorker: deps.spawnNotificationWorker,
-    onError: (error) => bestEffortLog(
+    onError: (_error) => bestEffortLog(
       job.logFile,
-      `Notification worker could not start; pending delivery remains recoverable: ${errorMessage(error)}`
+      { type: "notification" }
     )
   });
+}
+
+async function recoverOwnedProcess(
+  cwd: string,
+  jobId: string,
+  deps: JobWorkerDependencies
+): Promise<{ job: JobRecord; termination: OwnedProcessTermination } | undefined> {
+  const terminate = deps.terminateOwnedProcess ?? terminateOwnedJobProcess;
+  const sleep = deps.sleep ?? defaultSleep;
+  const retryMs = Math.max(0, deps.recoveryRetryMs ?? 250);
+
+  while (true) {
+    const job = requireJob(cwd, jobId);
+    if (job.status !== "running") return undefined;
+    let termination: OwnedProcessTermination;
+    if (job.pid === null) {
+      termination = { status: "not_running", evidence: "No MiMoCode process was recorded." };
+    } else {
+      try {
+        termination = terminate(job.pid, job.processIdentity);
+      } catch {
+        termination = {
+          status: "unconfirmed",
+          evidence: "Owned process recovery failed."
+        };
+      }
+    }
+    if (termination.status !== "unconfirmed") return { job, termination };
+    bestEffortLog(job.logFile, { type: "job", status: "running", phase: job.phase });
+    await sleep(retryMs);
+  }
 }
 
 function readTimeout(request: unknown): number {
@@ -623,21 +619,25 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function bestEffortLog(file: string, message: string): void {
+function bestEffortLog(file: string, context: PublicSummaryContext): void {
   try {
-    appendJobLogLine(file, message);
+    appendJobLogLine(file, context);
   } catch {
     // The persisted job/outbox is authoritative; diagnostics must not replace the outcome.
   }
 }
 
-function bestEffortJobLog(cwd: string, jobId: string, message: string): void {
+function bestEffortJobLog(cwd: string, jobId: string, _message: string): void {
   try {
     const job = readJob(cwd, jobId);
-    if (job) bestEffortLog(job.logFile, message);
+    if (job) bestEffortLog(job.logFile, { type: "diagnostic" });
   } catch {
     // Closing an auxiliary callback server must never replace the worker result.
   }
+}
+
+function defaultSleep(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 function withoutRuntimeStatus(status: GitStatusSnapshot): GitStatusSnapshot {

@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 describe("error propagation", () => {
-  it("unified worker persists a meaningful MiMoCode startup failure", async () => {
+  it("unified worker persists a structural MiMoCode startup failure", async () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-xcut-err-"));
     tempDirs.push(cwd);
     const job = createJobStore(cwd).create({
@@ -44,6 +44,7 @@ describe("error propagation", () => {
       errorCode: "mimo_run_failed",
       pid: null
     });
-    expect(readJob(cwd, job.id)?.error).toContain("spawn mimo ENOENT");
+    expect(readJob(cwd, job.id)?.error).toBe("MiMoCode job failed.");
+    expect(JSON.stringify(readJob(cwd, job.id))).not.toContain("spawn mimo ENOENT");
   });
 });

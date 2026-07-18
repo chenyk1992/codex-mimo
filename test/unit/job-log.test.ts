@@ -26,12 +26,14 @@ describe("job log", () => {
   it("appends timestamped log lines and reads recent messages without timestamps", () => {
     const logFile = path.join(tempWorkspace(), "logs", "job.log");
 
-    appendJobLogLine(logFile, "Starting job.");
-    appendJobLogLine(logFile, "Running npm test.");
+    appendJobLogLine(logFile, { type: "job", status: "running", phase: "starting" });
+    appendJobLogLine(logFile, { type: "signal", kind: "verification_started" });
 
     const content = fs.readFileSync(logFile, "utf8");
-    expect(content).toMatch(/^\[[^\]]+\] Starting job\.\r?\n\[[^\]]+\] Running npm test\.\r?\n$/);
-    expect(readRecentJobLogLines(logFile, 1)).toEqual(["Running npm test."]);
+    expect(content).toMatch(
+      /^\[[^\]]+\] MiMoCode entered the starting phase\.\r?\n\[[^\]]+\] Verification started\.\r?\n$/
+    );
+    expect(readRecentJobLogLines(logFile, 1)).toEqual(["Verification started."]);
   });
 
   it("appends raw event lines while preserving non-empty JSONL content", () => {

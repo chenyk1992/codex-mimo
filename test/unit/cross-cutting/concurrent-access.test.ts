@@ -300,7 +300,7 @@ describe("concurrent access", () => {
     expect(readJob(cwd, first.id)?.pid).toBe(111);
     expect(readJobSignals(second.signalsFile).signals).toEqual([
       expect.objectContaining({ kind: "phase_changed" }),
-      expect.objectContaining({ kind: "milestone", summary: "second progressed" })
+      expect.objectContaining({ kind: "milestone", summary: "MiMoCode reported progress." })
     ]);
   });
 });

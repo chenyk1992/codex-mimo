@@ -19,7 +19,7 @@ No dedicated single-test script. Filter through Vitest:
 npm test -- policy.test.ts
 ```
 
-Public CLI commands (bin: `codex-mimo`): `plan`, `implement`, `review`, `fix-ci`, `resume`, `compose`, `status`, `events`, `wait`, `result`, `cancel`, `jobs`, `doctor`, `healthcheck`. Internal workers are `job-worker` and `notify-worker`; see `src/cli/hints.ts` for the canonical usage line.
+Public CLI commands (bin: `codex-mimo`): `plan`, `implement`, `review`, `fix-ci`, `resume`, `compose`, `status`, `events`, `wait`, `result`, `cancel`, `jobs`, `doctor`, `healthcheck`. Internal runtime commands are `job-supervisor`, `job-worker`, and `notify-worker`; see `src/cli/hints.ts` for the canonical usage line.
 
 ## Architecture
 
@@ -30,15 +30,18 @@ src/
   compose/     workflow.ts (11-workflow registry), events.ts, report.ts, verify.ts, post-checks.ts
   core/        policy.ts, paths.ts, prompt.ts, audit.ts, terminal.ts,
                encoding.ts (UTF-8 process env), jobs.ts, job-definitions.ts, job-launcher.ts,
-               job-store.ts, job-log.ts, job-render.ts, job-transition.ts, job-worker.ts,
-               job-process.ts, job-signals.ts, process-lock.ts
+               job-store.ts, job-log.ts, job-render.ts, job-transition.ts, job-supervisor.ts,
+               job-worker.ts, job-process.ts, job-signals.ts, process-lock.ts,
+               public-summary.ts, worker-ownership.ts
   git/         diff.ts (status/diff capture)
   mimo/        run-json.ts (builds `mimo run --format json` args),
                streaming-runner.ts, prompt-transport.ts, hook-callback.ts
-  notify/      outbox.ts, worker.ts, webhook.ts, codex.ts, types.ts
+  notify/      outbox.ts, dispatcher.ts, dispatch-process.ts, worker.ts,
+               webhook-adapter.ts, codex-adapter.ts, codex-app-server.ts, types.ts
 ```
 
-- **All six work entries** (`plan`, `implement`, `review`, `fix-ci`, `resume`, `compose`) create persisted jobs through the shared launcher and return a queued receipt.
+- **All six work entries** (`plan`, `implement`, `review`, `fix-ci`, `resume`, `compose`) create persisted jobs through the shared launcher, start the workspace supervisor, and return a queued receipt.
+- **The workspace supervisor** holds one physical-workspace lock and replaces crashed job/notification workers while durable work remains.
 - **The unified job worker** binds the job definition, starts `mimo run --format json`, persists events/signals, requires `session.post`, finalizes verification/reporting, and writes an atomic terminal transition.
 - **The notification worker** leases append-only outbox records and delivers webhook or Codex task notifications without storing webhook secrets.
 - **ACP** is not active. `doc/acp-message-flow.md` is reference-only.
@@ -53,7 +56,7 @@ src/
 - **Prompt format matters.** `buildComposePrompt()` starts with `Objective: ...` then explicit instructions. Do not prepend a preamble before the objective.
 - **Large/non-ASCII prompt transport.** Messages over 8 KB or with non-ASCII go to `.codex-mimo/inputs/*.md`; the actual MiMo message points MiMoCode at that UTF-8 file (`src/mimo/prompt-transport.ts`).
 - **Hook callback is real and is part of success detection.** MiMoCode loads callable plugin factories from `<cwd>/.mimocode/plugin/*.{js,ts}` (or `plugin/` under the `MIMOCODE_CONFIG_DIR` we inject); each factory returns hooks such as `session.pre` and `session.post`. Our `createHookCallbackController()` starts a local HTTP server and POSTs the `session.post` payload back to it. Missing/error/cancelled callbacks can turn a zero exit into failure. Verified by `test/smoke/local-mimo-hooks.test.ts` (gated on `RUN_LOCAL_MIMO_HOOK_SMOKE=1`).
-- **Private types in public return signatures.** Declaration output requires exported return types to be nameable. Keep public interfaces like `CompactComposeReport` exported when exported functions return them.
+- **Public return signatures.** Declaration output requires exported return types to be nameable; exported functions must return exported interfaces.
 - **Verification runner is intentionally simple.** `compose/verify.ts` splits commands on whitespace and runs with `execa(file, args)`, not through a shell. Detection fallback uses `pyproject.toml` / `Cargo.toml` / `go.mod` / `package.json` to pick a default command.
 - **Windows / UTF-8.** `core/encoding.ts` wraps process env to UTF-8; PowerShell users reading `.codex-mimo/inputs/*.md` should use `Get-Content -Encoding UTF8`. Compose prompts explicitly steer MiMoCode away from `2>/dev/null`, `||`, `wc -l`, `grep`, and cp936-bound Python.
 
@@ -77,7 +80,7 @@ Every work request runs as a background job. State lives under `.codex-mimo/jobs
 
 Reports land in `.codex-mimo/reports/`, with events under `.codex-mimo/events/` and diffs under `.codex-mimo/diffs/`.
 
-MCP control tools: `mimo_status`, `mimo_events`, `mimo_wait`, `mimo_result`, `mimo_cancel`, `mimo_jobs`. Normal callers do not launch workers directly; all work tools start `codex-mimo job-worker`, and final transitions enqueue delivery for `codex-mimo notify-worker`.
+MCP control tools: `mimo_status`, `mimo_events`, `mimo_wait`, `mimo_result`, `mimo_cancel`, `mimo_jobs`. Normal callers do not launch workers directly; work tools start `codex-mimo job-supervisor`, which owns replacement of `job-worker` and `notify-worker`. Final transitions enqueue delivery through the notification outbox.
 
 ## Policy And Audit
 

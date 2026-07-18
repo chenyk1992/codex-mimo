@@ -15,6 +15,8 @@ import {
 } from "../../../src/core/job-transition.js";
 import type { JobKind, JobRecord } from "../../../src/core/jobs.js";
 import { readJobSignals } from "../../../src/core/job-signals.js";
+import { isProcessLockHeld } from "../../../src/core/process-lock.js";
+import { resolveJobWorkerOwnershipKey } from "../../../src/core/worker-ownership.js";
 import { withUtf8ProcessEnv } from "../../../src/core/encoding.js";
 import { readDeliveries } from "../../../src/notify/outbox.js";
 import type { HookCallbackController, MimoHookCallbackSummary } from "../../../src/mimo/hook-callback.js";
@@ -184,8 +186,9 @@ describe("runJobWorker", () => {
       expect(selection?.command).toBe("mimo");
       expect(readJob(cwd, job.id)).toMatchObject({
         status: "failed",
-        error: expect.stringContaining("spawn mimo ENOENT")
+        error: "MiMoCode job failed."
       });
+      expect(JSON.stringify(readJob(cwd, job.id))).not.toContain("spawn mimo ENOENT");
       expect(JSON.stringify(readJob(cwd, job.id))).not.toContain(secretValue);
     }
   );
@@ -346,27 +349,126 @@ describe("runJobWorker", () => {
       pid: 808,
       processIdentity: "start-808"
     });
+    let confirmed = false;
     const deps = workerDeps({
-      terminateOwnedProcess: vi.fn(() => ({
-        status: "unconfirmed",
-        evidence: "access denied"
-      }))
+      terminateOwnedProcess: vi.fn(() => confirmed
+        ? { status: "not_running", evidence: "confirmed gone" }
+        : { status: "unconfirmed", evidence: "access denied" }),
+      recoveryRetryMs: 0,
+      sleep: async () => {
+        expect(readJob(cwd, job.id)).toMatchObject({
+          status: "running",
+          pid: 808,
+          processIdentity: "start-808"
+        });
+        confirmed = true;
+      }
     });
 
     await runJobWorker(cwd, job.id, deps);
 
     expect(readJob(cwd, job.id)).toMatchObject({
-      status: "running",
-      pid: 808,
-      processIdentity: "start-808"
+      status: "failed",
+      pid: null,
+      errorCode: "worker_restarted"
     });
     expect(readJobSignals(job.signalsFile).signals.filter((signal) => signal.kind === "blocked"))
       .toHaveLength(0);
-    expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(0);
+    expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(1);
     expect(deps.runMimoStreaming).not.toHaveBeenCalled();
   });
 
-  it("keeps a timed-out run owned until failed termination can be confirmed", async () => {
+  it("keeps one recovery owner until an unconfirmed process is conclusively inactive", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement", true);
+    await transitionJob(cwd, job.id, {
+      status: "running",
+      phase: "starting",
+      summary: "started",
+      pid: 809,
+      processIdentity: "start-809"
+    });
+    const terminateOwnedProcess = vi.fn()
+      .mockReturnValueOnce({ status: "unconfirmed", evidence: "access denied" })
+      .mockReturnValueOnce({ status: "not_running", evidence: "confirmed gone" });
+    const deps = workerDeps({
+      terminateOwnedProcess,
+      recoveryRetryMs: 0
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(terminateOwnedProcess).toHaveBeenCalledTimes(2);
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "worker_restarted",
+      pid: null
+    });
+    expect(readJobSignals(job.signalsFile).signals.filter((signal) => signal.kind === "failed"))
+      .toHaveLength(1);
+    expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(1);
+  });
+
+  it("keeps a pre-identity live child nonterminal and owned until close is confirmed", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement", true);
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: Readable;
+      stderr: Readable;
+      pid: number;
+      kill: () => boolean;
+    };
+    child.pid = 912;
+    child.stdout = Readable.from([""]);
+    child.stderr = Readable.from([""]);
+    child.kill = () => true;
+    let closeChild!: () => void;
+    const childClosed = new Promise<void>((resolve) => {
+      closeChild = () => {
+        child.emit("close", 0);
+        resolve();
+      };
+    });
+    const deps = workerDeps({
+      captureProcessIdentity: vi.fn(() => ({
+        status: "unconfirmed",
+        evidence: "creation time not readable"
+      })),
+      runMimoStreaming: (runCwd, args, options) => runMimoCliStreaming(runCwd, args, {
+        ...options,
+        spawnProcess: () => child,
+        terminateProcessTree: async () => {
+          throw new Error("termination unconfirmed while child is live");
+        }
+      })
+    });
+
+    const running = runJobWorker(cwd, job.id, deps);
+    await vi.waitFor(() => expect(deps.captureProcessIdentity).toHaveBeenCalledWith(912));
+    const beforeClose = await Promise.race([
+      running.then(() => "settled" as const),
+      new Promise<"owned">((resolve) => setTimeout(() => resolve("owned"), 50))
+    ]);
+
+    expect(beforeClose).toBe("owned");
+    expect(await isProcessLockHeld(resolveJobWorkerOwnershipKey(cwd, job.id))).toBe(true);
+    expect(readJob(cwd, job.id)).toMatchObject({ status: "running", pid: null });
+    expect(readJobSignals(job.signalsFile).signals.filter((signal) =>
+      ["failed", "timeout", "cancelled"].includes(signal.kind)
+    )).toHaveLength(0);
+
+    closeChild();
+    await childClosed;
+    await running;
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "mimo_run_failed",
+      pid: null
+    });
+  });
+
+  it("keeps a timed-out run owned until failed termination is eventually confirmed", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({
       kind: "implement",
@@ -374,27 +476,32 @@ describe("runJobWorker", () => {
       request: { cwd, task: "Implement it", allowWrite: true, timeoutMs: 1 }
     });
     const terminationFailure = new Error("Windows process termination could not be confirmed");
+    let confirmed = false;
     const deps = workerDeps({
       runMimoStreaming: async (_cwd, _args, options) => {
         await options.onStart?.(911);
         throw terminationFailure;
       },
-      terminateOwnedProcess: vi.fn(() => ({
-        status: "unconfirmed",
-        evidence: "PID 911 remains alive"
-      }))
+      terminateOwnedProcess: vi.fn(() => confirmed
+        ? { status: "not_running", evidence: "PID 911 is gone" }
+        : { status: "unconfirmed", evidence: "PID 911 remains alive" }),
+      recoveryRetryMs: 0,
+      sleep: async () => {
+        expect(readJob(cwd, job.id)).toMatchObject({ status: "running", pid: 911 });
+        confirmed = true;
+      }
     });
 
     await runJobWorker(cwd, job.id, deps);
 
     expect(readJob(cwd, job.id)).toMatchObject({
-      status: "running",
-      pid: 911,
-      processIdentity: "start-321"
+      status: "timeout",
+      pid: null,
+      errorCode: "timeout"
     });
     expect(readJobSignals(job.signalsFile).signals.filter((signal) =>
       ["failed", "timeout", "blocked"].includes(signal.kind)
-    )).toHaveLength(0);
+    )).toHaveLength(1);
   });
 
   it.each([null, 808])(
@@ -433,21 +540,24 @@ describe("runJobWorker", () => {
       processIdentity: "start-808"
     });
     await requestJobCancellation(cwd, job.id);
+    let confirmed = false;
     const deps = workerDeps({
-      terminateOwnedProcess: vi.fn(() => ({ status: "unconfirmed", evidence: "tree live" }))
+      terminateOwnedProcess: vi.fn(() => confirmed
+        ? { status: "not_running", evidence: "tree gone" }
+        : { status: "unconfirmed", evidence: "tree live" }),
+      recoveryRetryMs: 0,
+      sleep: async () => { confirmed = true; }
     });
 
     await runJobWorker(cwd, job.id, deps);
 
     expect(readJob(cwd, job.id)).toMatchObject({
-      status: "running",
-      pid: 808,
-      processIdentity: "start-808",
-      cancellationRequestedAt: expect.any(String)
+      status: "cancelled",
+      pid: null
     });
     expect(readJobSignals(job.signalsFile).signals.filter((signal) => signal.kind === "cancelled"))
-      .toHaveLength(0);
-    expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(0);
+      .toHaveLength(1);
+    expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(1);
   });
 
   it.each(["plan", "implement", "review", "fix-ci", "resume", "compose"] as const)(
@@ -626,12 +736,14 @@ describe("runJobWorker", () => {
     let started!: () => void;
     const running = new Promise<void>((resolve) => { started = resolve; });
     const failure = new Error("taskkill failed; tree still live");
+    let confirmed = false;
     const deps = workerDeps({
       statusPollMs: 5,
-      terminateOwnedProcess: vi.fn(() => ({
-        status: "unconfirmed" as const,
-        evidence: "tree remains live"
-      })),
+      terminateOwnedProcess: vi.fn(() => confirmed
+        ? { status: "not_running", evidence: "tree gone" }
+        : { status: "unconfirmed" as const, evidence: "tree remains live" }),
+      recoveryRetryMs: 0,
+      sleep: async () => { confirmed = true; },
       runMimoStreaming: async (_cwd, _args, options) => {
         await options.onStart?.(910);
         started();
@@ -648,13 +760,12 @@ describe("runJobWorker", () => {
     await worker;
 
     expect(readJob(cwd, job.id)).toMatchObject({
-      status: "running",
-      pid: 910,
-      cancellationRequestedAt: expect.any(String)
+      status: "cancelled",
+      pid: null
     });
     expect(readJobSignals(job.signalsFile).signals.filter((signal) => signal.kind === "cancelled"))
-      .toHaveLength(0);
-    expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(0);
+      .toHaveLength(1);
+    expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(1);
   });
 
   it("checks cancellation between every final Git capture", async () => {
@@ -1039,7 +1150,12 @@ describe("runJobWorker", () => {
 
       await runJobWorker(cwd, job.id, workerDeps({ bindJobDefinition: () => bound }));
 
-      expect(readJob(cwd, job.id)).toMatchObject({ status, pid: null, summary: status });
+      const expectedSummary = status === "needs_input"
+        ? "MiMoCode needs additional input."
+        : status === "blocked"
+          ? "MiMoCode is blocked by an external condition."
+          : "MiMoCode job failed.";
+      expect(readJob(cwd, job.id)).toMatchObject({ status, pid: null, summary: expectedSummary });
     }
   );
 
@@ -1070,7 +1186,8 @@ describe("runJobWorker", () => {
 
     const stored = readJob(cwd, job.id)!;
     expect(stored).toMatchObject({ status: "failed", pid: null });
-    expect(stored.error).toContain(message);
+    expect(stored.error).toBe("MiMoCode job failed.");
+    expect(JSON.stringify(stored)).not.toContain(message);
     expect(readJobSignals(stored.signalsFile).signals.filter((signal) => signal.kind === "failed")).toHaveLength(1);
   });
 
@@ -1095,8 +1212,9 @@ describe("runJobWorker", () => {
       "not-json-yet\n" +
       '{"type":"text","text":"Done."}\n'
     );
-    expect(fs.readFileSync(stored.logFile, "utf8")).toContain("npm test");
-    expect(fs.readFileSync(stored.logFile, "utf8")).toContain("Done.");
+    expect(fs.readFileSync(stored.logFile, "utf8")).toContain("MiMoCode ran a tool.");
+    expect(fs.readFileSync(stored.logFile, "utf8")).not.toContain("npm test");
+    expect(fs.readFileSync(stored.logFile, "utf8")).not.toContain("Done.");
     expect(readJobSignals(stored.signalsFile).signals.some((signal) => signal.kind === "milestone")).toBe(true);
   });
 
@@ -1122,9 +1240,10 @@ describe("runJobWorker", () => {
     await runJobWorker(cwd, job.id, deps);
 
     const log = fs.readFileSync(readJob(cwd, job.id)!.logFile, "utf8");
-    expect(log).toContain("src/read.ts");
-    expect(log).toContain("src/write.ts");
-    expect(log).toContain("src/edit.ts");
+    expect(log.match(/MiMoCode ran a tool\./g)).toHaveLength(3);
+    expect(log).not.toContain("src/read.ts");
+    expect(log).not.toContain("src/write.ts");
+    expect(log).not.toContain("src/edit.ts");
     expect(log).not.toContain("wrong.ts");
   });
 
@@ -1174,7 +1293,8 @@ describe("runJobWorker", () => {
 
     const stored = readJob(cwd, job.id)!;
     expect(stored.status).toBe("completed");
-    expect(fs.readFileSync(stored.logFile, "utf8")).toContain("worker spawn failed");
+    expect(fs.readFileSync(stored.logFile, "utf8")).toContain("Notification delivery requires attention.");
+    expect(fs.readFileSync(stored.logFile, "utf8")).not.toContain("worker spawn failed");
     expect(readDeliveries(stored.notificationOutboxFile)[0]).toMatchObject({ status: "pending" });
   });
 
@@ -1245,6 +1365,7 @@ describe("runJobWorker", () => {
 
     const stored = readJob(cwd, job.id)!;
     expect(stored.status).toBe("completed");
-    expect(fs.readFileSync(stored.logFile, "utf8")).toContain("close failed");
+    expect(fs.readFileSync(stored.logFile, "utf8")).toContain("MiMoCode job diagnostic recorded.");
+    expect(fs.readFileSync(stored.logFile, "utf8")).not.toContain("close failed");
   });
 });

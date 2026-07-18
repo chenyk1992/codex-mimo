@@ -19,6 +19,7 @@ import type {
 } from "../../../src/core/jobs.js";
 import { dispatchNextDelivery } from "../../../src/notify/dispatcher.js";
 import { claimDueDelivery, readDeliveries } from "../../../src/notify/outbox.js";
+import { publicProgressSummary } from "../../../src/core/public-summary.js";
 
 const { appendJobProgress, recoverPendingTransition, requestJobCancellation, transitionJob } = transitionApi;
 const tempDirs: string[] = [];
@@ -82,7 +83,11 @@ describe("job transitions", () => {
       jobId,
       kind: to === "running" ? "phase_changed" : to,
       status: to,
-      summary: to
+      summary: publicProgressSummary({
+        type: "job",
+        status: to,
+        phase
+      })
     });
     expect(readJobSignals(result.job.signalsFile).signals).toEqual([result.signal]);
   });
@@ -468,7 +473,7 @@ describe("job transitions", () => {
 
     const stored = readJob(cwd, jobId)!;
     expect(stored.status).toBe("completed");
-    expect(stored.error).toBe("winner error");
+    expect(stored.error).toBe("MiMoCode completed the job.");
     expect(stored.changedFiles).toEqual(["winner.ts"]);
     expect(stored.reportPaths).toEqual({ json: "winner.json", markdown: "winner.md" });
     expect(stored.executionCallback).toMatchObject({ invocationId: "winner" });
@@ -488,7 +493,13 @@ describe("job transitions", () => {
     })).rejects.toThrow("prepared");
 
     const recovered = await transitionJob(cwd, jobId, transition);
-    expect(recovered.job).toMatchObject(transition);
+    expect(recovered.job).toMatchObject({
+      status: "failed",
+      summary: "MiMoCode job failed.",
+      error: "MiMoCode job failed.",
+      errorCode: "process_failed",
+      changedFiles: ["src/a.ts"]
+    });
     expect(recovered.deliveryCreated).toBe(true);
   });
 

@@ -45,7 +45,7 @@ describe("mimo_cancel", () => {
     expect(stored).toMatchObject({ status: "cancelled", pid: null, processIdentity: null });
     expect(stored).not.toHaveProperty("cancellationRequestedAt");
     expect(readJobSignals(job.signalsFile).signals.at(-1)).toMatchObject({
-      kind: "cancelled", status: "cancelled", summary: `Cancelled ${job.id}.`
+      kind: "cancelled", status: "cancelled", summary: "MiMoCode job was cancelled."
     });
     expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(1);
   });

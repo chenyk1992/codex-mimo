@@ -5,6 +5,7 @@ import type {
   JobStatusResult,
   JobVerification
 } from "./jobs.js";
+import { publicProgressSummary } from "./public-summary.js";
 
 function elapsedMs(job: JobRecord, nowMs = Date.now()): number | null {
   const start = Date.parse(job.startedAt ?? job.createdAt);
@@ -28,12 +29,16 @@ export function renderJobStatus(
     ...(job.phase ? { phase: job.phase } : {}),
     elapsedMs: elapsedMs(job, options.nowMs),
     sessionId: job.sessionId ?? null,
-    summary: job.summary ?? `${job.kind} job ${job.status}.`,
+    summary: publicProgressSummary({ type: "job", status: job.status, phase: job.phase }),
     changedFiles: [...job.changedFiles],
     ...(job.cancellationRequestedAt ? { cancellationRequested: true as const } : {}),
-    ...(job.executionCallback ? { executionCallback: { ...job.executionCallback } } : {}),
-    progress: options.progress ?? [],
-    ...(options.notification ? { notification: options.notification } : {}),
+    ...(job.executionCallback ? { executionCallback: publicExecutionCallback(job) } : {}),
+    progress: (options.progress ?? []).map(() => publicProgressSummary({
+      type: "job",
+      status: job.status,
+      phase: job.phase
+    })),
+    ...(options.notification ? { notification: publicNotification(options.notification) } : {}),
     actions: statusActions(job.status)
   };
 }
@@ -49,20 +54,44 @@ export function renderJobResult(
     parentJobId: job.parentJobId ?? null,
     status: job.status,
     resultType: partial ? "partial" : "final",
-    summary: job.summary ?? `${job.kind} job ${job.status}.`,
+    summary: publicProgressSummary({ type: "job", status: job.status, phase: job.phase }),
     sessionId: job.sessionId ?? null,
     changedFiles: [...job.changedFiles],
     verification: job.verification.map(compactVerification),
-    ...(job.executionCallback ? { executionCallback: { ...job.executionCallback } } : {}),
-    ...(job.error ? { error: job.error } : {}),
+    ...(job.executionCallback ? { executionCallback: publicExecutionCallback(job) } : {}),
+    ...(job.error ? { error: publicProgressSummary({ type: "job", status: job.status }) } : {}),
     ...(job.errorCode ? { errorCode: job.errorCode } : {}),
     ...(job.reportPaths ? { reportPaths: { ...job.reportPaths } } : {}),
-    ...(notification ? { notification } : {}),
+    ...(notification ? { notification: publicNotification(notification) } : {}),
     actions: {
       status: "mimo_status",
       events: "mimo_events",
       ...(partial ? { resume: "mimo_resume" as const } : {})
     }
+  };
+}
+
+function publicExecutionCallback(job: JobRecord): NonNullable<JobRecord["executionCallback"]> {
+  const callback = job.executionCallback!;
+  return {
+    invocationId: callback.invocationId,
+    outcome: callback.outcome,
+    ...(callback.sessionId !== undefined ? { sessionId: callback.sessionId } : {}),
+    ...(callback.receivedAt !== undefined ? { receivedAt: callback.receivedAt } : {}),
+    ...(callback.error !== undefined
+      ? { error: publicProgressSummary({ type: "callback", outcome: callback.outcome }) }
+      : {})
+  };
+}
+
+function publicNotification(notification: JobNotificationStatus): JobNotificationStatus {
+  return {
+    targetType: notification.targetType,
+    status: notification.status,
+    attempts: notification.attempts,
+    ...(notification.lastError !== undefined
+      ? { lastError: publicProgressSummary({ type: "notification" }) }
+      : {})
   };
 }
 

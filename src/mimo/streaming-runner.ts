@@ -24,6 +24,27 @@ export interface StreamingRunResult {
   terminationReason?: TerminationReason;
 }
 
+export class StreamingProcessStartError extends Error {
+  readonly pid: number | null;
+  readonly terminationStatus: "confirmed" | "unconfirmed";
+  readonly terminationEvidence: string;
+
+  constructor(input: {
+    pid: number | null;
+    startError: unknown;
+    terminationStatus: "confirmed" | "unconfirmed";
+    terminationEvidence: string;
+  }) {
+    super("MiMoCode process startup ownership could not be persisted.", {
+      cause: input.startError
+    });
+    this.name = "StreamingProcessStartError";
+    this.pid = input.pid;
+    this.terminationStatus = input.terminationStatus;
+    this.terminationEvidence = input.terminationEvidence;
+  }
+}
+
 interface StreamingChildProcess extends EventEmitter {
   stdout?: Readable | null;
   stderr?: Readable | null;
@@ -258,8 +279,8 @@ export async function runMimoCliStreaming(
   void exitCodePromise.catch(() => undefined);
 
   const terminateTree = (options.terminateProcessTree ?? terminateProcessTree).bind(null);
-  let resolveTerminationRequest!: (pending: Promise<void>) => void;
-  const terminationRequested = new Promise<Promise<void>>((resolve) => {
+  let resolveTerminationRequest!: (pending: { promise: Promise<void> }) => void;
+  const terminationRequested = new Promise<{ promise: Promise<void> }>((resolve) => {
     resolveTerminationRequest = resolve;
   });
   const requestTermination = (reason: TerminationReason): Promise<void> => {
@@ -272,7 +293,7 @@ export async function runMimoCliStreaming(
       termination = Promise.reject(error);
     }
     void termination.catch(() => undefined);
-    resolveTerminationRequest(termination);
+    resolveTerminationRequest({ promise: termination });
     return termination;
   };
 
@@ -299,15 +320,34 @@ export async function runMimoCliStreaming(
   try {
     try {
       await options.onStart?.(child.pid ?? null);
-    } catch (error) {
-      await requestTermination("host_abort");
-      throw error;
+    } catch (startError) {
+      let terminationError: unknown;
+      try {
+        await requestTermination("host_abort");
+      } catch (error) {
+        terminationError = error;
+      }
+      if (!processClosed) {
+        try {
+          await exitCodePromise;
+        } catch {
+          // The error event is also conclusive child closure evidence.
+        }
+      }
+      throw new StreamingProcessStartError({
+        pid: child.pid ?? null,
+        startError,
+        terminationStatus: processClosed ? "confirmed" : "unconfirmed",
+        terminationEvidence: terminationError
+          ? `Termination request failed before child close: ${errorMessage(terminationError)}`
+          : "Child close was confirmed after the startup callback failed."
+      });
     }
 
     const completion = await Promise.race([
       exitCodePromise.then((exitCode) => ({ type: "exit" as const, exitCode })),
       terminationRequested.then(async (pending) => {
-        await pending;
+        await pending.promise;
         return { type: "terminated" as const };
       })
     ]);
@@ -334,4 +374,8 @@ export async function runMimoCliStreaming(
       child.stderr?.destroy();
     }
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

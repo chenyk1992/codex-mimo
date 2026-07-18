@@ -367,6 +367,67 @@ describe("job supervisor", () => {
     expect(readJobSignals(stored.signalsFile).signals.at(-1)?.kind).toBe("failed");
   });
 
+  it("settles a queued job after valid-PID workers immediately crash", async () => {
+    const cwd = workspace();
+    const stored = createJobStore(cwd).create({
+      kind: "implement",
+      task: "work",
+      request: { cwd, task: "work", allowWrite: true }
+    });
+    let nextPid = 1_000;
+    let sleepCalls = 0;
+    const spawnJobWorker = vi.fn(() => nextPid++);
+
+    await runJobSupervisor(cwd, {
+      spawnJobWorker,
+      readNotificationDeliveries: () => [],
+      processIsRunning: () => false,
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls > 4) throw new Error("valid-PID spawn storm was not bounded");
+      },
+      maxWorkerStartFailures: 2
+    });
+
+    expect(spawnJobWorker).toHaveBeenCalledTimes(2);
+    expect(readJob(cwd, stored.id)).toMatchObject({
+      status: "failed",
+      errorCode: "worker_spawn_failed"
+    });
+    expect(readJobSignals(stored.signalsFile).signals.at(-1)?.kind).toBe("failed");
+  });
+
+  it("does not clear crash failures merely because worker ownership is briefly observed", async () => {
+    const cwd = workspace();
+    const stored = createJobStore(cwd).create({
+      kind: "implement",
+      task: "work",
+      request: { cwd, task: "work", allowWrite: true }
+    });
+    const ownershipStates = [false, true, false, false, false];
+    let nextPid = 1_100;
+    let sleepCalls = 0;
+    const spawnJobWorker = vi.fn(() => nextPid++);
+
+    await runJobSupervisor(cwd, {
+      spawnJobWorker,
+      readNotificationDeliveries: () => [],
+      processIsRunning: () => false,
+      workerOwnershipIsHeld: async () => ownershipStates.shift() ?? false,
+      sleep: async () => {
+        sleepCalls += 1;
+        if (sleepCalls > 5) throw new Error("transient ownership reset the crash budget");
+      },
+      maxWorkerStartFailures: 2
+    });
+
+    expect(spawnJobWorker).toHaveBeenCalledTimes(2);
+    expect(readJob(cwd, stored.id)).toMatchObject({
+      status: "failed",
+      errorCode: "worker_spawn_failed"
+    });
+  });
+
   it("uses the in-process notification worker after bounded permanent spawn failures", async () => {
     const cwd = workspace();
     let unfinished: NotificationDelivery[] = [delivery()];
@@ -385,5 +446,28 @@ describe("job supervisor", () => {
     expect(spawnNotificationWorker).toHaveBeenCalledTimes(2);
     expect(runNotificationWorker).toHaveBeenCalledOnce();
     expect(runNotificationWorker).toHaveBeenCalledWith(cwd);
+  });
+
+  it("does not reset notification crash failures for transient ownership or spawn past the threshold", async () => {
+    const cwd = workspace();
+    let unfinished: NotificationDelivery[] = [delivery()];
+    const ownershipStates = [false, true, false, false, false];
+    let nextPid = 1_200;
+    const spawnNotificationWorker = vi.fn(() => nextPid++);
+    const runNotificationWorker = vi.fn(async () => { unfinished = []; });
+
+    await runJobSupervisor(cwd, {
+      listJobs: () => [],
+      readNotificationDeliveries: () => unfinished,
+      spawnNotificationWorker,
+      runNotificationWorker,
+      processIsRunning: () => false,
+      workerOwnershipIsHeld: async () => ownershipStates.shift() ?? false,
+      sleep: async () => undefined,
+      maxWorkerStartFailures: 2
+    });
+
+    expect(spawnNotificationWorker).toHaveBeenCalledTimes(2);
+    expect(runNotificationWorker).toHaveBeenCalledOnce();
   });
 });

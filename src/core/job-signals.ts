@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { JobPhase, JobStatus } from "./jobs.js";
+import { publicProgressSummary } from "./public-summary.js";
 
 export type JobSignalLevel = "debug" | "info" | "warn" | "error";
 
@@ -89,6 +90,12 @@ export function appendJobSignalAtCursor(
 ): JobSignal {
   const stored: JobSignal = {
     ...signal,
+    summary: publicProgressSummary({
+      type: "signal",
+      kind: signal.kind,
+      status: signal.status,
+      phase: signal.phase
+    }),
     cursor,
     createdAt: signal.createdAt ?? new Date().toISOString()
   };

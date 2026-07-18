@@ -89,8 +89,8 @@ describe("launchJob", () => {
       status: "failed",
       pid: null,
       processIdentity: null,
-      summary: "Job supervisor failed to start: spawn denied",
-      error: "spawn denied",
+      summary: "MiMoCode job failed.",
+      error: "MiMoCode job failed.",
       errorCode: "worker_spawn_failed"
     });
     expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(1);

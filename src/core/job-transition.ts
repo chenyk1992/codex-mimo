@@ -30,6 +30,7 @@ import {
   enqueueDelivery as enqueueNotificationDelivery,
   readDeliveries
 } from "../notify/outbox.js";
+import { publicProgressSummary } from "./public-summary.js";
 
 const LEGAL: Record<JobStatus, readonly JobStatus[]> = {
   queued: ["running", "failed", "cancelled"],
@@ -224,6 +225,11 @@ function buildPendingTransition(
 ): PendingJobTransition {
   const timestamp = nowIso();
   const running = transition.status === "running";
+  const publicSummary = publicProgressSummary({
+    type: "job",
+    status: transition.status,
+    phase: running ? transition.phase : undefined
+  });
   return {
     version: 1,
     stage: "prepared",
@@ -232,7 +238,7 @@ function buildPendingTransition(
     signalCreatedAt: timestamp,
     requestHash: transitionRequestHash(transition),
     status: transition.status,
-    summary: transition.summary,
+    summary: publicSummary,
     phase: running ? transition.phase : undefined,
     pid: running ? (transition.pid ?? job.pid ?? null) : null,
     processIdentity: running
@@ -245,11 +251,25 @@ function buildPendingTransition(
     ...(transition.changedFiles !== undefined ? { changedFiles: transition.changedFiles } : {}),
     ...(transition.verification !== undefined ? { verification: transition.verification } : {}),
     ...(transition.executionCallback !== undefined
-      ? { executionCallback: transition.executionCallback }
+      ? { executionCallback: sanitizeExecutionCallback(transition.executionCallback) }
       : {}),
     ...(transition.reportPaths !== undefined ? { reportPaths: transition.reportPaths } : {}),
-    ...(transition.error !== undefined ? { error: transition.error } : {}),
+    ...(transition.error !== undefined ? { error: publicSummary } : {}),
     ...(transition.errorCode !== undefined ? { errorCode: transition.errorCode } : {})
+  };
+}
+
+function sanitizeExecutionCallback(
+  callback: NonNullable<JobTransition["executionCallback"]>
+): NonNullable<JobTransition["executionCallback"]> {
+  return {
+    invocationId: callback.invocationId,
+    outcome: callback.outcome,
+    ...(callback.sessionId !== undefined ? { sessionId: callback.sessionId } : {}),
+    ...(callback.receivedAt !== undefined ? { receivedAt: callback.receivedAt } : {}),
+    ...(callback.error !== undefined
+      ? { error: publicProgressSummary({ type: "callback", outcome: callback.outcome }) }
+      : {})
   };
 }
 

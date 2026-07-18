@@ -38,7 +38,7 @@ describe("job signals", () => {
     expect(first.signals[0]).toMatchObject({
       jobId: "job-1",
       kind: "phase_changed",
-      summary: "Starting."
+      summary: "MiMoCode entered the starting phase."
     });
 
     const second = readJobSignals(file, { sinceCursor: 1 });

@@ -84,7 +84,7 @@ describe("webhook adapter", () => {
         id: "implement-1",
         kind: "implement",
         status: "completed",
-        summary: "Implementation completed."
+        summary: "MiMoCode completed the job."
       },
       result: {
         changedFiles: ["src/feature.ts"],
@@ -94,6 +94,19 @@ describe("webhook adapter", () => {
     });
     expect(JSON.stringify(payload)).not.toContain("private");
     expect(JSON.stringify(payload)).not.toContain("request-secret");
+  });
+
+  it("defensively replaces direct multiline and oversized summaries", () => {
+    const marker = `WEBHOOK_DIRECT_SENTINEL\n${"x".repeat(5_000)}`;
+    const payload = buildNotificationPayload(
+      delivery,
+      { ...job, summary: marker },
+      { ...signal, summary: marker }
+    );
+
+    expect(payload.job.summary).not.toContain("WEBHOOK_DIRECT_SENTINEL");
+    expect(payload.job.summary).not.toMatch(/[\r\n]/);
+    expect(payload.job.summary.length).toBeLessThanOrEqual(160);
   });
 
   it("signs the supplied UTF-8 body", () => {

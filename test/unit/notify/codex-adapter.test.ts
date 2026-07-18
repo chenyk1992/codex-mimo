@@ -210,7 +210,7 @@ describe("Codex notification adapter", () => {
     const prompt = buildCodexNotificationPrompt(delivery, job, inputSignal);
 
     expect(prompt).toBe(
-      'MiMoCode notification event "implement-1:3:codex" emitted needs_input and may be a retry. Call mimo_result with cwd "C:\\\\workspace" and jobId "implement-1"; continue handling the original request. Reason: Need the API token from the operato'
+      'MiMoCode notification event "implement-1:3:codex" emitted needs_input and may be a retry. Call mimo_result with cwd "C:\\\\workspace" and jobId "implement-1"; continue handling the original request. Reason: MiMoCode needs additional input.'
     );
     expect(prompt).not.toContain("private task prompt");
     expect(prompt).not.toContain("request-secret");
@@ -230,7 +230,7 @@ describe("Codex notification adapter", () => {
 
     const prompt = buildCodexNotificationPrompt(delivery, job, blockedSignal);
 
-    expect(prompt).toContain(" Reason: Blocked because because");
+    expect(prompt).toContain(" Reason: MiMoCode is blocked by an external cond");
     expect(prompt.length).toBe(240);
     expect(prompt).not.toMatch(/[\r\n]/);
   });

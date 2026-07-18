@@ -6,6 +6,7 @@ import type { VerificationResult } from "./verify.js";
 import type { GitDiffSnapshot, GitHeadSnapshot, GitStatusSnapshot } from "../git/diff.js";
 import type { ExecutionCallbackSummary } from "../core/jobs.js";
 import type { TerminationReason } from "../mimo/streaming-runner.js";
+import { publicProgressSummary } from "../core/public-summary.js";
 
 export interface ComposeReport {
   id: string;
@@ -79,14 +80,33 @@ export function createComposeReport(input: CreateComposeReportInput): ComposeRep
     diffPath,
     terminationReason: input.terminationReason,
     sessionId: input.sessionId,
-    executionCallback: input.executionCallback,
+    executionCallback: input.executionCallback
+      ? {
+          ...input.executionCallback,
+          ...(input.executionCallback.error !== undefined
+            ? { error: publicProgressSummary({
+                type: "callback",
+                outcome: input.executionCallback.outcome
+              }) }
+            : {})
+        }
+      : undefined,
     gitStatusBefore: input.gitStatusBefore,
     gitStatusAfter: input.gitStatusAfter,
     gitHeadBefore: input.gitHeadBefore,
     gitHeadAfter: input.gitHeadAfter,
     gitCommits: input.gitCommits,
     verification: input.verification,
-    error: input.error,
+    error: input.error
+      ? publicProgressSummary({
+          type: "job",
+          status: input.status === "timeout"
+            ? "timeout"
+            : input.status === "failed"
+              ? "failed"
+              : "completed"
+        })
+      : undefined,
     reportPaths: {
       json: path.join(input.reportDir, `${input.id}.json`),
       markdown: path.join(input.reportDir, `${input.id}.md`),

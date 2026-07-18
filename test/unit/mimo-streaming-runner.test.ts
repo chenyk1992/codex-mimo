@@ -5,7 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { runMimoCliStreaming, terminateProcessTree } from "../../src/mimo/streaming-runner.js";
+import {
+  runMimoCliStreaming,
+  StreamingProcessStartError,
+  terminateProcessTree
+} from "../../src/mimo/streaming-runner.js";
 
 function makeChild(pid: number, killFn?: () => boolean) {
   const child = new EventEmitter() as EventEmitter & {
@@ -249,14 +253,22 @@ describe("streaming MiMo CLI runner", () => {
     const terminate = vi.fn((_pid, child) => {
       child.stdout?.destroy();
       child.stderr?.destroy();
+      queueMicrotask(() => child.emit("close", 0));
     });
 
-    await expect(runMimoCliStreaming("E:/project/app", ["run"], {
+    const failure = runMimoCliStreaming("E:/project/app", ["run"], {
       timeoutMs: 10_000,
       spawnProcess: () => child,
       terminateProcessTree: terminate,
       onStart: async () => { throw startup; }
-    })).rejects.toBe(startup);
+    });
+
+    await expect(failure).rejects.toMatchObject({
+      name: "StreamingProcessStartError",
+      pid: 656,
+      terminationStatus: "confirmed",
+      cause: startup
+    } satisfies Partial<StreamingProcessStartError>);
 
     expect(terminate).toHaveBeenCalledTimes(1);
     expect(terminate.mock.calls[0][0]).toBe(656);

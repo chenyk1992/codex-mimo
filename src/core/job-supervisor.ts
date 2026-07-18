@@ -19,6 +19,7 @@ import { transitionJob } from "./job-transition.js";
 import { runJobWorker } from "./job-worker.js";
 import { runNotificationWorker } from "../notify/worker.js";
 import { startNotificationDispatch } from "../notify/dispatch-process.js";
+import type { NotificationDelivery } from "../notify/types.js";
 import {
   resolveJobWorkerOwnershipKey,
   resolveNotificationWorkerOwnershipKey
@@ -97,8 +98,10 @@ async function runOwnedSupervisor(
   );
   const jobWorkers = new Map<string, number>();
   const jobStartFailures = new Map<string, number>();
+  const jobProgress = new Map<string, string>();
   let notificationWorker: number | undefined;
   let notificationStartFailures = 0;
+  let notificationProgress: string | undefined;
 
   while (true) {
     const supervisedJobs = readJobs(cwd).filter(isSupervisedJob);
@@ -106,10 +109,20 @@ async function runOwnedSupervisor(
     for (const jobId of jobWorkers.keys()) {
       if (!supervisedIds.has(jobId)) jobWorkers.delete(jobId);
     }
+    for (const jobId of jobStartFailures.keys()) {
+      if (!supervisedIds.has(jobId)) jobStartFailures.delete(jobId);
+    }
+    for (const jobId of jobProgress.keys()) {
+      if (!supervisedIds.has(jobId)) jobProgress.delete(jobId);
+    }
     for (const job of supervisedJobs) {
-      if (await ownershipIsHeld(resolveJobWorkerOwnershipKey(cwd, job.id))) {
-        jobWorkers.delete(job.id);
+      const progress = durableJobProgress(job);
+      const previousProgress = jobProgress.get(job.id);
+      if (previousProgress !== undefined && previousProgress !== progress) {
         jobStartFailures.delete(job.id);
+      }
+      jobProgress.set(job.id, progress);
+      if (await ownershipIsHeld(resolveJobWorkerOwnershipKey(cwd, job.id))) {
         continue;
       }
       const pid = jobWorkers.get(job.id);
@@ -117,6 +130,11 @@ async function runOwnedSupervisor(
       if (pid !== undefined) {
         jobWorkers.delete(job.id);
         jobStartFailures.set(job.id, (jobStartFailures.get(job.id) ?? 0) + 1);
+      }
+      if ((jobStartFailures.get(job.id) ?? 0) >= maxStartFailures) {
+        await settleJobWorkerStartFailure(cwd, job, dependencies);
+        jobStartFailures.delete(job.id);
+        continue;
       }
       const replacement = trySpawn(() => startJobWorker(cwd, job.id));
       if (replacement !== undefined) {
@@ -133,21 +151,36 @@ async function runOwnedSupervisor(
 
     const unfinishedDeliveries = readDeliveries(cwd).filter(isDeliveryUnfinished);
     if (unfinishedDeliveries.length > 0) {
-      if (await ownershipIsHeld(resolveNotificationWorkerOwnershipKey(cwd))) {
-        notificationWorker = undefined;
+      const progress = durableNotificationProgress(unfinishedDeliveries);
+      if (notificationProgress !== undefined && notificationProgress !== progress) {
         notificationStartFailures = 0;
+      }
+      notificationProgress = progress;
+      if (await ownershipIsHeld(resolveNotificationWorkerOwnershipKey(cwd))) {
+        // The active owner gets a chance to make durable delivery progress.
       } else if (notificationWorker === undefined || !isRunning(notificationWorker)) {
-        if (notificationWorker !== undefined) notificationStartFailures += 1;
-        notificationWorker = trySpawn(() => startNotificationWorker(cwd));
-        if (notificationWorker === undefined) notificationStartFailures += 1;
+        if (notificationWorker !== undefined) {
+          notificationWorker = undefined;
+          notificationStartFailures += 1;
+        }
         if (notificationStartFailures >= maxStartFailures) {
           await (dependencies.runNotificationWorker ?? runNotificationWorker)(cwd);
           notificationStartFailures = 0;
+        } else {
+          notificationWorker = trySpawn(() => startNotificationWorker(cwd));
+          if (notificationWorker === undefined) {
+            notificationStartFailures += 1;
+            if (notificationStartFailures >= maxStartFailures) {
+              await (dependencies.runNotificationWorker ?? runNotificationWorker)(cwd);
+              notificationStartFailures = 0;
+            }
+          }
         }
       }
     } else {
       notificationWorker = undefined;
       notificationStartFailures = 0;
+      notificationProgress = undefined;
     }
 
     if (supervisedJobs.length === 0 && unfinishedDeliveries.length === 0) return;
@@ -184,6 +217,27 @@ function isSupervisedJob(job: JobRecord): boolean {
 
 function isDeliveryUnfinished(delivery: { status: string }): boolean {
   return delivery.status === "pending" || delivery.status === "delivering";
+}
+
+function durableJobProgress(job: JobRecord): string {
+  return JSON.stringify({
+    status: job.status,
+    phase: job.phase ?? null,
+    pid: job.pid ?? null,
+    processIdentity: job.processIdentity ?? null,
+    updatedAt: job.updatedAt,
+    pendingTransition: job.pendingTransition?.requestHash ?? null
+  });
+}
+
+function durableNotificationProgress(deliveries: readonly NotificationDelivery[]): string {
+  return JSON.stringify(deliveries.map((delivery) => ({
+    id: delivery.id,
+    status: delivery.status,
+    attempts: delivery.attempts,
+    nextAttemptAt: delivery.nextAttemptAt ?? null,
+    leaseUntil: delivery.leaseUntil ?? null
+  })).sort((left, right) => left.id.localeCompare(right.id)));
 }
 
 function trySpawn(spawn: () => number): number | undefined {

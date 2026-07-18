@@ -37,7 +37,7 @@ describe("mimo_events", () => {
       kind: "milestone",
       level: "info",
       phase: "investigating",
-      summary: "Reading files."
+      summary: "MiMoCode reported progress."
     });
 
     const result = await mimoEvents({ cwd, jobId: job.id, sinceCursor: 1, minLevel: "info" });
@@ -49,7 +49,7 @@ describe("mimo_events", () => {
     expect(result.signals[0]).toMatchObject({
       cursor: 2,
       kind: "milestone",
-      summary: "Reading files."
+      summary: "MiMoCode reported progress."
     });
     expect(result.actions).toEqual({ status: "mimo_status", cancel: "mimo_cancel" });
   });
@@ -75,7 +75,7 @@ describe("mimo_events", () => {
     const result = await mimoEvents({ cwd, minLevel: "info" });
     expect(result.jobId).toBe(job.id);
     expect(result.signals).toHaveLength(1);
-    expect(result.signals[0]).toMatchObject({ level: "error", summary: "Failed." });
+    expect(result.signals[0]).toMatchObject({ level: "error", summary: "MiMoCode job failed." });
   });
 
   it("throws for missing jobs", async () => {

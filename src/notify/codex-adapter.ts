@@ -5,6 +5,7 @@ import {
   type CodexAppServerClient
 } from "./codex-app-server.js";
 import type { DeliveryAttemptResult, NotificationDelivery } from "./types.js";
+import { publicProgressSummary } from "../core/public-summary.js";
 
 const MAX_PROMPT_LENGTH = 240;
 
@@ -22,7 +23,12 @@ export function buildCodexNotificationPrompt(
   const reasonPrefix = " Reason: ";
   const available = Math.max(0, MAX_PROMPT_LENGTH - base.length - reasonPrefix.length);
   if (available === 0) return base;
-  const reason = singleLine(signal.summary).slice(0, available);
+  const reason = publicProgressSummary({
+    type: "signal",
+    kind: signal.kind,
+    status: signal.status,
+    phase: signal.phase
+  }).slice(0, available);
   return `${base}${reasonPrefix}${reason}`;
 }
 

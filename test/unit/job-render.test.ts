@@ -46,10 +46,15 @@ describe("compact job rendering", () => {
       phase: "verifying",
       elapsedMs: 10_000,
       sessionId: "ses_123",
-      summary: "Running npm test.",
+      summary: "MiMoCode entered the verifying phase.",
       changedFiles: ["src/login.ts"],
-      progress: ["Verification started."],
-      notification: { targetType: "codex", status: "delivering", attempts: 2, lastError: "busy" },
+      progress: ["MiMoCode entered the verifying phase."],
+      notification: {
+        targetType: "codex",
+        status: "delivering",
+        attempts: 2,
+        lastError: "Notification delivery requires attention."
+      },
       actions: {
         events: "mimo_events",
         wait: "mimo_wait",
@@ -82,7 +87,9 @@ describe("compact job rendering", () => {
       },
       verification: [{ command: "npm test", exitCode: 1, passed: false, durationMs: 42 }],
       reportPaths: { json: "report.json", markdown: "report.md", diff: "report.diff" },
-      error: "Needs a decision",
+      error: status === "needs_input"
+        ? "MiMoCode needs additional input."
+        : "MiMoCode is blocked by an external condition.",
       errorCode: "needs_input"
     }), { targetType: "codex", status: "delivered", attempts: 1 });
 
@@ -91,7 +98,9 @@ describe("compact job rendering", () => {
       executionCallback: { invocationId: "inv-1", outcome: "completed" },
       verification: [{ command: "npm test", exitCode: 1, passed: false, durationMs: 42 }],
       reportPaths: { json: "report.json", markdown: "report.md", diff: "report.diff" },
-      error: "Needs a decision",
+      error: status === "needs_input"
+        ? "MiMoCode needs additional input."
+        : "MiMoCode is blocked by an external condition.",
       errorCode: "needs_input",
       notification: { targetType: "codex", status: "delivered", attempts: 1 },
       actions: { status: "mimo_status", events: "mimo_events", resume: "mimo_resume" }
