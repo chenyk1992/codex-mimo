@@ -9,6 +9,7 @@ import {
   type PendingJobTransition
 } from "./jobs.js";
 import type { NotificationTarget } from "../notify/types.js";
+import { readDeliveries } from "../notify/outbox.js";
 import { renameWithWindowsRetry } from "./atomic-file.js";
 import { withProcessLock } from "./process-lock.js";
 
@@ -126,8 +127,12 @@ export function listJobs(cwd: string): JobRecord[] {
 }
 
 export function listWebhookSecretEnvironmentNames(cwd: string): string[] {
-  return [...new Set(listJobs(cwd).flatMap((job) =>
-    job.notificationTarget?.type === "webhook" ? [job.notificationTarget.secretEnv] : []
+  const targets = [
+    ...listJobs(cwd).map((job) => job.notificationTarget),
+    ...readDeliveries(path.join(resolveJobDir(cwd), "notifications.jsonl")).map((delivery) => delivery.target)
+  ];
+  return [...new Set(targets.flatMap((target) =>
+    target?.type === "webhook" ? [target.secretEnv] : []
   ))];
 }
 

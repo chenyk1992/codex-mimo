@@ -13,6 +13,7 @@ import {
 } from "../../../src/core/job-transition.js";
 import type { JobKind, JobRecord } from "../../../src/core/jobs.js";
 import { readJobSignals } from "../../../src/core/job-signals.js";
+import { withUtf8ProcessEnv } from "../../../src/core/encoding.js";
 import { readDeliveries } from "../../../src/notify/outbox.js";
 import type { HookCallbackController, MimoHookCallbackSummary } from "../../../src/mimo/hook-callback.js";
 import type { StreamingRunOptions, StreamingRunResult } from "../../../src/mimo/streaming-runner.js";
@@ -130,6 +131,51 @@ function workerDeps(overrides: Partial<JobWorkerDependencies> = {}): JobWorkerDe
 }
 
 describe("runJobWorker", () => {
+  it("omits every persisted webhook secret before launching MiMoCode", async () => {
+    const cwd = tempWorkspace();
+    const current = createJobStore(cwd).create({
+      kind: "implement",
+      task: "Run the current job",
+      request: { cwd },
+      notificationTarget: {
+        type: "webhook",
+        url: "https://example.test/current",
+        secretEnv: "CURRENT_WEBHOOK_SECRET"
+      }
+    });
+    createJobStore(cwd).create({
+      kind: "plan",
+      task: "Retain a different job's secret",
+      request: { cwd },
+      notificationTarget: {
+        type: "webhook",
+        url: "https://example.test/other",
+        secretEnv: "OTHER_WEBHOOK_SECRET"
+      }
+    });
+    const deps = workerDeps();
+
+    await runJobWorker(cwd, current.id, deps);
+
+    const options = vi.mocked(deps.runMimoStreaming).mock.calls[0]?.[2];
+    expect(options?.omitEnv).toEqual(expect.arrayContaining([
+      "CURRENT_WEBHOOK_SECRET",
+      "OTHER_WEBHOOK_SECRET"
+    ]));
+    expect(options?.omitEnv).toHaveLength(2);
+
+    const childEnvironment = withUtf8ProcessEnv({
+      current_webhook_secret: "current-secret",
+      OTHER_WEBHOOK_SECRET: "other-secret"
+    }, {
+      base: {},
+      omit: options?.omitEnv,
+      platform: "win32"
+    });
+    expect(childEnvironment.current_webhook_secret).toBeUndefined();
+    expect(childEnvironment.OTHER_WEBHOOK_SECRET).toBeUndefined();
+  });
+
   it("passes its execution signal through prompt construction and every git capture", async () => {
     const cwd = tempWorkspace();
     const job = seedJob(cwd, "implement");

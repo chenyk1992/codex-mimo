@@ -10,8 +10,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock("execa", () => ({ execa: mocks.execa }));
 
 import { runDoctor } from "../../src/cli/doctor.js";
-import { createJobStore } from "../../src/core/job-store.js";
+import { createJobStore, resolveJobPaths } from "../../src/core/job-store.js";
 import { mimoHealthcheck } from "../../src/codex/tools.js";
+import { enqueueDelivery } from "../../src/notify/outbox.js";
 
 const temporaryRoots: string[] = [];
 
@@ -28,6 +29,29 @@ function createWorkspaceWithWebhookSecret(secretEnv: string): string {
       secretEnv
     }
   });
+  return cwd;
+}
+
+async function createWorkspaceWithRetainedOutboxSecret(secretEnv: string): Promise<string> {
+  const cwd = mkdtempSync(path.join(tmpdir(), "codex-mimo-version-probe-outbox-"));
+  temporaryRoots.push(cwd);
+  const job = createJobStore(cwd).create({
+    kind: "plan",
+    task: "Keep the webhook secret only in the outbox.",
+    request: {},
+    notificationTarget: {
+      type: "webhook",
+      url: "https://example.test/hook",
+      secretEnv
+    }
+  });
+  await enqueueDelivery(job.notificationOutboxFile, {
+    jobId: job.id,
+    signalCursor: 1,
+    target: job.notificationTarget!,
+    createdAt: "2026-07-18T00:00:00.000Z"
+  });
+  rmSync(resolveJobPaths(cwd, job.id).jobFile, { force: true });
   return cwd;
 }
 
@@ -91,6 +115,19 @@ describe("MiMo version probes", () => {
       { cwd, pluginRoot },
       { probeMcpTools: vi.fn().mockResolvedValue([]) }
     );
+
+    expectProbeEnvironmentToOmit(secretEnv, secretValue);
+  });
+
+  it("does not pass an outbox-retained webhook secret after its job file is deleted", async () => {
+    const secretEnv = "MIMO_RETAINED_OUTBOX_SECRET";
+    const secretValue = "retained-outbox-secret-value";
+    const cwd = await createWorkspaceWithRetainedOutboxSecret(secretEnv);
+    vi.stubEnv(secretEnv, secretValue);
+    vi.stubEnv("SAFE_VERSION_PROBE_VALUE", "retained");
+    mocks.execa.mockResolvedValue({ stdout: "mimo 0.5.0\n" });
+
+    await mimoHealthcheck({ cwd });
 
     expectProbeEnvironmentToOmit(secretEnv, secretValue);
   });

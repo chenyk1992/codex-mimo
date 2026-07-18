@@ -4,7 +4,7 @@ import {
   type JobExecutionFinalizeContext
 } from "./job-definitions.js";
 import { appendJobLogLine, appendRawAndNormalizedEvent } from "./job-log.js";
-import { readJob, resolveJobPaths } from "./job-store.js";
+import { listWebhookSecretEnvironmentNames, readJob, resolveJobPaths } from "./job-store.js";
 import {
   recoverPendingTransition,
   transitionJob,
@@ -234,9 +234,7 @@ async function runOwnedJobWorker(
       run = await (deps.runMimoStreaming ?? runMimoCliStreaming)(cwd, mimoArgs, {
           timeoutMs: readTimeout(initial.request),
           env: hook.env,
-          omitEnv: initial.notificationTarget?.type === "webhook"
-            ? [initial.notificationTarget.secretEnv]
-            : [],
+          omitEnv: listWebhookSecretEnvironmentNames(cwd),
           signal: executionGuard.signal,
           onStart: async (pid) => {
             const captured = (deps.captureProcessIdentity ?? captureProcessIdentity)(pid);
