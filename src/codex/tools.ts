@@ -39,6 +39,7 @@ import {
   summarizeJobNotification
 } from "../notify/dispatcher.js";
 import type { NotificationDelivery } from "../notify/types.js";
+import { startNotificationDispatch } from "../notify/dispatch-process.js";
 
 const WAIT_CHECK_INTERVAL_MS = 1_000;
 
@@ -315,11 +316,9 @@ export async function mimoCancel(input: unknown, deps: MimoCancelDependencies = 
   }
 
   if (transitioned.deliveryCreated) {
-    try {
-      (deps.spawnNotificationWorker ?? spawnNotificationWorker)(parsed.cwd);
-    } catch {
-      // The durable outbox remains available for recovery by the next notification worker.
-    }
+    startNotificationDispatch(parsed.cwd, {
+      spawnNotificationWorker: deps.spawnNotificationWorker
+    });
   }
   return renderJobResult(transitioned.job, notificationStatus(transitioned.job));
 }

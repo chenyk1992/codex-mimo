@@ -12,13 +12,13 @@ describe("mimo_compose", () => {
   it("stores the Compose request and returns only a queued receipt", async () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mimo-compose-"));
     dirs.push(cwd);
-    const spawnJobWorker = vi.fn().mockReturnValue(123);
+    const spawnJobSupervisor = vi.fn().mockReturnValue(123);
     const result = await mimoCompose({
       cwd,
       workflow: "dev",
       task: "Build it",
       verification: ["npm test"]
-    }, { env: {}, spawnJobWorker });
+    }, { env: {}, spawnJobSupervisor });
 
     expect(result).toEqual({
       jobId: expect.any(String), kind: "compose", status: "queued",
@@ -31,7 +31,7 @@ describe("mimo_compose", () => {
       verification: ["npm test"],
       timeoutMs: 1_800_000
     });
-    expect(spawnJobWorker).toHaveBeenCalledWith(cwd, result.jobId);
+    expect(spawnJobSupervisor).toHaveBeenCalledWith(cwd);
   });
 
   it("does not wait for a fake worker", async () => {
@@ -40,7 +40,7 @@ describe("mimo_compose", () => {
     let finished = false;
     const result = await mimoCompose({ cwd, workflow: "dev", task: "Build it" }, {
       env: {},
-      spawnJobWorker: () => {
+      spawnJobSupervisor: () => {
         setTimeout(() => { finished = true; }, 50);
         return 123;
       }

@@ -177,6 +177,45 @@ describe("notification dispatcher", () => {
     });
   });
 
+  it("retries the same Codex event after a crash between accepted turn and durable settlement", async () => {
+    const cwd = makeCwd();
+    const { job, delivery } = await makeDelivery(cwd);
+    const deliveredEventIds: string[] = [];
+
+    await expect(dispatchNextDelivery(cwd, {
+      now: () => new Date(createdAt),
+      leaseMs: 30_000,
+      deliver: async (claimed) => {
+        deliveredEventIds.push(claimed.eventId);
+        return { outcome: "delivered" };
+      },
+      completeDelivery: async () => {
+        throw new Error("simulated process crash before settlement");
+      }
+    })).rejects.toThrow("simulated process crash before settlement");
+    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+      status: "delivering",
+      attempts: 1,
+      eventId: delivery.eventId
+    });
+
+    await dispatchNextDelivery(cwd, {
+      now: () => new Date("2026-07-16T00:00:31.000Z"),
+      leaseMs: 30_000,
+      deliver: async (claimed) => {
+        deliveredEventIds.push(claimed.eventId);
+        return { outcome: "delivered" };
+      }
+    });
+
+    expect(deliveredEventIds).toEqual([delivery.eventId, delivery.eventId]);
+    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+      status: "delivered",
+      attempts: 2,
+      eventId: delivery.eventId
+    });
+  });
+
   it.each([
     "2026-07-16T00:30:00.000Z",
     "2026-07-16T00:30:01.000Z"

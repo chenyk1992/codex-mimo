@@ -33,10 +33,11 @@ import {
 } from "../mimo/streaming-runner.js";
 import {
   captureProcessIdentity,
-  spawnNotificationWorker,
   terminateOwnedJobProcess,
   type OwnedProcessTermination
 } from "./job-process.js";
+import { startNotificationDispatch } from "../notify/dispatch-process.js";
+import { spawnNotificationWorker } from "./job-process.js";
 import type { NormalizedMimoEvent } from "../compose/events.js";
 import {
   ProcessLockUnavailableError,
@@ -539,14 +540,13 @@ function startNotificationWorker(
   job: JobRecord,
   deps: JobWorkerDependencies
 ): void {
-  try {
-    (deps.spawnNotificationWorker ?? spawnNotificationWorker)(cwd);
-  } catch (error) {
-    bestEffortLog(
+  startNotificationDispatch(cwd, {
+    spawnNotificationWorker: deps.spawnNotificationWorker,
+    onError: (error) => bestEffortLog(
       job.logFile,
       `Notification worker could not start; pending delivery remains recoverable: ${errorMessage(error)}`
-    );
-  }
+    )
+  });
 }
 
 function readTimeout(request: unknown): number {

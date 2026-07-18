@@ -41,7 +41,7 @@ describe("launchJob", () => {
         order.push("persist");
         return createJobStore(cwdArg).create(input);
       },
-      spawnJobWorker: vi.fn().mockReturnValue(123)
+      spawnJobSupervisor: vi.fn().mockReturnValue(123)
     });
 
     expect(order).toEqual(["resolve", "persist"]);
@@ -58,23 +58,28 @@ describe("launchJob", () => {
       cwd,
       task: "Review HEAD",
       request: { cwd, base: "HEAD" }
-    }, { env: {}, spawnJobWorker: vi.fn().mockReturnValue(123) });
+    }, { env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123) });
 
     expect(readJob(cwd, receipt.jobId)?.notificationTarget).toBeUndefined();
   });
 
-  it("persists failed and enqueues notification when worker spawn throws", async () => {
+  it.each([
+    { type: "codex" as const, threadId: "thread-2" },
+    { type: "webhook" as const, url: "https://example.test/hook", secretEnv: "HOOK_SECRET" }
+  ])("persists failed, enqueues $type notification, and starts dispatch when the owner spawn throws", async (notify) => {
     const cwd = workspace();
     const launchError = new Error("spawn denied");
+    const spawnNotificationWorker = vi.fn().mockReturnValue(456);
     await expect(launchJob({
       kind: "plan",
       cwd,
       task: "Plan it",
       request: { cwd, task: "Plan it" },
-      notify: { type: "codex", threadId: "thread-2" }
+      notify
     }, {
       env: {},
-      spawnJobWorker: () => { throw launchError; }
+      spawnJobSupervisor: () => { throw launchError; },
+      spawnNotificationWorker
     })).rejects.toBe(launchError);
 
     const files = fs.readdirSync(path.join(cwd, ".codex-mimo", "jobs"));
@@ -88,6 +93,8 @@ describe("launchJob", () => {
       errorCode: "worker_spawn_failed"
     });
     expect(readDeliveries(job.notificationOutboxFile)).toHaveLength(1);
+    expect(spawnNotificationWorker).toHaveBeenCalledOnce();
+    expect(spawnNotificationWorker).toHaveBeenCalledWith(cwd);
   });
 
   it("does not return a queued receipt when spawn returns no PID", async () => {
@@ -97,7 +104,7 @@ describe("launchJob", () => {
       cwd,
       task: "Review it",
       request: { cwd, base: "HEAD" }
-    }, { env: {}, spawnJobWorker: () => 0 })).rejects.toThrow("did not return a process ID");
+    }, { env: {}, spawnJobSupervisor: () => 0 })).rejects.toThrow("did not return a process ID");
 
     const jobFile = fs.readdirSync(path.join(cwd, ".codex-mimo", "jobs"))
       .find((file) => /^review-.*\.json$/.test(file))!;
@@ -114,7 +121,7 @@ describe("launchJob", () => {
       request: { cwd, file: "ci.log" }
     }, {
       env: {},
-      spawnJobWorker: () => {
+      spawnJobSupervisor: () => {
         setTimeout(() => { workerFinished = true; }, 50);
         return 123;
       }
@@ -131,7 +138,7 @@ describe("launchJob", () => {
       cwd,
       task: "Build it",
       request: { cwd, task: "Build it", allowWrite: false }
-    }, { env: {}, spawnJobWorker: vi.fn() })).rejects.toThrow("allowWrite=true");
+    }, { env: {}, spawnJobSupervisor: vi.fn() })).rejects.toThrow("allowWrite=true");
     expect(fs.existsSync(path.join(cwd, ".codex-mimo", "jobs"))).toBe(false);
   });
 });
@@ -144,7 +151,7 @@ describe("toJobReceipt", () => {
       cwd,
       task: "Compose it",
       request: { cwd, workflow: "dev", task: "Compose it" }
-    }, { env: {}, spawnJobWorker: vi.fn().mockReturnValue(123) });
+    }, { env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123) });
     const job = readJob(cwd, receipt.jobId)!;
     expect(toJobReceipt(job)).toEqual({
       jobId: job.id,

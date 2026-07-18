@@ -1,8 +1,12 @@
 import { createJobStore, type CreateJobInput } from "./job-store.js";
-import { spawnJobWorker } from "./job-process.js";
+import {
+  spawnJobSupervisor,
+  spawnNotificationWorker
+} from "./job-process.js";
 import { transitionJob } from "./job-transition.js";
 import type { JobKind, JobReceipt, JobRecord } from "./jobs.js";
 import { resolveNotificationTarget } from "../notify/target.js";
+import { startNotificationDispatch } from "../notify/dispatch-process.js";
 import type { NotificationInput, NotificationTarget } from "../notify/types.js";
 
 export interface LaunchJobInput {
@@ -22,7 +26,8 @@ export interface LaunchJobDependencies {
     env: NodeJS.ProcessEnv
   ) => NotificationTarget | undefined;
   createJob?: (cwd: string, input: CreateJobInput) => JobRecord;
-  spawnJobWorker?: typeof spawnJobWorker;
+  spawnJobSupervisor?: typeof spawnJobSupervisor;
+  spawnNotificationWorker?: typeof spawnNotificationWorker;
   transitionJob?: typeof transitionJob;
 }
 
@@ -51,18 +56,23 @@ export async function launchJob(
   });
 
   try {
-    const pid = (dependencies.spawnJobWorker ?? spawnJobWorker)(input.cwd, job.id);
+    const pid = (dependencies.spawnJobSupervisor ?? spawnJobSupervisor)(input.cwd);
     if (!Number.isInteger(pid) || pid <= 0) {
       throw new Error("Job worker spawn did not return a process ID.");
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await (dependencies.transitionJob ?? transitionJob)(input.cwd, job.id, {
+    const failed = await (dependencies.transitionJob ?? transitionJob)(input.cwd, job.id, {
       status: "failed",
       summary: `Job worker failed to start: ${message}`,
       error: message,
       errorCode: "worker_spawn_failed"
     });
+    if (failed.deliveryCreated) {
+      startNotificationDispatch(input.cwd, {
+        spawnNotificationWorker: dependencies.spawnNotificationWorker
+      });
+    }
     throw error;
   }
 

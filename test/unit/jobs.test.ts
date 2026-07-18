@@ -17,8 +17,8 @@ describe("job types", () => {
   it("detects active statuses", () => {
     expect(isActiveJobStatus("queued")).toBe(true);
     expect(isActiveJobStatus("running")).toBe(true);
-    expect(isActiveJobStatus("needs_input")).toBe(true);
-    expect(isActiveJobStatus("blocked")).toBe(true);
+    expect(isActiveJobStatus("needs_input")).toBe(false);
+    expect(isActiveJobStatus("blocked")).toBe(false);
     expect(isActiveJobStatus("completed")).toBe(false);
     expect(isActiveJobStatus("failed")).toBe(false);
     expect(isActiveJobStatus("cancelled")).toBe(false);

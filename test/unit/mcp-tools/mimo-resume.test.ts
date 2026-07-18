@@ -31,10 +31,10 @@ describe("mimo_resume", () => {
     ("creates a queued resume child for a %s parent and inherits its frozen target", async (status) => {
       const cwd = tempWorkspace();
       const source = parent(cwd, status);
-      const spawnJobWorker = vi.fn().mockReturnValue(123);
+      const spawnJobSupervisor = vi.fn().mockReturnValue(123);
 
       const receipt = await mimoResume({ cwd, jobId: source.id, task: "Continue" }, {
-        env: { CODEX_THREAD_ID: "thread-drifted" }, spawnJobWorker
+        env: { CODEX_THREAD_ID: "thread-drifted" }, spawnJobSupervisor
       });
 
       expect(receipt).toEqual({
@@ -50,7 +50,7 @@ describe("mimo_resume", () => {
         notificationTarget: { type: "codex", threadId: "thread-parent" },
         request: { cwd, jobId: source.id, task: "Continue", sessionId: "ses_parent" }
       });
-      expect(spawnJobWorker).toHaveBeenCalledWith(cwd, receipt.jobId);
+      expect(spawnJobSupervisor).toHaveBeenCalledWith(cwd);
     });
 
   it("uses an explicit notification override instead of the parent target", async () => {
@@ -61,7 +61,7 @@ describe("mimo_resume", () => {
       jobId: source.id,
       task: "Continue",
       notify: { type: "webhook", url: "https://example.test/hook", secretEnv: "HOOK_SECRET" }
-    }, { env: {}, spawnJobWorker: vi.fn().mockReturnValue(123) });
+    }, { env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123) });
 
     expect(readJob(cwd, receipt.jobId)?.notificationTarget).toEqual({
       type: "webhook", url: "https://example.test/hook", secretEnv: "HOOK_SECRET"
@@ -77,7 +77,7 @@ describe("mimo_resume", () => {
     });
     updateJob(cwd, source.id, { status: "needs_input", sessionId: "ses_parent" });
     const receipt = await mimoResume({ cwd, jobId: source.id, task: "Continue" }, {
-      env: { CODEX_THREAD_ID: "must-not-drift" }, spawnJobWorker: vi.fn().mockReturnValue(123)
+      env: { CODEX_THREAD_ID: "must-not-drift" }, spawnJobSupervisor: vi.fn().mockReturnValue(123)
     });
     expect(readJob(cwd, receipt.jobId)?.notificationTarget).toBeUndefined();
   });
@@ -91,7 +91,7 @@ describe("mimo_resume", () => {
     updateJob(cwd, source.id, { status, sessionId });
 
     await expect(mimoResume({ cwd, jobId: source.id, task: "Continue" }, {
-      env: {}, spawnJobWorker: vi.fn().mockReturnValue(123)
+      env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
     })).rejects.toThrow(message);
     expect(listJobs(cwd).map((job) => job.id)).toEqual([source.id]);
   });
@@ -111,7 +111,7 @@ describe("mimo_resume", () => {
     updateJob(cwd, source.id, { status: "blocked", sessionId: "ses_parent" });
 
     const receipt = await mimoResume({ cwd, jobId: source.id, task: "Continue" }, {
-      env: {}, spawnJobWorker: vi.fn().mockReturnValue(123)
+      env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
     });
 
     expect(readJob(cwd, receipt.jobId)?.request).toMatchObject({ executionPolicy: expected });
@@ -126,12 +126,12 @@ describe("mimo_resume", () => {
     });
     updateJob(cwd, source.id, { status: "blocked", sessionId: "ses_parent" });
     const first = await mimoResume({ cwd, jobId: source.id, task: "Continue once" }, {
-      env: {}, spawnJobWorker: vi.fn().mockReturnValue(123)
+      env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
     });
     updateJob(cwd, first.jobId, { status: "blocked", sessionId: "ses_child" });
 
     const second = await mimoResume({ cwd, jobId: first.jobId, task: "Continue twice" }, {
-      env: {}, spawnJobWorker: vi.fn().mockReturnValue(123)
+      env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
     });
 
     expect(readJob(cwd, second.jobId)?.request).toMatchObject({
@@ -153,6 +153,6 @@ describe("mimo_resume", () => {
       jobId: source.id,
       task: "Continue",
       allowWrite: true
-    }, { env: {}, spawnJobWorker: vi.fn().mockReturnValue(123) })).rejects.toThrow();
+    }, { env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123) })).rejects.toThrow();
   });
 });

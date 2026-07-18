@@ -75,7 +75,7 @@ export function createMcpServer(overrides: Partial<McpToolHandlers> = {}): McpSe
   const server = new McpServer({ name: "codex-mimocode", version: "0.1.0" });
   const handlers = { ...DEFAULT_HANDLERS, ...overrides };
   const handle = (toolName: string, handler: McpToolHandler) => async (args: unknown) => {
-    appendMcpToolAudit(toolName, args);
+    appendMcpToolAudit(toolName);
     return textResult(await handler(args));
   };
 

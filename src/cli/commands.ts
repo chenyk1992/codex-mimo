@@ -14,6 +14,7 @@ import {
   mimoWait as defaultMimoWait
 } from "../codex/tools.js";
 import { runJobWorker as defaultRunJobWorker } from "../core/job-worker.js";
+import { runJobSupervisor as defaultRunJobSupervisor } from "../core/job-supervisor.js";
 import { formatZodError, InputValidationError } from "../core/input-validation.js";
 import { runNotificationWorker as defaultRunNotificationWorker } from "../notify/worker.js";
 import type { NotificationInput } from "../notify/types.js";
@@ -50,13 +51,14 @@ export interface CliDependencies {
   runDoctor?: (input: { cwd: string }) => Promise<DoctorReport>;
   formatDoctorReport?: (report: DoctorReport) => string;
   runJobWorker?: (cwd: string, jobId: string) => Promise<void>;
+  runJobSupervisor?: (cwd: string) => Promise<void>;
   runNotificationWorker?: (cwd: string) => Promise<void>;
 }
 
 const WORK_COMMANDS = new Set(["plan", "implement", "review", "fix-ci", "resume", "compose"]);
 const CONTROL_COMMANDS = new Set(["status", "events", "wait", "result", "cancel", "jobs"]);
 const PUBLIC_COMMANDS = new Set([...WORK_COMMANDS, ...CONTROL_COMMANDS, "doctor", "healthcheck"]);
-const INTERNAL_COMMANDS = new Set(["job-worker", "notify-worker"]);
+const INTERNAL_COMMANDS = new Set(["job-supervisor", "job-worker", "notify-worker"]);
 const REMOVED_FLAGS = new Set([
   "--background", "--wait", "--session", "--attach", "--fork", "--continue", "--dry-run"
 ]);
@@ -236,6 +238,11 @@ async function runInternal(
   parsed: ParsedArguments,
   dependencies: CliDependencies
 ): Promise<void> {
+  if (command === "job-supervisor") {
+    parsed.assertConsumed();
+    await (dependencies.runJobSupervisor ?? defaultRunJobSupervisor)(cwd);
+    return;
+  }
   if (command === "job-worker") {
     const jobId = parsed.takeRequiredValue("--job-id");
     parsed.assertConsumed();

@@ -88,27 +88,38 @@ describe.sequential("MCP tool audit", () => {
     }
   });
 
-  it("includes jobId only when validated input contains a string jobId", async () => {
+  it("never persists secret-shaped job IDs from status, result, cancel, or resume", async () => {
     const auditFile = path.join(root, "tools.jsonl");
+    const secretJobId = "job-ghp_audit_secret_123";
     vi.stubEnv("CODEX_MIMO_TOOL_AUDIT_FILE", auditFile);
     const { client } = await connect({
-      mimoResult: vi.fn(async () => ({ status: "completed" }))
+      mimoStatus: vi.fn(async () => ({ status: "completed" })),
+      mimoResult: vi.fn(async () => ({ status: "completed" })),
+      mimoCancel: vi.fn(async () => ({ status: "cancelled" })),
+      mimoResume: vi.fn(async () => ({ jobId: "child-1", status: "queued" }))
     });
 
-    const result = await client.callTool({
-      name: "mimo_result",
-      arguments: { cwd: "E:/project", jobId: "implement-123" }
-    });
+    for (const call of [
+      { name: "mimo_status", arguments: { cwd: "E:/project", jobId: secretJobId } },
+      { name: "mimo_result", arguments: { cwd: "E:/project", jobId: secretJobId } },
+      { name: "mimo_cancel", arguments: { cwd: "E:/project", jobId: secretJobId } },
+      { name: "mimo_resume", arguments: { cwd: "E:/project", jobId: secretJobId, task: "continue" } }
+    ]) {
+      const result = await client.callTool(call);
+      expect(result.isError).not.toBe(true);
+    }
 
-    expect(result.isError).not.toBe(true);
     expect(fs.existsSync(auditFile)).toBe(true);
-    expect(readAudit(auditFile)).toEqual([
-      expect.objectContaining({
-        pid: process.pid,
-        toolName: "mimo_result",
-        jobId: "implement-123"
-      })
+    expect(readAudit(auditFile).map((record) => record.toolName)).toEqual([
+      "mimo_status",
+      "mimo_result",
+      "mimo_cancel",
+      "mimo_resume"
     ]);
+    for (const record of readAudit(auditFile)) {
+      expect(Object.keys(record).sort()).toEqual(["pid", "timestamp", "toolName"]);
+    }
+    expect(fs.readFileSync(auditFile, "utf8")).not.toContain(secretJobId);
   });
 
   it("does not audit invalid input rejected before the registered handler", async () => {

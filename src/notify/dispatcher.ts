@@ -43,6 +43,7 @@ export interface DispatcherDependencies {
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch;
   renewDeliveryLease?: typeof renewDeliveryLease;
+  completeDelivery?: typeof completeDelivery;
   scheduleLeaseRenewal?: (
     callback: () => Promise<void>,
     delayMs: number
@@ -112,8 +113,9 @@ export async function dispatchNextDelivery(
   const settledAt = readNow(dependencies);
 
   if (result.outcome === "delivered") {
+    const complete = dependencies.completeDelivery ?? completeDelivery;
     return settleDelivery(outboxFile, claimed, () =>
-      completeDelivery(outboxFile, claimed.id, claimed.attempts, settledAt)
+      complete(outboxFile, claimed.id, claimed.attempts, settledAt)
     );
   }
   if (result.outcome === "permanent" ||

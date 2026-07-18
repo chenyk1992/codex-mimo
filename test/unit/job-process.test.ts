@@ -28,6 +28,17 @@ function fakeChild(pid: number) {
 beforeEach(() => spawn.mockReset());
 
 describe("worker processes", () => {
+  it("provides one internal workspace supervisor launcher", () => {
+    const processApi = jobProcess as unknown as {
+      spawnJobSupervisor?: (cwd: string) => number;
+    };
+    spawn.mockReturnValue(fakeChild(10));
+
+    expect(processApi.spawnJobSupervisor).toBeTypeOf("function");
+    expect(processApi.spawnJobSupervisor!("E:/project")).toBe(10);
+    expect(spawn.mock.calls[0][1]).toEqual(expect.arrayContaining(["job-supervisor", "--cwd", "E:/project"]));
+  });
+
   it.each([
     ["job-worker", "job-1", ["job-worker", "--cwd", "E:/project", "--job-id", "job-1"]],
     ["notify-worker", undefined, ["notify-worker", "--cwd", "E:/project"]]

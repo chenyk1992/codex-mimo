@@ -458,8 +458,6 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     createdAt: context.job.createdAt,
     workflow: workflow.name,
     cwd: context.request.cwd,
-    task: context.request.task ?? defaultComposeTask(workflow.name),
-    mimoArgs: context.mimoArgs ?? [],
     requestedSkills: workflow.skillChain,
     status: composeReportStatus(outcome, verification, changedFiles),
     events: context.events,

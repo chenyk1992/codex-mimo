@@ -13,7 +13,7 @@ describe("mimo_review", () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mimo-review-"));
     dirs.push(cwd);
     const result = await mimoReview({ cwd, base: "main" }, {
-      env: {}, spawnJobWorker: vi.fn().mockReturnValue(123)
+      env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
     });
     expect(result).toEqual({
       jobId: expect.any(String), kind: "review", status: "queued",

@@ -4,6 +4,7 @@ import {
   type JobTransitionResult
 } from "./job-transition.js";
 import { spawnNotificationWorker } from "./job-process.js";
+import { startNotificationDispatch } from "../notify/dispatch-process.js";
 
 const DEFAULT_STALE_THRESHOLD_MS = 300_000;
 
@@ -39,11 +40,9 @@ export async function recoverStaleQueuedJobs(
     }
     recovered.push(result);
     if (result.deliveryCreated) {
-      try {
-        (options.spawnNotificationWorker ?? spawnNotificationWorker)(cwd);
-      } catch {
-        // The durable outbox remains available for the next notification worker.
-      }
+      startNotificationDispatch(cwd, {
+        spawnNotificationWorker: options.spawnNotificationWorker
+      });
     }
   }
   return recovered;

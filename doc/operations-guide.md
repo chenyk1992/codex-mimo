@@ -19,7 +19,7 @@ Every `plan`, `implement`, `review`, `fix-ci`, `resume`, and `compose` request f
 
 1. Validate the request and resolve one notification target.
 2. Persist an authoritative `queued` job and immutable target.
-3. Start `codex-mimo job-worker --job-id <id>` and return a receipt.
+3. Start one workspace-scoped internal supervisor and return a receipt; the supervisor starts `job-worker` and `notify-worker` processes as needed.
 4. Transition to `running`, capture process identity, and execute `mimo run --format json`.
 5. Persist JSONL events and wait for the internal `session.post` callback.
 6. Capture Git evidence, run any verification, write reports, and classify the outcome.
@@ -34,7 +34,7 @@ Codex Desktop injects `CODEX_THREAD_ID` into the plugin process for the current 
 
 Do not add `CODEX_THREAD_ID` to Windows system or user environment variables. A global value outlives its task and can misroute later completions. Use an explicit `notify: { type: "codex", threadId: "..." }` only when a caller must override the current task.
 
-On delivery, the adapter performs `initialize`, `initialized`, `thread/resume`, waits for an idle thread, and accepts one `turn/start`. Busy or temporarily unavailable tasks retry in the notification worker. Missing or forbidden tasks are permanent delivery failures.
+Codex delivery is at-least-once across process crashes. In normal operation, one delivery performs one `thread/resume` and one `turn/start`. If the process crashes after App Server accepts `turn/start` but before durable outbox settlement, the same persisted event ID can be retried and start a duplicate callback turn. The compact prompt exposes the event ID and warns that the notification may be a retry. Busy or temporarily unavailable tasks retry; missing or forbidden tasks are permanent failures.
 
 ## Webhook Contract
 
@@ -74,6 +74,8 @@ Notification state is auxiliary. Delivery failure records `failed`, attempts, an
 
 Normal Codex operation uses none of these until the callback turn; that turn calls `mimo_result`. Ordinary phase and milestone signals do not create a caller notification.
 
+CLI exit codes are: `0` success; `2` command, input, or schema error; and `1` runtime failure, including an unhealthy `doctor` or `healthcheck`.
+
 The gated real-Codex smoke (`RUN_LOCAL_CODEX_NOTIFY_SMOKE=1`) must run from an idle, dedicated Codex task with the task-injected `CODEX_THREAD_ID`. Its completion notification starts a real callback turn in that task, so using an active task can cause busy retries or mix smoke instructions with unrelated work. The smoke starts the packaged stdio MCP server, lets both detached workers run normally, and accepts only a `completed` result marker written by the resumed task from `mimo_result` fields; its opt-in MCP audit also requires exactly that one job-scoped `mimo_result` call and no `mimo_wait` call.
 
 ## Parent-Job Continuation
@@ -84,7 +86,7 @@ Call `mimo_resume` with a `needs_input` or `blocked` parent `jobId` and the addi
 
 Authoritative records live at `.codex-mimo/jobs/<jobId>.json`; `state.json` is only a cache and is rebuilt from records. Writes use temporary files plus rename. Pending transition metadata allows an interrupted signal/job/outbox sequence to finish without duplicating the attention event.
 
-If a job worker restarts while a record says `running`, it verifies the PID and OS process identity. A confirmed inactive or terminated process becomes `failed` with restart evidence. Uncertain ownership becomes `blocked`; the worker does not kill or rerun an unverified process.
+The workspace supervisor holds a physical-workspace process lock, replaces crashed workers while queued/running jobs or unfinished deliveries remain, and stops when no work remains. If a job worker restarts while a record says `running`, it verifies the PID and OS process identity. A confirmed inactive or terminated process becomes `failed` with restart evidence. Uncertain ownership becomes `blocked`; the worker does not kill or rerun an unverified process.
 
 The notification worker scans unfinished outbox entries. It reclaims expired `delivering` leases, preserves attempt generation ownership, and deduplicates each delivery by event ID.
 

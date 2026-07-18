@@ -8,6 +8,10 @@ const [cwd, jobId] = process.argv.slice(2);
 const fakeMimo = process.env.FAKE_MIMO_PATH;
 if (!cwd || !jobId || !fakeMimo) throw new Error("cwd, jobId, and FAKE_MIMO_PATH are required.");
 
+if (process.env.JOB_WORKER_PID_FILE) {
+  fs.writeFileSync(process.env.JOB_WORKER_PID_FILE, `${process.pid}\n`, "utf8");
+}
+
 await runJobWorker(cwd, jobId, {
   createHookCallbackController: (input) => createHookCallbackController({
     ...input,

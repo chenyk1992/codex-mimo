@@ -33,6 +33,7 @@ const fakeMimo = path.resolve("test/fixtures/fake-mimo.mjs");
 const fakeCodexAppServer = path.resolve("test/fixtures/fake-codex-app-server.mjs");
 const processJobWorker = path.resolve("test/fixtures/process-job-worker.mjs");
 const processNotifyWorker = path.resolve("test/fixtures/process-notify-worker.mjs");
+const processSupervisor = path.resolve("test/fixtures/process-supervisor.mjs");
 
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -259,24 +260,30 @@ describe("unified background jobs", () => {
     expect(result.status).toBe(status);
   });
 
-  it("recovers a crashed job-worker child, terminates its owned MiMo tree, and does not rerun it", async () => {
+  it("automatically replaces a crashed job-worker, terminates its owned MiMo tree, and does not rerun it", async () => {
     const cwd = workspace();
     const job = seed(cwd, "implement");
     const checkpoint = path.join(cwd, "mimo-checkpoint.json");
     const invocations = path.join(cwd, "mimo-invocations.log");
+    const workerPidFile = path.join(cwd, "job-worker.pid");
     const childEnv = {
       ...process.env,
       FAKE_MIMO_PATH: fakeMimo,
       FAKE_MIMO_CHECKPOINT_FILE: checkpoint,
-      FAKE_MIMO_INVOCATIONS_FILE: invocations
+      FAKE_MIMO_INVOCATIONS_FILE: invocations,
+      PROCESS_JOB_WORKER_PATH: processJobWorker,
+      PROCESS_NOTIFY_WORKER_PATH: processNotifyWorker,
+      JOB_WORKER_PID_FILE: workerPidFile
     };
-    const first = track(spawn(process.execPath, [processJobWorker, cwd, job.id], {
+    const supervisor = track(spawn(process.execPath, [processSupervisor, cwd], {
       cwd,
       env: childEnv,
       stdio: "ignore",
       windowsHide: true
     }));
-    await waitUntil(() => fs.existsSync(checkpoint) && readJob(cwd, job.id)?.pid !== null, 10_000);
+    await waitUntil(() => fs.existsSync(checkpoint) && fs.existsSync(workerPidFile) &&
+      readJob(cwd, job.id)?.pid !== null, 10_000);
+    const firstWorkerPid = Number(fs.readFileSync(workerPidFile, "utf8").trim());
     const owned = JSON.parse(fs.readFileSync(checkpoint, "utf8")) as {
       pid: number;
       descendantPid: number;
@@ -284,16 +291,12 @@ describe("unified background jobs", () => {
     expect(processIsRunning(owned.pid)).toBe(true);
     expect(processIsRunning(owned.descendantPid)).toBe(true);
 
-    await stopChild(first, false);
+    process.kill(firstWorkerPid, "SIGKILL");
+    await waitUntil(() => !processIsRunning(firstWorkerPid), 5_000);
     expect(readJob(cwd, job.id)).toMatchObject({ status: "running", pid: owned.pid });
 
-    const second = track(spawn(process.execPath, [processJobWorker, cwd, job.id], {
-      cwd,
-      env: childEnv,
-      stdio: "ignore",
-      windowsHide: true
-    }));
-    await waitForExit(second, 10_000);
+    await waitUntil(() => Number(fs.readFileSync(workerPidFile, "utf8").trim()) !== firstWorkerPid, 10_000);
+    await waitForExit(supervisor, 10_000);
     await waitUntil(() => !processIsRunning(owned.pid) && !processIsRunning(owned.descendantPid), 5_000);
 
     expect(readJob(cwd, job.id)).toMatchObject({
@@ -304,7 +307,7 @@ describe("unified background jobs", () => {
     expect(fs.readFileSync(invocations, "utf8").trim().split(/\r?\n/)).toHaveLength(1);
   });
 
-  it("recovers an expired lease after a notify-worker child crashes during HTTP delivery", async () => {
+  it("automatically replaces a crashed notify-worker and recovers its expired HTTP lease", async () => {
     const cwd = workspace();
     const secret = "notify-process-secret";
     let requestCount = 0;
@@ -332,10 +335,13 @@ describe("unified background jobs", () => {
     const env = {
       ...process.env,
       INTEGRATION_WEBHOOK_SECRET: secret,
-      FAKE_NOTIFY_LEASE_MS: "150"
+      FAKE_NOTIFY_LEASE_MS: "150",
+      PROCESS_JOB_WORKER_PATH: processJobWorker,
+      PROCESS_NOTIFY_WORKER_PATH: processNotifyWorker,
+      NOTIFY_WORKER_PID_FILE: path.join(cwd, "notify-worker.pid")
     };
     try {
-      const first = track(spawn(process.execPath, [processNotifyWorker, cwd], {
+      const supervisor = track(spawn(process.execPath, [processSupervisor, cwd], {
         cwd,
         env,
         stdio: "ignore",
@@ -343,17 +349,13 @@ describe("unified background jobs", () => {
       }));
       await firstRequestReceived;
       await waitUntil(() => readDeliveries(job.notificationOutboxFile)[0]?.status === "delivering");
-      await stopChild(first, false);
+      const firstWorkerPid = Number(fs.readFileSync(env.NOTIFY_WORKER_PID_FILE, "utf8").trim());
+      process.kill(firstWorkerPid, "SIGKILL");
+      await waitUntil(() => !processIsRunning(firstWorkerPid), 5_000);
       const leaseUntil = Date.parse(readDeliveries(job.notificationOutboxFile)[0].leaseUntil!);
       await waitUntil(() => Date.now() > leaseUntil, 2_000);
-
-      const second = track(spawn(process.execPath, [processNotifyWorker, cwd], {
-        cwd,
-        env,
-        stdio: "ignore",
-        windowsHide: true
-      }));
-      await waitForExit(second, 5_000);
+      await waitUntil(() => Number(fs.readFileSync(env.NOTIFY_WORKER_PID_FILE, "utf8").trim()) !== firstWorkerPid, 5_000);
+      await waitForExit(supervisor, 5_000);
 
       expect(requestCount).toBe(2);
       expect(successfulResponses).toBe(1);
@@ -467,7 +469,7 @@ describe("unified background jobs", () => {
         task,
         request: { cwd, task, allowWrite: true, timeoutMs: 2_000 },
         notify: { type: "codex" }
-      }, { env: { CODEX_THREAD_ID: "thread-frozen" }, spawnJobWorker: () => 123 });
+      }, { env: { CODEX_THREAD_ID: "thread-frozen" }, spawnJobSupervisor: () => 123 });
       return { content: [{ type: "text", text: JSON.stringify(launched) }] };
     });
     mcpServer.registerTool("mimo_wait", { inputSchema: {} }, async () => {

@@ -89,7 +89,7 @@ Codex Desktop injects `CODEX_THREAD_ID` for each task. Windows users do not need
 { "notify": { "type": "codex", "threadId": "thread-id" } }
 ```
 
-The Codex adapter initializes the App Server, resumes the frozen thread only when it is idle, and starts one compact result-handling turn.
+Codex delivery is at-least-once across process crashes. In normal operation, one delivery performs one `thread/resume` and one `turn/start`. If the notification process crashes after App Server accepts `turn/start` but before the outbox is settled, the same persisted event ID can be retried and start a duplicate callback turn. The callback prompt includes that event ID and identifies the notification as a possible retry; repeated `mimo_result` reads remain read-only.
 
 Webhook targets name an environment variable; secret values are never stored in job, event, log, report, or outbox files:
 
@@ -122,6 +122,8 @@ codex-mimo compose --cwd E:\project --workflow dev "Build the feature"
 
 Controls are `status`, `events`, `wait`, `result`, `cancel`, and `jobs`, each with `--cwd` and the relevant `--job-id`/cursor flags. Notification flags are `--notify codex --thread-id ...` or `--notify webhook --url ... --secret-env ...`.
 
+CLI exit codes are: `0` success; `2` command, input, or schema error; and `1` runtime failure, including an unhealthy `doctor` or `healthcheck`.
+
 ## Compose Workflows
 
 Registered workflows are `brainstorm`, `plan`, `dev`, `fix`, `fix-ci`, `execute-plan`, `review`, `parallel`, `worktree`, `merge`, and `new-skill`. Compose uses the same worker and job lifecycle as every other kind; only its prompt, workflow rules, verification, and report finalization differ. See [Compose workflows](doc/compose-workflows.md).
@@ -137,7 +139,7 @@ Runtime state is below `.codex-mimo/`:
 - `jobs/notifications.jsonl`: durable notification outbox
 - `reports/`, `events/`, `diffs/`: Compose artifacts
 
-The per-job JSON file is authoritative; `jobs/state.json` is a rebuildable cache. A restarted job worker never blindly reruns an unknown process. It verifies process ownership, terminates only a confirmed owned process, then records a recoverable failure or blocked state. Pending transitions and outbox deliveries are idempotent across restart.
+The per-job JSON file is authoritative; `jobs/state.json` is a rebuildable cache. Each launch starts one workspace-scoped internal supervisor, which replaces crashed job or notification workers while execution or delivery remains unfinished and exits when the workspace is idle. A restarted job worker never blindly reruns an unknown process. It verifies process ownership, terminates only a confirmed owned process, then records a recoverable failure or blocked state. Pending transitions and outbox delivery identity remain stable across restart.
 
 ## Safety
 

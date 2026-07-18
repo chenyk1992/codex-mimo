@@ -169,7 +169,7 @@ Expected verdict: `Critical 0 / Important 0 / Minor 0`.
 
 **Interfaces:**
 - Consumes: the security-reviewed HEAD from Task 1.
-- Produces: current-run evidence for secret isolation, Job/worker recovery, outbox durability, Codex exactly-once behavior, strict schemas, audits, and Windows process handling.
+- Produces: current-run evidence for secret isolation, Job/worker recovery, outbox durability, Codex at-least-once crash semantics with normal-path single delivery, strict schemas, audits, and Windows process handling.
 
 - [ ] **Step 1: Run the security and runtime focused tests**
 
@@ -370,6 +370,8 @@ if ($codexNotifySmokeExit -ne 0) { exit $codexNotifySmokeExit }
 
 PASS requires all of the following evidence from this run:
 
+Codex delivery is at-least-once across crashes. In normal operation, one delivery performs one `thread/resume` and one `turn/start`; a crash after accepted `turn/start` but before outbox settlement may retry the same persisted event ID and create a duplicate callback turn.
+
 - The server starts from built MCP and packaged config.
 - The work tool immediately returns a queued receipt.
 - The original Codex task is resumed.
@@ -425,7 +427,7 @@ HTTP/RPC deadlines and AbortSignal propagation.
 Windows atomic rename bounded retry.
 Windows taskkill process-tree liveness confirmation.
 All persisted webhook-secret isolation and HMAC availability.
-Codex resume/start/result exactly-once behavior.
+Codex at-least-once crash behavior and normal-path single resume/start/result behavior.
 No secret, prompt, payload, raw diff, or raw RPC body in durable/audit surfaces.
 ```
 
@@ -602,7 +604,7 @@ After the user chooses, execute only the selected finishing path and re-check re
 
 - Latest secret isolation commit has an independent `Critical 0 / Important 0 / Minor 0` security re-review.
 - Focused runtime/security/public-contract tests pass on the current HEAD.
-- The full integration matrix passes, including worker restart, HMAC, audit, exactly-once callback, and zero-wait evidence.
+- The full integration matrix passes, including automatic worker recovery, HMAC, audit, at-least-once crash retry, normal-path single callback, and zero-wait evidence.
 - Fresh serial `npm test`, build, lint, plugin validation, real MiMo hook smoke, and diff check all exit 0.
 - Real Codex gate is truthfully classified and never inferred from fake protocol tests.
 - Both whole-branch reviewers report `Critical 0 / Important 0 / Minor 0` after any remediation.

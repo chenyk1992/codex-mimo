@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { withUtf8ProcessEnv } from "./encoding.js";
 
-export type WorkerCommand = "job-worker" | "notify-worker";
+export type WorkerCommand = "job-supervisor" | "job-worker" | "notify-worker";
 
 export type ProcessIdentityCapture =
   | { status: "running"; identity: string; evidence: string }
@@ -99,6 +99,10 @@ export function spawnWorker(command: WorkerCommand, cwd: string, jobId?: string)
 
 export function spawnJobWorker(cwd: string, jobId: string): number {
   return spawnWorker("job-worker", cwd, jobId);
+}
+
+export function spawnJobSupervisor(cwd: string): number {
+  return spawnWorker("job-supervisor", cwd);
 }
 
 export function spawnNotificationWorker(cwd: string): number {

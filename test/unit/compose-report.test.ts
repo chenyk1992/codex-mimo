@@ -1,6 +1,13 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseMimoJsonLines } from "../../src/compose/events.js";
-import { createComposeReport, renderMarkdownReport } from "../../src/compose/report.js";
+import {
+  createComposeReport,
+  renderMarkdownReport,
+  writeComposeReport
+} from "../../src/compose/report.js";
 
 describe("compose report", () => {
   it("extracts structured plan text from normalized events", () => {
@@ -32,14 +39,46 @@ describe("compose report", () => {
     expect(report.planText).not.toContain("compose:plan skill");
   });
 
+  it("omits task and prompt arguments from persisted JSON and Markdown reports", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-report-redaction-"));
+    const secret = "ghp_report_prompt_secret_123";
+    try {
+      const unsafeInput = {
+        id: "secret-report",
+        createdAt: "2026-07-18T00:00:00.000Z",
+        workflow: "dev" as const,
+        cwd: root,
+        task: `Implement ${secret}`,
+        mimoArgs: ["run", "--format", "json", `Objective: Implement ${secret}`],
+        requestedSkills: ["compose:tdd"],
+        status: "passed",
+        events: [],
+        diff: { changedFiles: [], diffStat: "", diff: "" },
+        verification: [],
+        reportDir: path.join(root, "reports"),
+        eventsDir: path.join(root, "events"),
+        diffsDir: path.join(root, "diffs")
+      };
+      const report = createComposeReport(unsafeInput);
+
+      writeComposeReport(report);
+
+      expect(report).not.toHaveProperty("task");
+      expect(report).not.toHaveProperty("mimoArgs");
+      expect(JSON.stringify(report)).not.toContain(secret);
+      expect(fs.readFileSync(report.reportPaths.json, "utf8")).not.toContain(secret);
+      expect(fs.readFileSync(report.reportPaths.markdown, "utf8")).not.toContain(secret);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("renders workflow, status, changed files, and verification", () => {
     const markdown = renderMarkdownReport({
       id: "run_1",
       createdAt: "2026-06-21T18:40:00.000Z",
       workflow: "dev",
       cwd: "E:/project/app",
-      task: "Implement login throttling",
-      mimoArgs: ["run", "--agent", "compose"],
       requestedSkills: ["compose:brainstorm", "compose:plan"],
       status: "passed",
       events: [],
@@ -74,8 +113,6 @@ describe("compose report", () => {
       createdAt: "2026-06-21T18:40:00.000Z",
       workflow: "dev",
       cwd: "E:/project/app",
-      task: "Test task",
-      mimoArgs: ["run", "--agent", "compose"],
       requestedSkills: ["compose:tdd"],
       status: "passed",
       events: [],
@@ -102,8 +139,6 @@ describe("compose report", () => {
       createdAt: "2026-06-28T09:20:12.720Z",
       workflow: "plan",
       cwd: "E:/project/app",
-      task: "Plan only",
-      mimoArgs: ["run", "--agent", "compose"],
       requestedSkills: ["compose:plan"],
       status: "failed",
       events: [],
@@ -137,8 +172,6 @@ describe("compose report", () => {
       createdAt: "2026-06-21T18:40:00.000Z",
       workflow: "dev",
       cwd: "E:/project/app",
-      task: "Test task",
-      mimoArgs: ["run", "--agent", "compose"],
       requestedSkills: ["compose:tdd"],
       status: "passed",
       events: [],
@@ -163,8 +196,6 @@ describe("compose report", () => {
       createdAt: "2026-06-21T18:40:00.000Z",
       workflow: "dev",
       cwd: "E:/project/app",
-      task: "Test task",
-      mimoArgs: ["run", "--agent", "compose"],
       requestedSkills: ["compose:tdd"],
       status: "failed",
       events: [],
@@ -189,8 +220,6 @@ describe("compose report", () => {
       createdAt: "2026-06-21T18:40:00.000Z",
       workflow: "dev",
       cwd: "E:/project/app",
-      task: "Test task",
-      mimoArgs: ["run", "--agent", "compose"],
       requestedSkills: ["compose:tdd"],
       status: "passed",
       events: [],
@@ -222,8 +251,6 @@ describe("compose report", () => {
       createdAt: "2026-06-21T18:40:00.000Z",
       workflow: "dev",
       cwd: "E:/project/app",
-      task: "Test task",
-      mimoArgs: ["run", "--agent", "compose"],
       requestedSkills: ["compose:tdd"],
       status: "failed",
       events: [],
@@ -252,8 +279,6 @@ function createReport(messages: string[]) {
     createdAt: "2026-06-23T00:00:00.000Z",
     workflow: "plan",
     cwd: "E:/project/app",
-    task: "Write a plan",
-    mimoArgs: ["run", "--format", "json"],
     requestedSkills: ["compose:plan"],
     status: "passed",
     events: parseMimoJsonLines(messages.map((text) => JSON.stringify({ type: "message", text })).join("\n")),

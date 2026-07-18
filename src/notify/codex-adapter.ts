@@ -8,8 +8,13 @@ import type { DeliveryAttemptResult, NotificationDelivery } from "./types.js";
 
 const MAX_PROMPT_LENGTH = 240;
 
-export function buildCodexNotificationPrompt(job: JobRecord, signal: JobSignal): string {
-  const base = `MiMoCode job emitted ${signal.kind}. ` +
+export function buildCodexNotificationPrompt(
+  delivery: NotificationDelivery,
+  job: JobRecord,
+  signal: JobSignal
+): string {
+  const base = `MiMoCode notification event ${JSON.stringify(singleLine(delivery.eventId))} ` +
+    `emitted ${signal.kind} and may be a retry. ` +
     `Call mimo_result with cwd ${JSON.stringify(singleLine(job.cwd))} ` +
     `and jobId ${JSON.stringify(singleLine(job.id))}; continue handling the original request.`;
   if (signal.kind !== "needs_input" && signal.kind !== "blocked") return base;
@@ -43,7 +48,7 @@ export async function deliverCodexNotification(
     } else {
       await client.startTurn(
         delivery.target.threadId,
-        buildCodexNotificationPrompt(job, signal),
+        buildCodexNotificationPrompt(delivery, job, signal),
         attemptSignal
       );
       result = { outcome: "delivered" };

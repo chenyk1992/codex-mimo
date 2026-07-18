@@ -39,8 +39,6 @@ describe("Windows UTF-8 encoding regressions", () => {
       createdAt: "2026-06-29T00:00:00.000Z",
       cwd,
       workflow: "fix",
-      task: prompt,
-      mimoArgs: ["run", "--format", "json"],
       requestedSkills: ["compose:debug", "compose:tdd", "compose:verify", "compose:feedback"],
       events: parseMimoJsonLines(`${JSON.stringify({ type: "message", text: sample })}\n`),
       diff: { changedFiles: [], diffStat: "", diff: "" },

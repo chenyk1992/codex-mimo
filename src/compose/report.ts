@@ -12,8 +12,6 @@ export interface ComposeReport {
   createdAt: string;
   workflow: ComposeWorkflowName;
   cwd: string;
-  task: string;
-  mimoArgs: string[];
   requestedSkills: string[];
   status: "passed" | "failed" | "needs_review" | "timeout";
   events: NormalizedMimoEvent[];
@@ -44,8 +42,6 @@ export interface CreateComposeReportInput {
   createdAt: string;
   workflow: ComposeWorkflowName;
   cwd: string;
-  task: string;
-  mimoArgs: string[];
   requestedSkills: string[];
   status: ComposeReport["status"];
   events: NormalizedMimoEvent[];
@@ -77,8 +73,6 @@ export function createComposeReport(input: CreateComposeReportInput): ComposeRep
     createdAt: input.createdAt,
     workflow: input.workflow,
     cwd: input.cwd,
-    task: input.task,
-    mimoArgs: input.mimoArgs,
     requestedSkills: input.requestedSkills,
     status: input.status,
     events: input.events,
@@ -126,19 +120,10 @@ export function renderMarkdownReport(report: ComposeReport): string {
     `CWD: \`${report.cwd}\``,
     ...(report.sessionId ? [`Session ID: \`${report.sessionId}\``] : []),
     "",
-    "## Task",
-    "",
-    report.task,
-    "",
     "## Requested Compose Skills",
     "",
     report.requestedSkills.map((skill) => `- \`${skill}\``).join("\n"),
     "",
-    "## MiMoCode Command",
-    "",
-    "```bash",
-    `mimo ${report.mimoArgs.join(" ")}`,
-    "```",
     ""
   ];
 

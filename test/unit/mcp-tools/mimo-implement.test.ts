@@ -13,7 +13,7 @@ describe("mimo_implement", () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mimo-implement-"));
     dirs.push(cwd);
     await expect(mimoImplement({ cwd, task: "Build it", allowWrite: false }, {
-      env: {}, spawnJobWorker: vi.fn()
+      env: {}, spawnJobSupervisor: vi.fn()
     })).rejects.toThrow("allowWrite=true");
     expect(fs.existsSync(path.join(cwd, ".codex-mimo"))).toBe(false);
   });
@@ -22,7 +22,7 @@ describe("mimo_implement", () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mimo-implement-"));
     dirs.push(cwd);
     const result = await mimoImplement({ cwd, task: "Build it", allowWrite: true }, {
-      env: {}, spawnJobWorker: vi.fn().mockReturnValue(123)
+      env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
     });
     expect(result).toEqual({
       jobId: expect.any(String), kind: "implement", status: "queued",

@@ -50,6 +50,7 @@ export interface DoctorMcpProbeCheck {
   tools: string[];
   expectedTools: string[];
   missingTools: string[];
+  unexpectedTools: string[];
   error?: string;
 }
 
@@ -120,6 +121,9 @@ export function formatDoctorReport(report: DoctorReport): string {
   }
   if (report.mcpProbe.missingTools.length > 0) {
     lines.push(`Missing tools: ${report.mcpProbe.missingTools.join(", ")}`);
+  }
+  if (report.mcpProbe.unexpectedTools.length > 0) {
+    lines.push(`Unexpected tools: ${report.mcpProbe.unexpectedTools.join(", ")}`);
   }
   if (report.mcpProbe.error) {
     lines.push(`MCP probe error: ${report.mcpProbe.error}`);
@@ -215,17 +219,23 @@ async function probeToolsIfPossible(
       tools: [],
       expectedTools: [...MIMO_TOOL_NAMES],
       missingTools: [...MIMO_TOOL_NAMES],
+      unexpectedTools: [],
       error: "MCP config is invalid; skipped tools/list probe."
     };
   }
   try {
     const tools = await probeMcpTools!(pluginRoot, mcpConfig.server, timeoutMs);
     const missingTools = MIMO_TOOL_NAMES.filter((tool) => !tools.includes(tool));
+    const unexpectedTools = tools.filter((tool) => !MIMO_TOOL_NAMES.includes(
+      tool as (typeof MIMO_TOOL_NAMES)[number]
+    ));
     return {
-      ok: missingTools.length === 0,
+      ok: missingTools.length === 0 && unexpectedTools.length === 0 &&
+        tools.length === MIMO_TOOL_NAMES.length,
       tools,
       expectedTools: [...MIMO_TOOL_NAMES],
-      missingTools
+      missingTools,
+      unexpectedTools
     };
   } catch (error) {
     return {
@@ -233,6 +243,7 @@ async function probeToolsIfPossible(
       tools: [],
       expectedTools: [...MIMO_TOOL_NAMES],
       missingTools: [...MIMO_TOOL_NAMES],
+      unexpectedTools: [],
       error: error instanceof Error ? error.message : String(error)
     };
   }

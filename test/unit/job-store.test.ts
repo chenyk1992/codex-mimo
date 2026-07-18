@@ -398,6 +398,21 @@ describe("job store", () => {
     expect(listJobs(cwd).map((entry) => entry.id)).toEqual([newest.id, active.id]);
   });
 
+  it("keeps retention bounded when older jobs are paused", () => {
+    const cwd = tempWorkspace();
+    const store = createJobStore(cwd, { maxJobs: 2 });
+
+    const needsInput = store.create({ kind: "plan", task: "Need input", request: {} });
+    updateJob(cwd, needsInput.id, { status: "needs_input" }, { maxJobs: 2 });
+    const blocked = store.create({ kind: "plan", task: "Blocked", request: {} });
+    updateJob(cwd, blocked.id, { status: "blocked" }, { maxJobs: 2 });
+    const newest = store.create({ kind: "plan", task: "Newest", request: {} });
+    updateJob(cwd, newest.id, { status: "completed" }, { maxJobs: 2 });
+
+    expect(listJobs(cwd).map((entry) => entry.id)).toEqual([newest.id, blocked.id]);
+    expect(readJob(cwd, needsInput.id)).toBeUndefined();
+  });
+
   it("uses update maxJobs option when pruning after updates", () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd, { maxJobs: 3 });

@@ -179,5 +179,5 @@ export function buildJobId(
 }
 
 export function isActiveJobStatus(status: JobStatus): boolean {
-  return status === "queued" || status === "running" || status === "needs_input" || status === "blocked";
+  return status === "queued" || status === "running";
 }

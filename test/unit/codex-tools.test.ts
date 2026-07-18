@@ -25,21 +25,21 @@ afterEach(() => dirs.splice(0).forEach((dir) => fs.rmSync(dir, { recursive: true
 
 describe("codex work tool handlers", () => {
   it.each([
-    ["mimo_plan", "plan", (cwd: string, spawnJobWorker: () => number) =>
-      mimoPlan({ cwd, task: "Plan it" }, { env: {}, spawnJobWorker })],
-    ["mimo_implement", "implement", (cwd: string, spawnJobWorker: () => number) =>
-      mimoImplement({ cwd, task: "Build it", allowWrite: true }, { env: {}, spawnJobWorker })],
-    ["mimo_review", "review", (cwd: string, spawnJobWorker: () => number) =>
-      mimoReview({ cwd, base: "HEAD" }, { env: {}, spawnJobWorker })],
-    ["mimo_fix_ci", "fix-ci", (cwd: string, spawnJobWorker: () => number) =>
-      mimoFixCi({ cwd, file: "ci.log", task: "Fix" }, { env: {}, spawnJobWorker })],
-    ["mimo_compose", "compose", (cwd: string, spawnJobWorker: () => number) =>
-      mimoCompose({ cwd, workflow: "dev", task: "Build" }, { env: {}, spawnJobWorker })]
+    ["mimo_plan", "plan", (cwd: string, spawnJobSupervisor: () => number) =>
+      mimoPlan({ cwd, task: "Plan it" }, { env: {}, spawnJobSupervisor })],
+    ["mimo_implement", "implement", (cwd: string, spawnJobSupervisor: () => number) =>
+      mimoImplement({ cwd, task: "Build it", allowWrite: true }, { env: {}, spawnJobSupervisor })],
+    ["mimo_review", "review", (cwd: string, spawnJobSupervisor: () => number) =>
+      mimoReview({ cwd, base: "HEAD" }, { env: {}, spawnJobSupervisor })],
+    ["mimo_fix_ci", "fix-ci", (cwd: string, spawnJobSupervisor: () => number) =>
+      mimoFixCi({ cwd, file: "ci.log", task: "Fix" }, { env: {}, spawnJobSupervisor })],
+    ["mimo_compose", "compose", (cwd: string, spawnJobSupervisor: () => number) =>
+      mimoCompose({ cwd, workflow: "dev", task: "Build" }, { env: {}, spawnJobSupervisor })]
   ] as const)("%s returns only a queued %s receipt", async (_name, kind: JobKind, run) => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-work-tool-"));
     dirs.push(cwd);
-    const spawnJobWorker = vi.fn().mockReturnValue(123);
-    const result = await run(cwd, spawnJobWorker);
+    const spawnJobSupervisor = vi.fn().mockReturnValue(123);
+    const result = await run(cwd, spawnJobSupervisor);
     expect(result).toEqual({
       jobId: expect.any(String),
       kind,
@@ -51,7 +51,7 @@ describe("codex work tool handlers", () => {
         cancel: "mimo_cancel"
       }
     });
-    expect(spawnJobWorker).toHaveBeenCalledWith(cwd, result.jobId);
+    expect(spawnJobSupervisor).toHaveBeenCalledWith(cwd);
   });
 
   it("exposes exactly the final 13-tool surface", () => {

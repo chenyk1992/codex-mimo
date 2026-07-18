@@ -102,8 +102,7 @@ describeSmoke("local Codex notification", () => {
       });
       expect(marker.summary.trim()).not.toBe("");
 
-      const callbackRecords = readToolAudit(auditFile)
-        .filter((record) => record.jobId === receipt.jobId);
+      const callbackRecords = readToolAudit(auditFile);
       expect(callbackRecords.filter((record) => record.toolName === "mimo_result")).toHaveLength(1);
       expect(callbackRecords.filter((record) => record.toolName === "mimo_wait")).toHaveLength(0);
 
@@ -270,15 +269,14 @@ function readToolAudit(file: string): Array<Record<string, unknown>> {
 function isValidToolAuditRecord(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  const allowed = new Set(["timestamp", "pid", "toolName", "jobId"]);
+  const allowed = new Set(["timestamp", "pid", "toolName"]);
   const keys = Object.keys(record);
   return keys.every((key) => allowed.has(key)) &&
-    keys.length === (record.jobId === undefined ? 3 : 4) &&
+    keys.length === 3 &&
     typeof record.timestamp === "string" &&
     !Number.isNaN(Date.parse(record.timestamp)) &&
     Number.isInteger(record.pid) && (record.pid as number) > 0 &&
-    typeof record.toolName === "string" &&
-    (record.jobId === undefined || typeof record.jobId === "string");
+    typeof record.toolName === "string";
 }
 
 function readAppServerAudit(file: string): AppServerAuditRecord[] {

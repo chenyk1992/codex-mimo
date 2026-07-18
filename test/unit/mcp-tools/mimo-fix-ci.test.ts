@@ -13,7 +13,7 @@ describe("mimo_fix_ci", () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mimo-fix-ci-"));
     dirs.push(cwd);
     const result = await mimoFixCi({ cwd, file: "ci.log", task: "Fix tests" }, {
-      env: {}, spawnJobWorker: vi.fn().mockReturnValue(123)
+      env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
     });
     expect(result).toEqual({
       jobId: expect.any(String), kind: "fix-ci", status: "queued",

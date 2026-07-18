@@ -12,9 +12,9 @@ describe("mimo_plan", () => {
   it("stores the request and returns only a queued receipt", async () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mimo-plan-"));
     dirs.push(cwd);
-    const spawnJobWorker = vi.fn().mockReturnValue(123);
+    const spawnJobSupervisor = vi.fn().mockReturnValue(123);
     const result = await mimoPlan({ cwd, task: "Plan it", model: "mimo-v2" }, {
-      env: {}, spawnJobWorker
+      env: {}, spawnJobSupervisor
     });
 
     expect(result).toEqual({
@@ -24,6 +24,6 @@ describe("mimo_plan", () => {
     expect(readJob(cwd, result.jobId)?.request).toEqual({
       cwd, task: "Plan it", model: "mimo-v2", timeoutMs: 1_800_000
     });
-    expect(spawnJobWorker).toHaveBeenCalledWith(cwd, result.jobId);
+    expect(spawnJobSupervisor).toHaveBeenCalledWith(cwd);
   });
 });
