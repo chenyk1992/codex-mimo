@@ -8,7 +8,10 @@ import {
   type AsyncProcessGroupTerminationOptions,
   type ProcessGroupProbe
 } from "../core/job-process.js";
-import { resolveMimoCommand } from "./run-json.js";
+import {
+  resolveMimoProcessSelection,
+  type MimoProcessSelection
+} from "./run-json.js";
 
 export type TerminationReason = "process_timeout" | "host_abort" | "user_cancelled";
 
@@ -34,21 +37,32 @@ export interface StreamingRunOptions {
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
   omitEnv?: readonly string[];
+  platform?: NodeJS.Platform;
   onLine?: (line: string) => void;
   onStderr?: (chunk: string) => void;
   onTimeoutWarning?: (pid: number | null) => void;
-  spawnProcess?: (cwd: string, args: string[], env?: NodeJS.ProcessEnv) => StreamingChildProcess;
+  spawnProcess?: (
+    cwd: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    selection: MimoProcessSelection
+  ) => StreamingChildProcess;
   terminateProcessTree?: (pid: number | null, child: StreamingChildProcess) => Promise<void> | void;
 }
 
-function defaultSpawn(cwd: string, args: string[], env?: NodeJS.ProcessEnv): StreamingChildProcess {
-  return spawn(resolveMimoCommand(), args, {
+function defaultSpawn(
+  cwd: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  selection: MimoProcessSelection
+): StreamingChildProcess {
+  return spawn(selection.command, args, {
     cwd,
     detached: process.platform !== "win32",
     env,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
-    shell: process.platform === "win32"
+    shell: selection.shell
   });
 }
 
@@ -153,8 +167,13 @@ export async function runMimoCliStreaming(
   args: string[],
   options: StreamingRunOptions = {}
 ): Promise<StreamingRunResult> {
-  const childEnv = withUtf8ProcessEnv(options.env, { omit: options.omitEnv });
-  const child = (options.spawnProcess ?? defaultSpawn)(cwd, args, childEnv);
+  const platform = options.platform ?? process.platform;
+  const childEnv = withUtf8ProcessEnv(options.env, {
+    omit: options.omitEnv,
+    platform
+  });
+  const selection = resolveMimoProcessSelection(childEnv, platform);
+  const child = (options.spawnProcess ?? defaultSpawn)(cwd, args, childEnv, selection);
   const stdoutParts: string[] = [];
   const stderrParts: string[] = [];
   let terminationReason: TerminationReason | undefined;

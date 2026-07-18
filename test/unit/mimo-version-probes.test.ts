@@ -89,6 +89,38 @@ afterEach(() => {
 });
 
 describe("MiMo version probes", () => {
+  it("does not select a persisted CODEX_MIMO_COMMAND secret for mimo_healthcheck", async () => {
+    const secretEnv = "CODEX_MIMO_COMMAND";
+    const secretValue = "healthcheck-command-secret";
+    const cwd = createWorkspaceWithWebhookSecret(secretEnv);
+    vi.stubEnv(secretEnv, secretValue);
+    mocks.execa.mockResolvedValue({ stdout: "mimo 0.5.0\n" });
+
+    await mimoHealthcheck({ cwd });
+
+    expect(mocks.execa.mock.calls[0]?.[0]).toBe("mimo");
+    expect(JSON.stringify(mocks.execa.mock.calls[0])).not.toContain(secretValue);
+  });
+
+  it("does not select or persist a persisted MIMO_COMMAND secret for the doctor probe", async () => {
+    const secretEnv = "MIMO_COMMAND";
+    const secretValue = "doctor-command-secret";
+    const cwd = createWorkspaceWithWebhookSecret(secretEnv);
+    const pluginRoot = createPluginRoot();
+    vi.stubEnv(secretEnv, secretValue);
+    mocks.execa.mockImplementation(async (command: string) => {
+      throw new Error(`spawn ${command} ENOENT`);
+    });
+
+    const report = await runDoctor(
+      { cwd, pluginRoot },
+      { probeMcpTools: vi.fn().mockResolvedValue([]) }
+    );
+
+    expect(mocks.execa.mock.calls[0]?.[0]).toBe("mimo");
+    expect(JSON.stringify(report)).not.toContain(secretValue);
+  });
+
   it("does not pass a persisted webhook secret to mimo_healthcheck", async () => {
     const secretEnv = "MIMO_HEALTHCHECK_SECRET";
     const secretValue = "healthcheck-secret-value";

@@ -1,12 +1,45 @@
 import { withUtf8ProcessEnv } from "../core/encoding.js";
 import { listWebhookSecretEnvironmentNames } from "../core/job-store.js";
 
-export function resolveMimoCommand(env: NodeJS.ProcessEnv = process.env): string {
-  return env.CODEX_MIMO_COMMAND || env.MIMO_COMMAND || "mimo";
+export interface MimoProcessSelection {
+  command: string;
+  shell: false | string;
+}
+
+export function resolveMimoCommand(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform
+): string {
+  return readEnvironmentValue(env, "CODEX_MIMO_COMMAND", platform) ||
+    readEnvironmentValue(env, "MIMO_COMMAND", platform) ||
+    "mimo";
+}
+
+export function resolveMimoProcessSelection(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform
+): MimoProcessSelection {
+  return {
+    command: resolveMimoCommand(env, platform),
+    shell: platform === "win32"
+      ? readEnvironmentValue(env, "ComSpec", platform) || "cmd.exe"
+      : false
+  };
 }
 
 export function buildMimoProbeEnvironment(cwd: string): NodeJS.ProcessEnv {
   return withUtf8ProcessEnv({}, { omit: listWebhookSecretEnvironmentNames(cwd) });
+}
+
+function readEnvironmentValue(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  platform: NodeJS.Platform
+): string | undefined {
+  const exact = env[name];
+  if (exact || platform !== "win32") return exact;
+  const matched = Object.keys(env).find((key) => key.toLowerCase() === name.toLowerCase());
+  return matched === undefined ? undefined : env[matched];
 }
 
 export interface MimoRunOptions {

@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MIMO_TOOL_NAMES } from "../codex/tool-names.js";
-import { buildMimoProbeEnvironment, resolveMimoCommand } from "../mimo/run-json.js";
+import { buildMimoProbeEnvironment, resolveMimoProcessSelection } from "../mimo/run-json.js";
 import { DOCTOR_HINT } from "./hints.js";
 
 const MCP_SERVER_NAME = "codex-mimocode";
@@ -145,9 +145,12 @@ export function findPackageRoot(startUrl = import.meta.url): string {
 
 async function defaultCheckMimoVersion(cwd: string): Promise<DoctorCheck> {
   try {
-    const result = await execa(resolveMimoCommand(), ["--version"], {
+    const env = buildMimoProbeEnvironment(cwd);
+    const selection = resolveMimoProcessSelection(env);
+    const result = await execa(selection.command, ["--version"], {
       cwd,
-      env: buildMimoProbeEnvironment(cwd),
+      env,
+      shell: selection.shell,
       reject: false
     });
     if (result.exitCode !== 0) {

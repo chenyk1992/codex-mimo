@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { withProcessLock } from "../core/process-lock.js";
+import { renameWithWindowsRetry } from "../core/atomic-file.js";
 import type {
   EnqueueDeliveryInput,
   NotificationDelivery,
@@ -19,7 +21,7 @@ export function enqueueDelivery(
 ): Promise<EnqueueDeliveryResult> {
   return withProcessLock(file, () => {
     const id = `${input.jobId}:${input.signalCursor}:${input.target.type}`;
-    const existing = readDeliveries(file).find((delivery) => delivery.id === id);
+    const existing = readDeliveriesForMutation(file).find((delivery) => delivery.id === id);
     if (existing) return { delivery: existing, created: false };
 
     const delivery: NotificationDelivery = {
@@ -38,20 +40,42 @@ export function enqueueDelivery(
 }
 
 export function readDeliveries(file: string): NotificationDelivery[] {
+  return replayDeliveryJournal(file).deliveries;
+}
+
+interface DeliveryJournalReplay {
+  deliveries: NotificationDelivery[];
+  requiresRewrite: boolean;
+}
+
+function replayDeliveryJournal(file: string): DeliveryJournalReplay {
   let contents: string;
   try {
     contents = fs.readFileSync(file, "utf8");
   } catch (error) {
-    if (isMissingFileError(error)) return [];
+    if (isMissingFileError(error)) return { deliveries: [], requiresRewrite: false };
     throw error;
   }
 
   const deliveries = new Map<string, NotificationDelivery>();
+  let requiresRewrite = false;
   for (const line of contents.split(/\r?\n/)) {
-    const delivery = parseDeliveryLine(line);
-    if (delivery) deliveries.set(delivery.id, delivery);
+    if (!line.trim()) continue;
+    const parsed = parseDeliveryLine(line);
+    if (parsed) {
+      deliveries.set(parsed.delivery.id, parsed.delivery);
+      if (parsed.requiresRewrite) requiresRewrite = true;
+    } else {
+      requiresRewrite = true;
+    }
   }
-  return [...deliveries.values()];
+  return { deliveries: [...deliveries.values()], requiresRewrite };
+}
+
+function readDeliveriesForMutation(file: string): NotificationDelivery[] {
+  const replay = replayDeliveryJournal(file);
+  if (replay.requiresRewrite) rewriteDeliveryJournal(file, replay.deliveries);
+  return replay.deliveries;
 }
 
 export function claimDueDelivery(
@@ -60,7 +84,7 @@ export function claimDueDelivery(
   leaseMs: number
 ): Promise<NotificationDelivery | undefined> {
   return withProcessLock(file, () => {
-    const delivery = readDeliveries(file).find((candidate) => isDue(candidate, now));
+    const delivery = readDeliveriesForMutation(file).find((candidate) => isDue(candidate, now));
     if (!delivery) return undefined;
 
     const claimed: NotificationDelivery = {
@@ -157,7 +181,7 @@ function updateDelivery(
   update: (delivery: NotificationDelivery) => NotificationDelivery
 ): Promise<NotificationDelivery> {
   return withProcessLock(file, () => {
-    const delivery = readDeliveries(file).find((candidate) => candidate.id === id);
+    const delivery = readDeliveriesForMutation(file).find((candidate) => candidate.id === id);
     if (!delivery) {
       throw new StaleGenerationError(`Notification delivery not found: ${id}`);
     }
@@ -191,6 +215,20 @@ function appendSnapshot(file: string, delivery: NotificationDelivery): void {
   fs.appendFileSync(file, `${JSON.stringify(delivery)}\n`, "utf8");
 }
 
+function rewriteDeliveryJournal(file: string, deliveries: NotificationDelivery[]): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  const contents = deliveries.length === 0
+    ? ""
+    : `${deliveries.map((delivery) => JSON.stringify(delivery)).join("\n")}\n`;
+  try {
+    fs.writeFileSync(temporary, contents, "utf8");
+    renameWithWindowsRetry(temporary, file);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
 function ensureLineBoundary(file: string): void {
   try {
     const contents = fs.readFileSync(file);
@@ -202,12 +240,17 @@ function ensureLineBoundary(file: string): void {
   }
 }
 
-function parseDeliveryLine(line: string): NotificationDelivery | undefined {
+function parseDeliveryLine(
+  line: string
+): { delivery: NotificationDelivery; requiresRewrite: boolean } | undefined {
   const trimmed = line.trim();
   if (!trimmed) return undefined;
   try {
     const value = JSON.parse(trimmed) as unknown;
-    return sanitizeNotificationDelivery(value);
+    const delivery = sanitizeNotificationDelivery(value);
+    return delivery
+      ? { delivery, requiresRewrite: !isDeepStrictEqual(value, delivery) }
+      : undefined;
   } catch {
     return undefined;
   }

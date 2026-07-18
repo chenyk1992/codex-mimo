@@ -33,7 +33,7 @@ import {
 } from "../core/job-signals.js";
 import { requestJobCancellation, transitionJob } from "../core/job-transition.js";
 import { ProcessLockUnavailableError, withProcessLock } from "../core/process-lock.js";
-import { buildMimoProbeEnvironment, resolveMimoCommand } from "../mimo/run-json.js";
+import { buildMimoProbeEnvironment, resolveMimoProcessSelection } from "../mimo/run-json.js";
 import {
   readNotificationDeliveries,
   summarizeJobNotification
@@ -46,9 +46,12 @@ export async function mimoHealthcheck(input: unknown) {
   const parsed = HealthcheckInput.parse(input);
   const cwd = parsed.cwd ?? process.cwd();
   try {
-    const result = await execa(resolveMimoCommand(), ["--version"], {
+    const env = buildMimoProbeEnvironment(cwd);
+    const selection = resolveMimoProcessSelection(env);
+    const result = await execa(selection.command, ["--version"], {
       cwd,
-      env: buildMimoProbeEnvironment(cwd)
+      env,
+      shell: selection.shell
     });
     return { ok: true, version: result.stdout.trim(), cwd };
   } catch {

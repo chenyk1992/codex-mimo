@@ -156,6 +156,25 @@ describe("streaming MiMo CLI runner", () => {
     });
   });
 
+  it("does not select a differently-cased protected Windows ComSpec as the shell", async () => {
+    let selection: { command: string; shell: boolean | string } | undefined;
+
+    await runMimoCliStreaming("E:/project/app", ["run"], {
+      env: { cOmSpEc: "windows-shell-secret" },
+      omitEnv: ["COMSPEC"],
+      platform: "win32",
+      spawnProcess: (_cwd, _args, env, selected) => {
+        selection = selected;
+        expect(Object.keys(env ?? {}).some((name) => name.toLowerCase() === "comspec")).toBe(false);
+        const child = makeChild(656);
+        queueMicrotask(() => child.emit("close", 0));
+        return child;
+      }
+    } as Parameters<typeof runMimoCliStreaming>[2] & { platform: NodeJS.Platform });
+
+    expect(selection).toEqual({ command: "mimo", shell: "cmd.exe" });
+  });
+
   it("awaits asynchronous onStart before completing", async () => {
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });

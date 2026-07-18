@@ -343,7 +343,7 @@ describe("notification outbox", () => {
     )).status).toBe("delivered");
   });
 
-  it("strips secrets and extra fields from replayed snapshots and later mutations", async () => {
+  it("removes secrets and extra fields from the complete journal during later mutations", async () => {
     const file = tempOutbox();
     const id = "review-2:1:webhook";
     fs.writeFileSync(file, `${JSON.stringify({
@@ -383,10 +383,10 @@ describe("notification outbox", () => {
     });
 
     await failDelivery(file, id, replayed.attempts, "permanent");
-    const lastLine = fs.readFileSync(file, "utf8").trim().split(/\r?\n/).at(-1)!;
-    expect(lastLine).not.toContain("target-secret");
-    expect(lastLine).not.toContain("top-level-secret");
-    expect(lastLine).not.toContain("arbitrary");
+    const journal = fs.readFileSync(file, "utf8");
+    expect(journal).not.toContain("target-secret");
+    expect(journal).not.toContain("top-level-secret");
+    expect(journal).not.toContain("arbitrary");
   });
 
   it.each([

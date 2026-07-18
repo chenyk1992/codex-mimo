@@ -2,6 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { Readable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BoundJobDefinition } from "../../../src/core/job-definitions.js";
 import { runJobWorker, type JobWorkerDependencies } from "../../../src/core/job-worker.js";
@@ -16,7 +18,11 @@ import { readJobSignals } from "../../../src/core/job-signals.js";
 import { withUtf8ProcessEnv } from "../../../src/core/encoding.js";
 import { readDeliveries } from "../../../src/notify/outbox.js";
 import type { HookCallbackController, MimoHookCallbackSummary } from "../../../src/mimo/hook-callback.js";
-import type { StreamingRunOptions, StreamingRunResult } from "../../../src/mimo/streaming-runner.js";
+import {
+  runMimoCliStreaming,
+  type StreamingRunOptions,
+  type StreamingRunResult
+} from "../../../src/mimo/streaming-runner.js";
 
 const tempDirs: string[] = [];
 
@@ -38,6 +44,7 @@ function gitWorkspace(): string {
 }
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
   for (const cwd of tempDirs.splice(0)) fs.rmSync(cwd, { recursive: true, force: true });
 });
@@ -131,6 +138,58 @@ function workerDeps(overrides: Partial<JobWorkerDependencies> = {}): JobWorkerDe
 }
 
 describe("runJobWorker", () => {
+  it.each(["CODEX_MIMO_COMMAND", "MIMO_COMMAND"])(
+    "does not select a current work job's protected %s value as the MiMo executable",
+    async (secretEnv) => {
+      const cwd = tempWorkspace();
+      const secretValue = `${secretEnv.toLowerCase()}-secret`;
+      const job = createJobStore(cwd).create({
+        kind: "implement",
+        task: "Run the protected job",
+        request: { cwd },
+        notificationTarget: {
+          type: "webhook",
+          url: "https://example.test/current",
+          secretEnv
+        }
+      });
+      vi.stubEnv(secretEnv, secretValue);
+      let selection: { command: string; shell: boolean | string } | undefined;
+      const deps = workerDeps({
+        runMimoStreaming: (runCwd, args, options) => runMimoCliStreaming(runCwd, args, {
+          ...options,
+          spawnProcess: (_spawnCwd, _spawnArgs, env, selected) => {
+            selection = selected;
+            expect(JSON.stringify(env)).not.toContain(secretValue);
+            const child = new EventEmitter() as EventEmitter & {
+              stdout: Readable;
+              stderr: Readable;
+              pid: number;
+              kill: () => boolean;
+            };
+            child.pid = 321;
+            child.stdout = Readable.from([""]);
+            child.stderr = Readable.from([""]);
+            child.kill = () => true;
+            queueMicrotask(() => child.emit("error", new Error(
+              `spawn ${selected?.command ?? "missing-command"} ENOENT`
+            )));
+            return child;
+          }
+        })
+      });
+
+      await runJobWorker(cwd, job.id, deps);
+
+      expect(selection?.command).toBe("mimo");
+      expect(readJob(cwd, job.id)).toMatchObject({
+        status: "failed",
+        error: expect.stringContaining("spawn mimo ENOENT")
+      });
+      expect(JSON.stringify(readJob(cwd, job.id))).not.toContain(secretValue);
+    }
+  );
+
   it("omits every persisted webhook secret before launching MiMoCode", async () => {
     const cwd = tempWorkspace();
     const current = createJobStore(cwd).create({
