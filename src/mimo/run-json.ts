@@ -1,5 +1,12 @@
+import { withUtf8ProcessEnv } from "../core/encoding.js";
+import { listWebhookSecretEnvironmentNames } from "../core/job-store.js";
+
 export function resolveMimoCommand(env: NodeJS.ProcessEnv = process.env): string {
   return env.CODEX_MIMO_COMMAND || env.MIMO_COMMAND || "mimo";
+}
+
+export function buildMimoProbeEnvironment(cwd: string): NodeJS.ProcessEnv {
+  return withUtf8ProcessEnv({}, { omit: listWebhookSecretEnvironmentNames(cwd) });
 }
 
 export interface MimoRunOptions {

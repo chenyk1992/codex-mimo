@@ -18,7 +18,10 @@ describe("mimo_healthcheck", () => {
     mocks.execa.mockResolvedValue({ stdout: "mimo 0.5.0\n", stderr: "" });
     const result = await mimoHealthcheck({ cwd: "/tmp/proj" });
     expect(result).toEqual({ ok: true, version: "mimo 0.5.0", cwd: "/tmp/proj" });
-    expect(mocks.execa).toHaveBeenCalledWith("mimo", ["--version"], { cwd: "/tmp/proj" });
+    expect(mocks.execa).toHaveBeenCalledWith("mimo", ["--version"], expect.objectContaining({
+      cwd: "/tmp/proj",
+      env: expect.any(Object)
+    }));
   });
 
   it("uses CODEX_MIMO_COMMAND when provided", async () => {
@@ -30,7 +33,7 @@ describe("mimo_healthcheck", () => {
     expect(mocks.execa).toHaveBeenCalledWith(
       "C:/Users/Administrator/AppData/Roaming/npm/mimo.cmd",
       ["--version"],
-      { cwd: "/tmp/proj" }
+      expect.objectContaining({ cwd: "/tmp/proj", env: expect.any(Object) })
     );
   });
 

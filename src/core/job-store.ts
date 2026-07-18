@@ -125,6 +125,12 @@ export function listJobs(cwd: string): JobRecord[] {
     .filter((job): job is JobRecord => job !== undefined);
 }
 
+export function listWebhookSecretEnvironmentNames(cwd: string): string[] {
+  return [...new Set(listJobs(cwd).flatMap((job) =>
+    job.notificationTarget?.type === "webhook" ? [job.notificationTarget.secretEnv] : []
+  ))];
+}
+
 export function readJob(cwd: string, jobId: string): JobRecord | undefined {
   return readJobFile(cwd, jobId);
 }
