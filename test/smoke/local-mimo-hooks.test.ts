@@ -128,7 +128,7 @@ describeSmoke("local MiMoCode hooks", () => {
         errorCode: "callback_cancelled",
         executionCallback: {
           outcome: "cancelled",
-          error: "local smoke"
+          error: "MiMoCode completion callback reported cancellation."
         }
       });
       expect(readJob(root, job.id)?.executionCallback?.sessionId).toBeTruthy();
