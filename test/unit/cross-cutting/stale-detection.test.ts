@@ -54,7 +54,8 @@ describe("job stale recovery", () => {
     expect(failed[0].job.id).toBe(job.id);
     expect(failed[0].job.status).toBe("failed");
     expect(failed[0].job.errorCode).toBe("stale_queued");
-    expect(failed[0].job.error).toContain("stuck in queued state");
+    expect(failed[0].job.error).toBe("MiMoCode job stayed queued too long.");
+    expect(failed[0].job.summary).toBe("MiMoCode job stayed queued too long.");
 
     const stored = readJob(cwd, job.id);
     expect(stored?.status).toBe("failed");

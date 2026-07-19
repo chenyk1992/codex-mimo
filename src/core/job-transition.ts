@@ -228,7 +228,8 @@ function buildPendingTransition(
   const publicSummary = publicProgressSummary({
     type: "job",
     status: transition.status,
-    phase: running ? transition.phase : undefined
+    phase: running ? transition.phase : undefined,
+    ...(transition.errorCode !== undefined ? { errorCode: transition.errorCode } : {})
   });
   return {
     version: 1,

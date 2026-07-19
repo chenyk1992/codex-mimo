@@ -2,8 +2,12 @@ import type { JobPhase, JobStatus } from "./jobs.js";
 
 export const MAX_PUBLIC_SUMMARY_LENGTH = 160;
 
+const KNOWN_OPERATOR_ERROR_SUMMARIES: Readonly<Record<string, string>> = {
+  stale_queued: "MiMoCode job stayed queued too long."
+};
+
 export type PublicSummaryContext =
-  | { type: "job"; status: JobStatus; phase?: JobPhase }
+  | { type: "job"; status: JobStatus; phase?: JobPhase; errorCode?: string }
   | {
       type: "signal";
       kind:
@@ -19,6 +23,7 @@ export type PublicSummaryContext =
         | "timeout";
       status?: JobStatus;
       phase?: JobPhase;
+      errorCode?: string;
     }
   | {
       type: "event";
@@ -55,13 +60,18 @@ function summaryFor(context: PublicSummaryContext): string {
     if (context.kind === "verification_finished") return "Verification finished.";
     if (context.kind === "milestone") return "MiMoCode reported progress.";
     if (context.kind === "phase_changed") return runningSummary(context.phase);
+    if (context.kind === "failed") {
+      return knownOperatorErrorSummary(context.errorCode) ?? statusSummary("failed");
+    }
     return statusSummary(context.kind);
   }
 
   if (context.type === "job") {
-    return context.status === "running"
-      ? runningSummary(context.phase)
-      : statusSummary(context.status);
+    if (context.status === "running") return runningSummary(context.phase);
+    if (context.status === "failed") {
+      return knownOperatorErrorSummary(context.errorCode) ?? statusSummary("failed");
+    }
+    return statusSummary(context.status);
   }
 
   if (context.type === "callback") {
@@ -73,6 +83,11 @@ function summaryFor(context: PublicSummaryContext): string {
 
   if (context.type === "notification") return "Notification delivery requires attention.";
   return "MiMoCode job diagnostic recorded.";
+}
+
+function knownOperatorErrorSummary(errorCode?: string): string | undefined {
+  if (!errorCode) return undefined;
+  return KNOWN_OPERATOR_ERROR_SUMMARIES[errorCode];
 }
 
 function runningSummary(phase?: JobPhase): string {
