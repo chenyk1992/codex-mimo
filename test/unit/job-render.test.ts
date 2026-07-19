@@ -114,4 +114,36 @@ describe("compact job rendering", () => {
       expect(result.resultType).toBe("final");
       expect(result.actions).toEqual({ status: "mimo_status", events: "mimo_events" });
     });
+
+  it("surfaces stale_queued operator summary on status and result paths", () => {
+    const failed = job({
+      status: "failed",
+      phase: undefined,
+      errorCode: "stale_queued",
+      error: "Job stuck in queued state for longer than 300s.",
+      summary: "Job stuck in queued state for longer than 300s."
+    });
+
+    expect(renderJobStatus(failed).summary).toBe("MiMoCode job stayed queued too long.");
+    expect(renderJobResult(failed)).toMatchObject({
+      summary: "MiMoCode job stayed queued too long.",
+      error: "MiMoCode job stayed queued too long.",
+      errorCode: "stale_queued"
+    });
+  });
+
+  it("keeps generic failed summaries for unknown errorCode values", () => {
+    const failed = job({
+      status: "failed",
+      phase: undefined,
+      errorCode: "agent_said_something_secret",
+      error: "SECRET leaked path",
+      summary: "SECRET leaked path"
+    });
+
+    expect(renderJobStatus(failed).summary).toBe("MiMoCode job failed.");
+    expect(renderJobResult(failed).summary).toBe("MiMoCode job failed.");
+    expect(renderJobResult(failed).error).toBe("MiMoCode job failed.");
+    expect(JSON.stringify(renderJobResult(failed))).not.toContain("SECRET");
+  });
 });

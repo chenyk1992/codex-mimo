@@ -4,7 +4,12 @@ import {
   ComposeInputShape,
   FixCiInput,
   ImplementInput,
+  JobCancelInput,
+  JobEventsInput,
+  JobListInput,
   JobOptionsSchema,
+  JobResultInput,
+  JobStatusInput,
   NotifySchema,
   PlanInput,
   parseComposeInput,
@@ -75,5 +80,20 @@ describe("work tool schemas", () => {
       "cwd", "jobId", "limit", "minLevel", "sinceCursor", "timeoutMs"
     ]);
     expect(() => JobWaitInput.parse({ cwd: "E:/project", pollMs: 1 })).toThrow();
+  });
+});
+
+describe("control tool schemas", () => {
+  it.each([
+    JobStatusInput,
+    JobEventsInput,
+    JobWaitInput,
+    JobResultInput,
+    JobCancelInput,
+    JobListInput
+  ] as const)("rejects empty cwd like work tools %#", (schema) => {
+    const cancelFields = schema === JobCancelInput ? { jobId: "job-1" } : {};
+    expect(() => schema.parse({ cwd: "", ...cancelFields })).toThrow();
+    expect(schema.parse({ cwd: "E:/project", ...cancelFields })).toMatchObject({ cwd: "E:/project" });
   });
 });

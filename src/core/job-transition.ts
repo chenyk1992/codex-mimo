@@ -173,7 +173,8 @@ async function applyPendingTransition(
     createdAt: pending.signalCreatedAt,
     ...(pending.phase ? { phase: pending.phase } : {}),
     summary: pending.summary,
-    ...(pending.reportPaths ? { reportPaths: pending.reportPaths } : {})
+    ...(pending.reportPaths ? { reportPaths: pending.reportPaths } : {}),
+    ...(pending.errorCode !== undefined ? { errorCode: pending.errorCode } : {})
   });
   await dependencies.afterSignalAppended?.();
 
@@ -187,18 +188,22 @@ async function applyPendingTransition(
   let deliveryCreated = false;
   if (finalized.notificationTarget && isAttentionSignal(signal)) {
     const enqueueDelivery = dependencies.enqueueDelivery ?? enqueueNotificationDelivery;
-    await enqueueDelivery(finalized.notificationOutboxFile, {
+    const enqueued = await enqueueDelivery(finalized.notificationOutboxFile, {
       jobId: finalized.id,
       signalCursor: signal.cursor,
       target: finalized.notificationTarget,
       createdAt: signal.createdAt
     });
-    deliveryCreated = true;
+    deliveryCreated = enqueued.created;
     await dependencies.afterDeliveryEnqueued?.();
   }
 
   const cleared = await clearPendingJobTransition(cwd, finalized.id, pending);
   await dependencies.afterIntentCleared?.();
+  if (!deliveryCreated) {
+    const unacked = recoverUnacknowledgedDelivery(cleared);
+    if (unacked) return unacked;
+  }
   return { job: cleared, signal, deliveryCreated };
 }
 

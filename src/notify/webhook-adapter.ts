@@ -54,7 +54,8 @@ export function buildNotificationPayload(
       summary: publicProgressSummary({
         type: "job",
         status: job.status,
-        phase: job.phase
+        phase: job.phase,
+        ...(job.errorCode !== undefined ? { errorCode: job.errorCode } : {})
       })
     },
     result: {

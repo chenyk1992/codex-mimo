@@ -109,6 +109,47 @@ describe("webhook adapter", () => {
     expect(payload.job.summary.length).toBeLessThanOrEqual(160);
   });
 
+  it("surfaces stale_queued operator summary from job.errorCode", () => {
+    const payload = buildNotificationPayload(
+      delivery,
+      {
+        ...job,
+        status: "failed",
+        errorCode: "stale_queued",
+        summary: "Job stuck in queued state for longer than 300s."
+      },
+      {
+        ...signal,
+        kind: "failed",
+        status: "failed",
+        summary: "Job stuck in queued state for longer than 300s."
+      }
+    );
+
+    expect(payload.job.summary).toBe("MiMoCode job stayed queued too long.");
+  });
+
+  it("keeps generic failed webhook summary for unknown errorCode values", () => {
+    const payload = buildNotificationPayload(
+      delivery,
+      {
+        ...job,
+        status: "failed",
+        errorCode: "agent_said_something_secret",
+        summary: "SECRET leaked path"
+      },
+      {
+        ...signal,
+        kind: "failed",
+        status: "failed",
+        summary: "SECRET leaked path"
+      }
+    );
+
+    expect(payload.job.summary).toBe("MiMoCode job failed.");
+    expect(JSON.stringify(payload)).not.toContain("SECRET");
+  });
+
   it("signs the supplied UTF-8 body", () => {
     const body = JSON.stringify({ message: "精确字节" });
 

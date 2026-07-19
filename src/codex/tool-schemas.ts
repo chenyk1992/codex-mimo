@@ -76,12 +76,12 @@ export function parseComposeInput(input: unknown): z.infer<typeof ComposeInput> 
 }
 
 export const JobStatusInput = z.object({
-  cwd: z.string(),
+  cwd: z.string().min(1),
   jobId: z.string().optional()
 }).strict();
 
 export const JobEventsInput = z.object({
-  cwd: z.string(),
+  cwd: z.string().min(1),
   jobId: z.string().optional(),
   sinceCursor: z.number().int().nonnegative().default(0),
   limit: z.number().int().positive().max(100).default(20),
@@ -93,16 +93,16 @@ export const JobWaitInput = JobEventsInput.extend({
 }).strict();
 
 export const JobResultInput = z.object({
-  cwd: z.string(),
+  cwd: z.string().min(1),
   jobId: z.string().optional()
 }).strict();
 
 export const JobCancelInput = z.object({
-  cwd: z.string(),
-  jobId: z.string()
+  cwd: z.string().min(1),
+  jobId: z.string().min(1)
 }).strict();
 
 export const JobListInput = z.object({
-  cwd: z.string(),
+  cwd: z.string().min(1),
   all: z.boolean().default(false)
 }).strict();

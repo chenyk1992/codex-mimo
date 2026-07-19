@@ -6,10 +6,11 @@ describe("public release contract", () => {
   it("describes the six queued work tools and seven control or diagnostic tools", () => {
     const manifest = JSON.parse(
       fs.readFileSync(path.resolve(".codex-plugin/plugin.json"), "utf8")
-    ) as { interface?: { longDescription?: string } };
+    ) as { interface?: { longDescription?: string }; keywords?: string[] };
 
     expect(manifest.interface?.longDescription).toMatch(/six queued work tools/i);
     expect(manifest.interface?.longDescription).toMatch(/seven control(?: and|\/)diagnostic tools/i);
+    expect(manifest.keywords ?? []).not.toContain("acp");
   });
 
   it("documents the complete CLI exit-code contract", () => {

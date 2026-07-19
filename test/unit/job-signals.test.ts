@@ -90,4 +90,34 @@ describe("job signals", () => {
     expect(isAttentionSignal("phase_changed")).toBe(false);
     expect(isAttentionSignal({ kind: "milestone" })).toBe(false);
   });
+
+  it("surfaces stale_queued operator summary when rewriting failed attention signals", () => {
+    const file = tempSignalFile();
+    const signal = appendJobSignal(file, {
+      jobId: "job-1",
+      kind: "failed",
+      level: "error",
+      status: "failed",
+      summary: "Job stuck in queued state for longer than 300s.",
+      errorCode: "stale_queued"
+    });
+
+    expect(signal.summary).toBe("MiMoCode job stayed queued too long.");
+    expect(signal).not.toHaveProperty("errorCode");
+  });
+
+  it("keeps generic failed signal summary for unknown errorCode values", () => {
+    const file = tempSignalFile();
+    const signal = appendJobSignal(file, {
+      jobId: "job-1",
+      kind: "failed",
+      level: "error",
+      status: "failed",
+      summary: "SECRET leaked path",
+      errorCode: "agent_said_something_secret"
+    });
+
+    expect(signal.summary).toBe("MiMoCode job failed.");
+    expect(JSON.stringify(signal)).not.toContain("SECRET");
+  });
 });

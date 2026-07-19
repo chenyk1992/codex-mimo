@@ -12,7 +12,6 @@ import {
   spawnJobWorker,
   spawnNotificationWorker,
   spawnWorker,
-  terminateJobProcess,
   terminateOwnedJobProcess,
   verifyProcessIdentity
 } from "../../src/core/job-process.js";
@@ -74,30 +73,10 @@ describe("worker processes", () => {
   });
 });
 
-describe("terminateJobProcess", () => {
-  it("terminates finite pids through injected killer", () => {
-    const kill = vi.fn();
-    terminateJobProcess(123, { killProcess: kill });
-    expect(kill).toHaveBeenCalledWith(123);
-  });
-
-  it("terminates process trees on Windows", () => {
-    const spawnSync = vi.fn();
-    terminateJobProcess(123, { platform: "win32", spawnSync });
-    expect(spawnSync).toHaveBeenCalledWith("taskkill", ["/PID", "123", "/T", "/F"], {
-      stdio: "ignore",
-      windowsHide: true
-    });
-  });
-
-  it("terminates process groups on POSIX", () => {
-    const killProcess = vi.fn();
-    terminateJobProcess(123, { platform: "linux", killProcess });
-    expect(killProcess).toHaveBeenCalledWith(-123);
-  });
-});
-
 describe("owned process identity", () => {
+  it("does not export blind-PID terminateJobProcess", () => {
+    expect(jobProcess).not.toHaveProperty("terminateJobProcess");
+  });
   it("does not kill a reused PID whose startup identity differs", () => {
     const killProcessTree = vi.fn();
 

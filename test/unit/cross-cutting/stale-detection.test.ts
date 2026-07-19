@@ -10,6 +10,7 @@ import {
 } from "../../../src/core/job-store.js";
 import { recoverStaleQueuedJobs } from "../../../src/core/job-recovery.js";
 import { readJobSignals } from "../../../src/core/job-signals.js";
+import { transitionJob } from "../../../src/core/job-transition.js";
 import { readDeliveries } from "../../../src/notify/outbox.js";
 
 const tempDirs: string[] = [];
@@ -62,7 +63,8 @@ describe("job stale recovery", () => {
     expect(readJobSignals(job.signalsFile).signals).toHaveLength(1);
     expect(readJobSignals(job.signalsFile).signals[0]).toMatchObject({
       kind: "failed",
-      status: "failed"
+      status: "failed",
+      summary: "MiMoCode job stayed queued too long."
     });
     expect(readDeliveries(job.notificationOutboxFile)).toEqual([
       expect.objectContaining({
@@ -129,5 +131,43 @@ describe("job stale recovery", () => {
     const failed = await recoverStaleQueuedJobs(cwd, { staleThresholdMs: 300_000 });
 
     expect(failed).toHaveLength(0);
+  });
+
+  it("skips benign queued-to-running races and continues recovering other stale jobs", async () => {
+    const cwd = tempWorkspace();
+    const store = createJobStore(cwd);
+    const racing = store.create({ kind: "plan", task: "Racing", request: {} });
+    const stale = store.create({
+      kind: "plan",
+      task: "Still stale",
+      request: {},
+      notificationTarget: { type: "codex", threadId: "thread-stale" }
+    });
+    const spawnNotificationWorker = vi.fn(() => 123);
+
+    await expect(recoverStaleQueuedJobs(cwd, {
+      staleThresholdMs: 0,
+      spawnNotificationWorker,
+      transitionJob: async (cwdArg, jobId, transition) => {
+        if (jobId === racing.id) {
+          updateJob(cwdArg, racing.id, {
+            status: "running",
+            phase: "starting",
+            pid: 42,
+            processIdentity: "start-42"
+          });
+          throw new Error("Illegal job transition running -> failed");
+        }
+        return transitionJob(cwdArg, jobId, transition);
+      }
+    })).resolves.toEqual([
+      expect.objectContaining({
+        job: expect.objectContaining({ id: stale.id, status: "failed", errorCode: "stale_queued" })
+      })
+    ]);
+
+    expect(readJob(cwd, racing.id)?.status).toBe("running");
+    expect(readJob(cwd, stale.id)?.status).toBe("failed");
+    expect(spawnNotificationWorker).toHaveBeenCalledOnce();
   });
 });

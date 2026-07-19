@@ -47,8 +47,8 @@ export interface JobSignal {
 
 export type NewJobSignal = Omit<JobSignal, "cursor" | "createdAt"> & {
   createdAt?: string;
+  errorCode?: string;
 };
-
 export interface ReadJobSignalsOptions {
   sinceCursor?: number;
   limit?: number;
@@ -88,18 +88,19 @@ export function appendJobSignalAtCursor(
   cursor: number,
   signal: NewJobSignal
 ): JobSignal {
+  const { errorCode, ...publicSignal } = signal;
   const stored: JobSignal = {
-    ...signal,
+    ...publicSignal,
     summary: publicProgressSummary({
       type: "signal",
       kind: signal.kind,
       status: signal.status,
-      phase: signal.phase
+      phase: signal.phase,
+      ...(errorCode !== undefined ? { errorCode } : {})
     }),
     cursor,
     createdAt: signal.createdAt ?? new Date().toISOString()
   };
-
   const current = readJobSignals(file);
   const existing = current.signals.find((candidate) => candidate.cursor === cursor);
   if (existing) {

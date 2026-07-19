@@ -29,14 +29,20 @@ export function renderJobStatus(
     ...(job.phase ? { phase: job.phase } : {}),
     elapsedMs: elapsedMs(job, options.nowMs),
     sessionId: job.sessionId ?? null,
-    summary: publicProgressSummary({ type: "job", status: job.status, phase: job.phase }),
+    summary: publicProgressSummary({
+      type: "job",
+      status: job.status,
+      phase: job.phase,
+      ...(job.errorCode !== undefined ? { errorCode: job.errorCode } : {})
+    }),
     changedFiles: [...job.changedFiles],
     ...(job.cancellationRequestedAt ? { cancellationRequested: true as const } : {}),
     ...(job.executionCallback ? { executionCallback: publicExecutionCallback(job) } : {}),
     progress: (options.progress ?? []).map(() => publicProgressSummary({
       type: "job",
       status: job.status,
-      phase: job.phase
+      phase: job.phase,
+      ...(job.errorCode !== undefined ? { errorCode: job.errorCode } : {})
     })),
     ...(options.notification ? { notification: publicNotification(options.notification) } : {}),
     actions: statusActions(job.status)
@@ -54,12 +60,25 @@ export function renderJobResult(
     parentJobId: job.parentJobId ?? null,
     status: job.status,
     resultType: partial ? "partial" : "final",
-    summary: publicProgressSummary({ type: "job", status: job.status, phase: job.phase }),
+    summary: publicProgressSummary({
+      type: "job",
+      status: job.status,
+      phase: job.phase,
+      ...(job.errorCode !== undefined ? { errorCode: job.errorCode } : {})
+    }),
     sessionId: job.sessionId ?? null,
     changedFiles: [...job.changedFiles],
     verification: job.verification.map(compactVerification),
     ...(job.executionCallback ? { executionCallback: publicExecutionCallback(job) } : {}),
-    ...(job.error ? { error: publicProgressSummary({ type: "job", status: job.status }) } : {}),
+    ...(job.error
+      ? {
+          error: publicProgressSummary({
+            type: "job",
+            status: job.status,
+            ...(job.errorCode !== undefined ? { errorCode: job.errorCode } : {})
+          })
+        }
+      : {}),
     ...(job.errorCode ? { errorCode: job.errorCode } : {}),
     ...(job.reportPaths ? { reportPaths: { ...job.reportPaths } } : {}),
     ...(notification ? { notification: publicNotification(notification) } : {}),

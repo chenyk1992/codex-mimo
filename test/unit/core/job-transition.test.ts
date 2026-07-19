@@ -155,6 +155,29 @@ describe("job transitions", () => {
     expect(readDeliveries(result.job.notificationOutboxFile)).toEqual([]);
   });
 
+  it("sets deliveryCreated from enqueue created=false on idempotent delivery", async () => {
+    const { cwd, jobId } = seedJob("running", true);
+    const createdAt = "2026-07-16T00:00:00.000Z";
+    const result = await transitionJob(cwd, jobId, { status: "completed", summary: "done" }, {
+      enqueueDelivery: async () => ({
+        delivery: {
+          id: `${jobId}:1:codex`,
+          eventId: `${jobId}:1:codex`,
+          jobId,
+          signalCursor: 1,
+          target: { type: "codex", threadId: "thread-1" },
+          status: "delivered",
+          attempts: 1,
+          createdAt
+        },
+        created: false
+      })
+    });
+
+    expect(result.deliveryCreated).toBe(false);
+    expect(readDeliveries(result.job.notificationOutboxFile)).toEqual([]);
+  });
+
   it("rejects attention kinds passed as ordinary progress", async () => {
     const { cwd, jobId } = seedJob("running");
 

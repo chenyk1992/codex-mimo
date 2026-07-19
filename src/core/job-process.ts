@@ -189,42 +189,6 @@ export function terminateOwnedJobProcess(
   return { status: "unconfirmed", evidence: after.evidence };
 }
 
-export function terminateJobProcess(
-  pid: number | null | undefined,
-  options: {
-    killProcess?: (pid: number) => void;
-    platform?: NodeJS.Platform;
-    spawnSync?: typeof spawnSync;
-  } = {}
-): void {
-  if (!Number.isFinite(pid)) return;
-  const platform = options.platform ?? process.platform;
-  const killProcess = options.killProcess ?? ((targetPid: number) => process.kill(targetPid));
-  try {
-    if (!options.platform && options.killProcess) {
-      killProcess(pid as number);
-      return;
-    }
-
-    if (platform === "win32") {
-      (options.spawnSync ?? spawnSync)("taskkill", ["/PID", String(pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true
-      });
-      return;
-    }
-
-    try {
-      killProcess(-(pid as number));
-      return;
-    } catch {
-      killProcess(pid as number);
-    }
-  } catch {
-    // Best-effort cancellation. The job state is still updated by the caller.
-  }
-}
-
 function captureLinuxIdentity(pid: number, readFile: typeof fs.readFileSync): ProcessIdentityCapture {
   try {
     const stat = String(readFile(`/proc/${pid}/stat`, "utf8"));
