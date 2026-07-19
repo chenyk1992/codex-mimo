@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -25,6 +25,7 @@ import {
   type StreamingRunOptions,
   type StreamingRunResult
 } from "../../../src/mimo/streaming-runner.js";
+import type { MimoProcessSelection } from "../../../src/mimo/run-json.js";
 
 const tempDirs: string[] = [];
 
@@ -156,7 +157,7 @@ describe("runJobWorker", () => {
         }
       });
       vi.stubEnv(secretEnv, secretValue);
-      let selection: { command: string; shell: boolean | string } | undefined;
+      let selection: MimoProcessSelection | undefined;
       const deps = workerDeps({
         runMimoStreaming: (runCwd, args, options) => runMimoCliStreaming(runCwd, args, {
           ...options,
@@ -422,18 +423,25 @@ describe("runJobWorker", () => {
     child.stdout = Readable.from([""]);
     child.stderr = Readable.from([""]);
     child.kill = () => true;
+    let childAlive = true;
     let closeChild!: () => void;
     const childClosed = new Promise<void>((resolve) => {
       closeChild = () => {
+        childAlive = false;
         child.emit("close", 0);
         resolve();
       };
     });
     const deps = workerDeps({
-      captureProcessIdentity: vi.fn(() => ({
-        status: "unconfirmed",
-        evidence: "creation time not readable"
-      })),
+      captureProcessIdentity: vi.fn(() => childAlive
+        ? {
+          status: "unconfirmed" as const,
+          evidence: "creation time not readable"
+        }
+        : {
+          status: "not_running" as const,
+          evidence: "PID 912 exited."
+        }),
       runMimoStreaming: (runCwd, args, options) => runMimoCliStreaming(runCwd, args, {
         ...options,
         spawnProcess: () => child,
@@ -452,7 +460,11 @@ describe("runJobWorker", () => {
 
     expect(beforeClose).toBe("owned");
     expect(await isProcessLockHeld(resolveJobWorkerOwnershipKey(cwd, job.id))).toBe(true);
-    expect(readJob(cwd, job.id)).toMatchObject({ status: "running", pid: null });
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "running",
+      pid: 912,
+      processIdentity: null
+    });
     expect(readJobSignals(job.signalsFile).signals.filter((signal) =>
       ["failed", "timeout", "cancelled"].includes(signal.kind)
     )).toHaveLength(0);
@@ -465,6 +477,141 @@ describe("runJobWorker", () => {
       status: "failed",
       errorCode: "mimo_run_failed",
       pid: null
+    });
+  });
+
+  it("keeps durable provisional ownership across worker replacement until a real child exits", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement", true);
+    await transitionJob(cwd, job.id, {
+      status: "running",
+      phase: "starting",
+      summary: "started"
+    });
+    const child = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
+      cwd,
+      stdio: "ignore",
+      windowsHide: true
+    });
+    if (!child.pid) throw new Error("Test child PID is unavailable.");
+    const childPid = child.pid;
+    const childExit = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    const probe = vi.fn((pid: number | null | undefined) => {
+      try {
+        process.kill(pid as number, 0);
+        return {
+          status: "running" as const,
+          identity: `observed-${pid}`,
+          evidence: `PID ${pid} is live.`
+        };
+      } catch (error) {
+        if (typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH") {
+          return { status: "not_running" as const, evidence: `PID ${pid} exited.` };
+        }
+        return {
+          status: "unconfirmed" as const,
+          evidence: error instanceof Error ? error.message : String(error)
+        };
+      }
+    });
+    const terminateOwnedProcess = vi.fn(() => {
+      throw new Error("A provisionally owned PID must never be signalled.");
+    });
+
+    try {
+      // This is the durable boundary left after the launch owner saved the PID and crashed
+      // before it could capture the process identity or observe the child close event.
+      await updateRunningJobProcess(cwd, job.id, childPid, null);
+      let replacementSettled = false;
+      const replacement = runJobWorker(cwd, job.id, workerDeps({
+        captureProcessIdentity: probe,
+        terminateOwnedProcess,
+        recoveryRetryMs: 5
+      })).finally(() => { replacementSettled = true; });
+
+      await vi.waitFor(() => expect(probe).toHaveBeenCalledWith(childPid));
+      expect(replacementSettled).toBe(false);
+      expect(readJob(cwd, job.id)).toMatchObject({
+        status: "running",
+        pid: childPid,
+        processIdentity: null
+      });
+      expect(readJobSignals(job.signalsFile).signals.filter((signal) =>
+        ["failed", "timeout", "cancelled"].includes(signal.kind)
+      )).toHaveLength(0);
+      expect(terminateOwnedProcess).not.toHaveBeenCalled();
+
+      child.kill();
+      await childExit;
+      await replacement;
+
+      expect(readJob(cwd, job.id)).toMatchObject({
+        status: "failed",
+        pid: null,
+        processIdentity: null,
+        errorCode: "worker_restarted"
+      });
+      expect(terminateOwnedProcess).not.toHaveBeenCalled();
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill();
+        await childExit;
+      }
+    }
+  });
+
+  it("does not capture or signal before provisional ownership persistence succeeds", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: Readable;
+      stderr: Readable;
+      pid: number;
+      kill: () => boolean;
+    };
+    child.pid = 913;
+    child.stdout = Readable.from([""]);
+    child.stderr = Readable.from([""]);
+    child.kill = () => true;
+    const persistenceFailure = new Error("provisional ownership write failed");
+    const updateProcess = vi.fn(async (
+      _cwd: string,
+      _jobId: string,
+      pid: number | null,
+      identity: string | null
+    ) => {
+      if (pid === 913 && identity === null) throw persistenceFailure;
+      return updateRunningJobProcess(cwd, job.id, pid, identity);
+    });
+    const captureIdentity = vi.fn(() => ({
+      status: "running" as const,
+      identity: "start-913",
+      evidence: "test process"
+    }));
+    const terminate = vi.fn((_pid: number | null, ownedChild: typeof child) => {
+      ownedChild.stdout.destroy();
+      ownedChild.stderr.destroy();
+      queueMicrotask(() => ownedChild.emit("close", 0));
+    });
+
+    await runJobWorker(cwd, job.id, workerDeps({
+      updateRunningJobProcess: updateProcess,
+      captureProcessIdentity: captureIdentity,
+      runMimoStreaming: (runCwd, args, options) => runMimoCliStreaming(runCwd, args, {
+        ...options,
+        spawnProcess: () => child,
+        terminateProcessTree: terminate
+      })
+    }));
+
+    expect(updateProcess.mock.calls[0]?.slice(2)).toEqual([913, null]);
+    expect(captureIdentity).not.toHaveBeenCalled();
+    expect(terminate).toHaveBeenCalledOnce();
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "failed",
+      pid: null,
+      processIdentity: null,
+      errorCode: "mimo_run_failed"
     });
   });
 

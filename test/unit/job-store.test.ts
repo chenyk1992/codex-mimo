@@ -324,6 +324,7 @@ describe("job store", () => {
     ["timeout", "timeout", undefined, null, null],
     ["running before spawn", "running", undefined, null, null],
     ["running in an active phase", "running", "verifying", null, null],
+    ["running with provisional process ownership", "running", "starting", 42, null],
     ["running with an owned process", "running", "editing", 42, "start-42"]
   ])("reads normalized persisted state: %s", (_label, status, phase, pid, processIdentity) => {
     const cwd = tempWorkspace();
@@ -343,7 +344,6 @@ describe("job store", () => {
   it.each([
     ["queued with a process", { status: "queued", pid: 42, processIdentity: "start-42" }],
     ["completed with an identity", { status: "completed", pid: null, processIdentity: "start-42" }],
-    ["running with only a pid", { status: "running", pid: 42, processIdentity: null }],
     ["running with only an identity", { status: "running", pid: null, processIdentity: "start-42" }],
     ["running with an empty identity", { status: "running", pid: 42, processIdentity: "" }],
     ["running with a zero pid", { status: "running", pid: 0, processIdentity: "start-42" }],
@@ -367,6 +367,7 @@ describe("job store", () => {
 
   it.each([
     ["running before spawn", { status: "running", pid: null, processIdentity: null }],
+    ["running with provisional process ownership", { status: "running", pid: 42, processIdentity: null }],
     ["running with owned process", { status: "running", pid: 42, processIdentity: "start-42" }],
     ["completed", { status: "completed", pid: null, processIdentity: null }]
   ])("reads valid persisted process state: %s", (_label, patch) => {

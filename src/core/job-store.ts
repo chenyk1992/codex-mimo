@@ -351,9 +351,10 @@ function isPersistedProcessState(
 ): boolean {
   if (status !== "running") return pid === null && processIdentity === null;
   if (pid === null) return processIdentity === null;
-  return isPositiveInteger(pid) &&
-    typeof processIdentity === "string" &&
-    processIdentity.trim().length > 0;
+  if (!isPositiveInteger(pid)) return false;
+  // Provisional ownership: durable PID before identity capture completes.
+  if (processIdentity === null) return true;
+  return typeof processIdentity === "string" && processIdentity.trim().length > 0;
 }
 
 function isNormalizedPersistedState(

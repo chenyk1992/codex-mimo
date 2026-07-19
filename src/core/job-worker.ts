@@ -221,20 +221,24 @@ async function runOwnedJobWorker(
           omitEnv: listWebhookSecretEnvironmentNames(cwd),
           signal: executionGuard.signal,
           onStart: async (pid) => {
+            const persistProcess = deps.updateRunningJobProcess ?? updateRunningJobProcess;
+            const provisional = await awaitWithAbort(
+              persistProcess(cwd, jobId, pid, null),
+              executionGuard!.signal
+            );
+            if (provisional.status !== "running") {
+              executionGuard!.abort(provisional.status);
+              return;
+            }
             const captured = (deps.captureProcessIdentity ?? captureProcessIdentity)(pid);
             if (captured.status !== "running") {
               throw new Error(`MiMoCode process identity unavailable: ${captured.evidence}`);
             }
-            const updated = await awaitWithAbort(
-              (deps.updateRunningJobProcess ?? updateRunningJobProcess)(
-                cwd,
-                jobId,
-                pid,
-                captured.identity
-              ),
+            const owned = await awaitWithAbort(
+              persistProcess(cwd, jobId, pid, captured.identity),
               executionGuard!.signal
             );
-            if (updated.status !== "running") executionGuard!.abort(updated.status);
+            if (owned.status !== "running") executionGuard!.abort(owned.status);
           },
           onLine: (line) => queueEventWrite(async () =>
             (deps.appendRawAndNormalizedEvent ?? appendRawAndNormalizedEvent)(cwd, jobId, line))
@@ -547,6 +551,7 @@ async function recoverOwnedProcess(
   deps: JobWorkerDependencies
 ): Promise<{ job: JobRecord; termination: OwnedProcessTermination } | undefined> {
   const terminate = deps.terminateOwnedProcess ?? terminateOwnedJobProcess;
+  const captureIdentity = deps.captureProcessIdentity ?? captureProcessIdentity;
   const sleep = deps.sleep ?? defaultSleep;
   const retryMs = Math.max(0, deps.recoveryRetryMs ?? 250);
 
@@ -556,6 +561,20 @@ async function recoverOwnedProcess(
     let termination: OwnedProcessTermination;
     if (job.pid === null) {
       termination = { status: "not_running", evidence: "No MiMoCode process was recorded." };
+    } else if (job.processIdentity === null) {
+      // Provisional ownership: never signal by PID alone (reuse hazard). Probe only.
+      let probe;
+      try {
+        probe = captureIdentity(job.pid);
+      } catch {
+        probe = {
+          status: "unconfirmed" as const,
+          evidence: "Provisional process probe failed."
+        };
+      }
+      termination = probe.status === "not_running"
+        ? { status: "not_running", evidence: probe.evidence }
+        : { status: "unconfirmed", evidence: probe.evidence };
     } else {
       try {
         termination = terminate(job.pid, job.processIdentity);
