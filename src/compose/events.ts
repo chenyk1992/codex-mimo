@@ -76,7 +76,7 @@ export function normalizeMimoEvent(raw: unknown): NormalizedMimoEvent {
   }
 
   if (type === "error") {
-    return { type: "error", text: stringValue(raw.error ?? raw.message), raw };
+    return { type: "error", text: errorText(raw), raw };
   }
 
   if (type === "tool_use") {
@@ -129,6 +129,13 @@ export function extractSessionIdFromEvents(events: NormalizedMimoEvent[]): strin
   return null;
 }
 
+export function extractFinalText(events: NormalizedMimoEvent[]): string {
+  return [...events]
+    .reverse()
+    .find((event) => event.type === "message" && event.text?.trim())
+    ?.text?.trim() ?? "";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -164,7 +171,14 @@ function nestedToolCommandText(part: Record<string, unknown>): string | undefine
   if (!isRecord(state)) return undefined;
   const input = state.input;
   if (!isRecord(input)) return undefined;
-  return stringValue(input.command ?? input.filePath ?? input.path);
+  return stringValue(input.command ?? input.file_path ?? input.filepath ?? input.filePath ?? input.path);
+}
+
+function errorText(raw: Record<string, unknown>): string | undefined {
+  const direct = stringValue(raw.error ?? raw.message);
+  if (direct) return direct;
+  const part = raw.part;
+  return isRecord(part) ? stringValue(part.message ?? part.text) : undefined;
 }
 
 function describeEvent(event: NormalizedMimoEvent): string {

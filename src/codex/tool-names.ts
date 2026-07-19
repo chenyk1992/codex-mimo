@@ -9,10 +9,7 @@ export const MIMO_TOOL_NAMES = [
   "mimo_status",
   "mimo_events",
   "mimo_wait",
-  "mimo_wake",
   "mimo_result",
   "mimo_cancel",
-  "mimo_jobs",
-  "mimo_resume_job"
+  "mimo_jobs"
 ] as const;
-

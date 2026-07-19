@@ -21,6 +21,14 @@ describe("compose event parsing", () => {
     expect(events).toEqual([{ type: "raw", raw: { unexpected: true } }]);
   });
 
+  it.each([
+    [{ type: "error", message: "model failed" }, "model failed"],
+    [{ type: "error", part: { message: "tool failed" } }, "tool failed"],
+    [{ type: "error", part: { text: "command failed" } }, "command failed"]
+  ])("extracts canonical text from MiMo type:error JSONL %#", (raw, text) => {
+    expect(normalizeMimoEvent(raw)).toMatchObject({ type: "error", text });
+  });
+
   it("summarizes message and tool counts", () => {
     const events = parseMimoJsonLines('{"type":"message","text":"hello"}\n{"type":"tool","tool":"edit","status":"completed"}\n');
     expect(summarizeEvents(events)).toMatchObject({
@@ -69,8 +77,28 @@ describe("compose event parsing", () => {
     expect(event).toMatchObject({
       type: "tool",
       toolName: "read",
-      status: "completed"
+      status: "completed",
+      text: "src/compose/events.ts"
     });
+  });
+
+  it.each(["read", "write", "edit"])("prefers canonical file_path for %s events", (tool) => {
+    const event = normalizeMimoEvent({
+      type: "tool_use",
+      part: {
+        type: "tool",
+        tool,
+        state: {
+          input: {
+            file_path: "src/canonical.ts",
+            filePath: "src/fallback.ts",
+            path: "src/last.ts"
+          }
+        }
+      }
+    });
+
+    expect(event).toMatchObject({ type: "tool", toolName: tool, text: "src/canonical.ts" });
   });
 
   it("counts raw progress events separately from unknown raw events", () => {

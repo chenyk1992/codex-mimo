@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { once } from "node:events";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import {
   buildCallbackSummary,
   createHookCallbackController,
   createInvocationId,
+  toExecutionCallbackEvidence,
   writeHookConfig
 } from "../../src/mimo/hook-callback.js";
 
@@ -51,13 +53,7 @@ describe("hook callback payload helpers", () => {
       event: "session.post",
       timestamp: "2026-06-26T00:00:00.000Z",
       sessionID: "session-1",
-      agentID: "agent-1",
-      task_id: "task-1",
-      outcome: "completed",
-      error: "failed",
-      finalText: "Implementation complete",
-      assistantMessageID: "message-1",
-      metadata: { trajectoryLength: 12 }
+      outcome: "completed"
     });
 
     expect(summary).toEqual({
@@ -65,17 +61,44 @@ describe("hook callback payload helpers", () => {
       event: "session.post",
       receivedAt: "2026-06-26T00:00:00.000Z",
       sessionId: "session-1",
-      agentId: "agent-1",
-      taskId: "task-1",
-      outcome: "completed",
-      error: "failed",
-      finalText: "Implementation complete",
-      assistantMessageId: "message-1",
-      trajectoryLength: 12
+      outcome: "completed"
     });
   });
 
-  it("writes a MiMoCode file-hook object under a runtime config directory", () => {
+  it("does not retain callback final text in execution evidence", () => {
+    const callback = {
+      invocationId: "hook-invocation",
+      event: "session.post",
+      receivedAt: "2026-07-16T00:00:00.000Z",
+      sessionId: "ses-1",
+      outcome: "completed",
+      finalText: "Completed from callback with private-token."
+    } as const;
+    const evidence = toExecutionCallbackEvidence("fallback-invocation", callback);
+
+    expect(evidence).toEqual({
+      executionCallback: {
+        invocationId: "hook-invocation",
+        receivedAt: "2026-07-16T00:00:00.000Z",
+        sessionId: "ses-1",
+        outcome: "completed"
+      }
+    });
+    expect(JSON.stringify(evidence)).not.toContain("private-token");
+  });
+
+  it("records a missing execution callback without changing wire identifiers", () => {
+    expect(toExecutionCallbackEvidence("fallback-invocation", null)).toEqual({
+      executionCallback: {
+        invocationId: "fallback-invocation",
+        outcome: "missing",
+        error: "MiMoCode exited before codex-mimo received session.post."
+      }
+    });
+    expect(CALLBACK_HEADER).toBe("x-codex-mimo-callback-token");
+  });
+
+  it("writes a callable MiMoCode plugin under a runtime config directory", () => {
     const cwd = tempWorkspace();
     const paths = writeHookConfig({
       cwd,
@@ -85,16 +108,17 @@ describe("hook callback payload helpers", () => {
     });
 
     expect(paths.configDir).toBe(path.join(cwd, ".codex-mimo", "runtime-hooks", "implement-mk85jpc0-abc123"));
-    expect(paths.hookDir).toBe(path.join(paths.configDir, "hooks"));
-    expect(paths.hookFile).toBe(path.join(paths.hookDir, "codex-mimo-callback.js"));
+    expect(paths.pluginDir).toBe(path.join(paths.configDir, "plugin"));
+    expect(paths.hookFile).toBe(path.join(paths.pluginDir, "codex-mimo-callback.js"));
     expect(fs.existsSync(paths.hookFile)).toBe(true);
 
     const source = fs.readFileSync(paths.hookFile, "utf-8");
-    expect(source).toContain("export default {");
+    expect(source).toContain("export default async function codexMimoCallbackPlugin()");
+    expect(source).toContain("return {");
     expect(source).toContain("\"session.post\"");
     expect(source).toContain(CALLBACK_HEADER);
-    expect(source).toContain("Array.isArray(input.trajectory)");
-    expect(source).not.toContain("export default async");
+    expect(source).not.toMatch(/finalText|trajectory|input\.error/);
+    expect(source).not.toContain("export default {");
   });
 });
 
@@ -174,8 +198,7 @@ describe("hook callback controller", () => {
 
       await expect(controller.waitForCallback()).resolves.toMatchObject({
         sessionId: "ses_good",
-        outcome: "completed",
-        finalText: "done"
+        outcome: "completed"
       });
     } finally {
       await controller.close();
@@ -228,8 +251,7 @@ describe("hook callback controller", () => {
 
       await expect(controller.waitForCallback()).resolves.toMatchObject({
         sessionId: "ses_late_wait",
-        outcome: "completed",
-        finalText: "arrived before wait"
+        outcome: "completed"
       });
     } finally {
       await controller.close();
@@ -275,15 +297,14 @@ describe("hook callback controller", () => {
       expect(valid.status).toBe(200);
 
       await expect(controller.waitForCallback()).resolves.toMatchObject({
-        sessionId: "ses_valid",
-        finalText: "valid"
+        sessionId: "ses_valid"
       });
     } finally {
       await controller.close();
     }
   });
 
-  it("persists the accepted callback payload for debugging", async () => {
+  it("persists only the accepted callback allowlist", async () => {
     const cwd = tempWorkspace();
     const controller = await createHookCallbackController({
       cwd,
@@ -303,13 +324,27 @@ describe("hook callback controller", () => {
           timestamp: "2026-06-27T01:00:00.000Z",
           sessionID: "ses_persist",
           outcome: "cancelled",
-          error: "blocked"
+          error: "private-error-token",
+          finalText: "transient-private-token",
+          unknownRoot: "private-root-token",
+          metadata: {
+            trajectoryLength: 7,
+            secret: "private-metadata-token"
+          }
         })
       });
 
       await controller.waitForCallback();
       expect(fs.existsSync(controller.callbackFile)).toBe(true);
-      expect(fs.readFileSync(controller.callbackFile, "utf-8")).toContain("ses_persist");
+      const persisted = fs.readFileSync(controller.callbackFile, "utf-8");
+      expect(JSON.parse(persisted)).toEqual({
+        invocationId: controller.invocationId,
+        event: "session.post",
+        receivedAt: "2026-06-27T01:00:00.000Z",
+        sessionId: "ses_persist",
+        outcome: "cancelled"
+      });
+      expect(persisted).not.toMatch(/private-(?:error|root|metadata)-token|transient-private-token/);
     } finally {
       await controller.close();
     }
@@ -376,5 +411,34 @@ describe("hook callback controller", () => {
     const wait = controller.waitForCallback();
     await controller.close();
     await expect(wait).resolves.toBeNull();
+  });
+
+  it("force-closes an active HTTP connection without blocking controller shutdown", async () => {
+    const cwd = tempWorkspace();
+    const controller = await createHookCallbackController({
+      cwd,
+      kind: "plan",
+      now: () => 1768040303616,
+      random: () => "socket1"
+    });
+    const endpoint = new URL(controller.endpoint);
+    const socket = net.createConnection(Number(endpoint.port), endpoint.hostname);
+    socket.on("error", () => undefined);
+    await once(socket, "connect");
+    socket.write("POST /mimo-hook HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+    const socketClosed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    const closing = controller.close();
+
+    try {
+      const outcome = await Promise.race([
+        closing.then(() => "closed" as const),
+        new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 150))
+      ]);
+      expect(outcome).toBe("closed");
+      await socketClosed;
+    } finally {
+      socket.destroy();
+      await closing;
+    }
   });
 });

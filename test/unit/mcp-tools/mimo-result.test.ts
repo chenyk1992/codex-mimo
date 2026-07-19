@@ -3,8 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createJobStore, updateJob } from "../../../src/core/job-store.js";
-import { SessionStore } from "../../../src/core/sessions.js";
 import { mimoResult } from "../../../src/codex/tools.js";
+import { enqueueDelivery, completeDelivery, claimDueDelivery } from "../../../src/notify/outbox.js";
 
 const tempDirs: string[] = [];
 function tempWorkspace(): string {
@@ -14,66 +14,58 @@ function tempWorkspace(): string {
 }
 
 afterEach(() => {
-  for (const d of tempDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  for (const cwd of tempDirs.splice(0)) fs.rmSync(cwd, { recursive: true, force: true });
 });
 
 describe("mimo_result", () => {
-  it("saves to SessionStore when sessionId is present", async () => {
-    const cwd = tempWorkspace();
-    const job = createJobStore(cwd).create({ kind: "compose", workflow: "dev", task: "Run dev", request: {} });
-    updateJob(cwd, job.id, {
-      status: "completed",
-      phase: "done",
-      summary: "Passed.",
-      sessionId: "ses_store1",
-      reportPaths: { json: "report.json" }
+  it.each(["needs_input", "blocked", "completed", "failed", "cancelled", "timeout"] as const)
+    ("reads %s jobs", async (status) => {
+      const cwd = tempWorkspace();
+      const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
+      updateJob(cwd, job.id, {
+        status,
+        summary: `${status} summary`,
+        sessionId: status === "needs_input" || status === "blocked" ? "ses_1" : null
+      });
+
+      const result = await mimoResult({ cwd, jobId: job.id });
+      expect(result.status).toBe(status);
+      expect(result.resultType).toBe(status === "needs_input" || status === "blocked" ? "partial" : "final");
     });
-    await mimoResult({ cwd, jobId: job.id });
-    const store = new SessionStore(cwd);
-    const entry = store.get("ses_store1");
-    expect(entry).toBeDefined();
-    expect(entry!.jobId).toBe(job.id);
-    expect(entry!.status).toBe("completed");
+
+  it.each(["queued", "running"] as const)("rejects %s jobs", async (status) => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "plan", task: "Plan", request: {} });
+    if (status === "running") {
+      updateJob(cwd, job.id, { status, pid: 10, processIdentity: "start-10" });
+    }
+    await expect(mimoResult({ cwd, jobId: job.id })).rejects.toThrow("Job result is not available");
   });
 
-  it("defaults to most recent finished job when jobId is omitted", async () => {
+  it("returns the latest persisted notification delivery state", async () => {
+    const cwd = tempWorkspace();
+    const target = { type: "codex" as const, threadId: "thread-1" };
+    const job = createJobStore(cwd).create({
+      kind: "review", task: "Review", request: {}, notificationTarget: target
+    });
+    updateJob(cwd, job.id, { status: "completed", summary: "Done." });
+    await enqueueDelivery(job.notificationOutboxFile, {
+      jobId: job.id, signalCursor: 1, target, createdAt: "2026-07-16T00:00:00.000Z"
+    });
+    const claimed = await claimDueDelivery(job.notificationOutboxFile, new Date("2026-07-16T00:00:01.000Z"), 30_000);
+    await completeDelivery(job.notificationOutboxFile, claimed!.id, claimed!.attempts, new Date("2026-07-16T00:00:02.000Z"));
+
+    expect((await mimoResult({ cwd, jobId: job.id })).notification).toEqual({
+      targetType: "codex", status: "delivered", attempts: 1
+    });
+  });
+
+  it("selects the most recent readable result when jobId is omitted", async () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd);
-    const job1 = store.create({ kind: "compose", task: "First", request: {} });
-    const job2 = store.create({ kind: "compose", task: "Second", request: {} });
-    updateJob(cwd, job1.id, { status: "completed", phase: "done", summary: "First done" });
-    updateJob(cwd, job2.id, { status: "completed", phase: "done", summary: "Second done" });
-    const result = await mimoResult({ cwd });
-    expect(result.jobId).toBe(job2.id);
-    expect(result.summary).toBe("Second done");
-  });
-
-  it("returns callback metadata when recorded", async () => {
-    const cwd = tempWorkspace();
-    const job = createJobStore(cwd).create({ kind: "compose", workflow: "dev", task: "Run dev", request: {} });
-    updateJob(cwd, job.id, {
-      status: "failed",
-      phase: "failed",
-      summary: "Callback failed.",
-      callback: {
-        invocationId: "compose-dev-1",
-        outcome: "error",
-        sessionId: "ses_1",
-        receivedAt: "2026-06-23T00:00:00.000Z",
-        error: "hook error"
-      }
-    });
-
-    const result = await mimoResult({ cwd, jobId: job.id });
-    expect(result.callback).toMatchObject({
-      invocationId: "compose-dev-1",
-      outcome: "error",
-      error: "hook error"
-    });
-  });
-
-  it("throws when no finished jobs exist", async () => {
-    const cwd = tempWorkspace();
-    await expect(mimoResult({ cwd })).rejects.toThrow("No finished jobs");
+    const finished = store.create({ kind: "plan", task: "First", request: {} });
+    store.create({ kind: "plan", task: "Still running", request: {} });
+    updateJob(cwd, finished.id, { status: "failed", summary: "First failed" });
+    expect((await mimoResult({ cwd })).jobId).toBe(finished.id);
   });
 });

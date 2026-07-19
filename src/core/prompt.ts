@@ -50,3 +50,26 @@ export function reviewPrompt(diffSummary: string): string {
     "- If no issues are found, say that clearly and mention residual risk."
   ].join("\n");
 }
+
+export function resumePrompt(task: string, writesAllowed: boolean): string {
+  return [
+    "Objective:",
+    task,
+    "",
+    "Continue the existing MiMoCode session and execute this objective now.",
+    "",
+    "Rules:",
+    ...(writesAllowed
+      ? [
+          "- Keep changes surgical.",
+          "- Do not modify unrelated files.",
+          "- Do not commit, push, reset, or delete files.",
+          "- Run the narrowest meaningful verification when practical."
+        ]
+      : [
+          "- Do not edit files.",
+          "- Continue only the parent session's analysis, planning, or review work."
+        ]),
+    "- Return the result and any remaining risks."
+  ].join("\n");
+}

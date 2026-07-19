@@ -15,8 +15,7 @@ describe("prompt transport", () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "prompt-transport-"));
     tempDirs.push(cwd);
     const result = preparePromptTransport("Fix the bug in auth.ts", { cwd });
-    expect(result.message).toBe("Fix the bug in auth.ts");
-    expect(result.files).toEqual([]);
+    expect(result).toEqual({ message: "Fix the bug in auth.ts", files: [] });
   });
 
   it("moves long prompts into a UTF-8 file", () => {

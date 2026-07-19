@@ -28,11 +28,17 @@ export interface ComposeWorkflow {
   requiresFile: boolean;
 }
 
-interface BuildComposePromptInput {
+export interface BuildComposePromptInput {
   workflow: ComposeWorkflow;
   task?: string;
   file?: string;
   since?: string;
+}
+
+export interface ComposeWorkflowInput {
+  workflow: ComposeWorkflowName;
+  task?: string;
+  file?: string;
 }
 
 const workflows: Record<ComposeWorkflowName, ComposeWorkflow> = {
@@ -146,6 +152,18 @@ export function getComposeWorkflow(name: string): ComposeWorkflow {
 
 export function listComposeWorkflows(): ComposeWorkflow[] {
   return Object.values(workflows);
+}
+
+export function validateComposeWorkflowInput(input: ComposeWorkflowInput): string[] {
+  const workflow = getComposeWorkflow(input.workflow);
+  const issues: string[] = [];
+  if (workflow.requiresTask && !input.task?.trim()) {
+    issues.push(`Workflow ${input.workflow} requires a task.`);
+  }
+  if (workflow.requiresFile && !input.file?.trim()) {
+    issues.push(`Workflow ${input.workflow} requires a file.`);
+  }
+  return issues;
 }
 
 export function buildComposePrompt(input: BuildComposePromptInput): string {

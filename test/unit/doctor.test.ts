@@ -65,6 +65,22 @@ describe("codex-mimo doctor", () => {
     expect(formatDoctorReport(result)).toContain("If Codex cannot see mimo_* tools");
   });
 
+  it("marks the report failed when the MCP server exposes a legacy extra tool", async () => {
+    const pluginRoot = createPluginRoot();
+    const result = await runDoctor(
+      { cwd: "/project", pluginRoot },
+      {
+        checkMimoVersion: vi.fn().mockResolvedValue({ ok: true, version: "mimo 0.5.0" }),
+        probeMcpTools: vi.fn().mockResolvedValue([...MIMO_TOOL_NAMES, "mimo_wake"])
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.mcpProbe.ok).toBe(false);
+    expect(result.mcpProbe.unexpectedTools).toEqual(["mimo_wake"]);
+    expect(formatDoctorReport(result)).toContain("Unexpected tools: mimo_wake");
+  });
+
   it("redacts MCP env values from JSON-safe doctor output", async () => {
     const pluginRoot = createPluginRoot();
     writeFileSync(path.join(pluginRoot, ".mcp.json"), JSON.stringify({

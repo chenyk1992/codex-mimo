@@ -3,41 +3,122 @@ import path from "node:path";
 import type { NormalizedMimoEvent } from "./events.js";
 import type { ComposeWorkflowName } from "./workflow.js";
 import type { VerificationResult } from "./verify.js";
-import type { GitHeadSnapshot, GitStatusSnapshot } from "../git/diff.js";
-import type { MimoHookCallbackSummary } from "../mimo/hook-callback.js";
-import type { TerminationReason } from "./streaming-runner.js";
+import type { GitDiffSnapshot, GitHeadSnapshot, GitStatusSnapshot } from "../git/diff.js";
+import type { ExecutionCallbackSummary } from "../core/jobs.js";
+import type { TerminationReason } from "../mimo/streaming-runner.js";
+import { publicProgressSummary } from "../core/public-summary.js";
 
 export interface ComposeReport {
   id: string;
   createdAt: string;
   workflow: ComposeWorkflowName;
   cwd: string;
-  task: string;
-  mimoArgs: string[];
   requestedSkills: string[];
   status: "passed" | "failed" | "needs_review" | "timeout";
-  events: NormalizedMimoEvent[];
+  events: ComposeReportEvent[];
   changedFiles: string[];
   diffStat: string;
   diffPath?: string;
   terminationReason?: TerminationReason;
   sessionId?: string | null;
-  callback?: MimoHookCallbackSummary | null;
-  callbackTimedOut?: boolean;
+  executionCallback?: ExecutionCallbackSummary;
   gitStatusBefore?: GitStatusSnapshot;
   gitStatusAfter?: GitStatusSnapshot;
   gitHeadBefore?: GitHeadSnapshot;
   gitHeadAfter?: GitHeadSnapshot;
   gitCommits?: string[];
   verification: VerificationResult[];
-  reviewText?: string;
-  planText?: string;
   error?: string;
   reportPaths: {
     json: string;
     markdown: string;
     eventsJsonl: string;
   };
+}
+
+export interface CreateComposeReportInput {
+  id: string;
+  createdAt: string;
+  workflow: ComposeWorkflowName;
+  cwd: string;
+  requestedSkills: string[];
+  status: ComposeReport["status"];
+  events: NormalizedMimoEvent[];
+  diff: GitDiffSnapshot;
+  terminationReason?: TerminationReason;
+  sessionId?: string | null;
+  executionCallback?: ExecutionCallbackSummary;
+  gitStatusBefore?: GitStatusSnapshot;
+  gitStatusAfter?: GitStatusSnapshot;
+  gitHeadBefore?: GitHeadSnapshot;
+  gitHeadAfter?: GitHeadSnapshot;
+  gitCommits?: string[];
+  verification: VerificationResult[];
+  error?: string;
+  reportDir: string;
+  eventsDir: string;
+  diffsDir: string;
+}
+
+export function createComposeReport(input: CreateComposeReportInput): ComposeReport {
+  const diffPath = input.diff.diff ? path.join(input.diffsDir, `${input.id}.diff`) : undefined;
+  if (diffPath) {
+    fs.mkdirSync(input.diffsDir, { recursive: true });
+    fs.writeFileSync(diffPath, input.diff.diff, "utf-8");
+  }
+
+  return {
+    id: input.id,
+    createdAt: input.createdAt,
+    workflow: input.workflow,
+    cwd: input.cwd,
+    requestedSkills: input.requestedSkills,
+    status: input.status,
+    events: input.events.map(toComposeReportEvent),
+    changedFiles: input.diff.changedFiles,
+    diffStat: input.diff.diffStat,
+    diffPath,
+    terminationReason: input.terminationReason,
+    sessionId: input.sessionId,
+    executionCallback: input.executionCallback
+      ? {
+          ...input.executionCallback,
+          ...(input.executionCallback.error !== undefined
+            ? { error: publicProgressSummary({
+                type: "callback",
+                outcome: input.executionCallback.outcome
+              }) }
+            : {})
+        }
+      : undefined,
+    gitStatusBefore: input.gitStatusBefore,
+    gitStatusAfter: input.gitStatusAfter,
+    gitHeadBefore: input.gitHeadBefore,
+    gitHeadAfter: input.gitHeadAfter,
+    gitCommits: input.gitCommits,
+    verification: input.verification,
+    error: input.error
+      ? publicProgressSummary({
+          type: "job",
+          status: input.status === "timeout"
+            ? "timeout"
+            : input.status === "failed"
+              ? "failed"
+              : "completed"
+        })
+      : undefined,
+    reportPaths: {
+      json: path.join(input.reportDir, `${input.id}.json`),
+      markdown: path.join(input.reportDir, `${input.id}.md`),
+      eventsJsonl: path.join(input.eventsDir, `${input.id}.jsonl`)
+    }
+  };
+}
+
+export interface ComposeReportEvent {
+  type: NormalizedMimoEvent["type"];
+  progressKind?: NormalizedMimoEvent["progressKind"];
+  usage?: NormalizedMimoEvent["usage"];
 }
 
 export function renderMarkdownReport(report: ComposeReport): string {
@@ -61,19 +142,10 @@ export function renderMarkdownReport(report: ComposeReport): string {
     `CWD: \`${report.cwd}\``,
     ...(report.sessionId ? [`Session ID: \`${report.sessionId}\``] : []),
     "",
-    "## Task",
-    "",
-    report.task,
-    "",
     "## Requested Compose Skills",
     "",
     report.requestedSkills.map((skill) => `- \`${skill}\``).join("\n"),
     "",
-    "## MiMoCode Command",
-    "",
-    "```bash",
-    `mimo ${report.mimoArgs.join(" ")}`,
-    "```",
     ""
   ];
 
@@ -118,18 +190,18 @@ export function renderMarkdownReport(report: ComposeReport): string {
     );
   }
 
-  if (report.callback || report.callbackTimedOut) {
+  if (report.executionCallback) {
     lines.push(
-      "## Completion Callback",
+      "## Execution Callback",
       ""
     );
-    if (report.callback) {
+    if (report.executionCallback.outcome !== "missing") {
       lines.push(
-        `Outcome: \`${report.callback.outcome ?? "unknown"}\``,
-        `Invocation ID: \`${report.callback.invocationId}\``,
-        ...(report.callback.sessionId ? [`Session ID: \`${report.callback.sessionId}\``] : []),
-        `Received At: \`${report.callback.receivedAt}\``,
-        ...(report.callback.error ? [`Error: \`${report.callback.error}\``] : []),
+        `Outcome: \`${report.executionCallback.outcome}\``,
+        `Invocation ID: \`${report.executionCallback.invocationId}\``,
+        ...(report.executionCallback.sessionId ? [`Session ID: \`${report.executionCallback.sessionId}\``] : []),
+        ...(report.executionCallback.receivedAt ? [`Received At: \`${report.executionCallback.receivedAt}\``] : []),
+        ...(report.executionCallback.error ? [`Error: \`${report.executionCallback.error}\``] : []),
         ""
       );
     } else {
@@ -153,6 +225,20 @@ export function renderMarkdownReport(report: ComposeReport): string {
     ""
   );
 
+  const eventCounts = countReportEvents(report.events);
+  lines.push(
+    "## Event Summary",
+    "",
+    `Messages: ${eventCounts.message}`,
+    `Tools: ${eventCounts.tool}`,
+    `Diffs: ${eventCounts.diff}`,
+    `Errors: ${eventCounts.error}`,
+    `Progress: ${eventCounts.progress}`,
+    `Usage: ${eventCounts.usage}`,
+    `Raw: ${eventCounts.raw}`,
+    ""
+  );
+
   if (report.diffPath) {
     lines.push(
       "## Full Diff",
@@ -166,21 +252,8 @@ export function renderMarkdownReport(report: ComposeReport): string {
     "## Verification",
     "",
     verificationLines.join("\n"),
-    "",
-    "## Review",
-    "",
-    report.reviewText || "No review text was captured.",
     ""
   );
-
-  if (report.planText) {
-    lines.push(
-      "## Plan",
-      "",
-      report.planText,
-      ""
-    );
-  }
 
   if (report.terminationReason) {
     lines.push(
@@ -212,6 +285,30 @@ export function renderMarkdownReport(report: ComposeReport): string {
   );
 
   return lines.join("\n");
+}
+
+function toComposeReportEvent(event: NormalizedMimoEvent): ComposeReportEvent {
+  return {
+    type: event.type,
+    ...(event.progressKind ? { progressKind: event.progressKind } : {}),
+    ...(event.usage ? { usage: { ...event.usage } } : {})
+  };
+}
+
+function countReportEvents(
+  events: readonly ComposeReportEvent[]
+): Record<ComposeReportEvent["type"], number> {
+  const counts: Record<ComposeReportEvent["type"], number> = {
+    message: 0,
+    tool: 0,
+    diff: 0,
+    usage: 0,
+    error: 0,
+    progress: 0,
+    raw: 0
+  };
+  for (const event of events) counts[event.type] += 1;
+  return counts;
 }
 
 function formatGitHead(head?: GitHeadSnapshot): string {

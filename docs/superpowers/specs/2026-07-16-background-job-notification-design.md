@@ -230,10 +230,12 @@ CodexAdapter 使用 Codex App Server 的 JSON-RPC 生命周期：
 
 Adapter 不使用 `turn/steer`，避免把完成通知插入尚未结束的原始 turn。App Server 接受 `turn/start` 后 delivery 视为成功。
 
+Codex 投递在跨进程崩溃时采用 **at-least-once** 语义。Normal operation uses one delivery with one `thread/resume` and one `turn/start`。如果 App Server 已接受 `turn/start`，但通知进程在持久化 outbox 成功状态前崩溃，同一持久化 `eventId` 会重试，并可能创建重复 callback turn。恢复 prompt 必须显示该 `eventId` 并说明通知可能是 retry；`mimo_result` 始终是只读读取路径。
+
 恢复 prompt 保持固定且紧凑：
 
 ```text
-MiMoCode job <jobId> emitted <event>. Call mimo_result and continue handling the original request.
+MiMoCode notification event <eventId> emitted <event> and may be a retry. Call mimo_result with <cwd> and <jobId>; continue handling the original request.
 ```
 
 `needs_input` 和 `blocked` 额外携带精简原因。完整结果由恢复后的 Codex turn 通过 `mimo_result` 读取。
@@ -324,7 +326,7 @@ CLI 与 MCP 共用 JobLauncher。工作命令立即返回 job receipt，并提�
 status events wait result cancel jobs
 ```
 
-内部 worker 命令统一为 `job-worker` 和 `notify-worker`。Compose 不再使用专用 `compose-worker`。
+内部 worker 命令统一为 `job-supervisor`、`job-worker` 和 `notify-worker`。每次 launch 启动一个物理 workspace 锁定的 supervisor；它在 queued/running job 或未完成 delivery 存在时自动替换崩溃 worker，在 workspace 空闲时退出。Compose 不再使用专用 `compose-worker`。
 
 ## 删除与重构范围
 

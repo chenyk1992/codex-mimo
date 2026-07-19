@@ -2,126 +2,49 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { runComposeWorkflow } from "../../../src/compose/runner.js";
+import { runJobWorker } from "../../../src/core/job-worker.js";
+import { createJobStore, readJob } from "../../../src/core/job-store.js";
 
 const tempDirs: string[] = [];
-function tempWorkspace(): string {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-xcut-err-"));
-  tempDirs.push(cwd);
-  return cwd;
-}
-
-const completedHook = {
-  createHookCallbackController: async () => ({
-    invocationId: "compose-test",
-    token: "token",
-    endpoint: "http://127.0.0.1:1/mimo-hook",
-    configDir: "hook-dir",
-    callbackFile: "callback.json",
-    env: {},
-    waitForCallback: async () => ({
-      invocationId: "compose-test",
-      event: "session.post" as const,
-      outcome: "completed" as const,
-      sessionId: "ses_test",
-      receivedAt: "2026-06-24T00:00:00.000Z"
-    }),
-    close: async () => undefined
-  })
-};
 
 afterEach(() => {
-  for (const d of tempDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  for (const cwd of tempDirs.splice(0)) fs.rmSync(cwd, { recursive: true, force: true });
 });
 
 describe("error propagation", () => {
-  it("ENOENT from mimo CLI produces meaningful error in report", async () => {
-    const cwd = tempWorkspace();
+  it("unified worker persists a structural MiMoCode startup failure", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-xcut-err-"));
+    tempDirs.push(cwd);
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "Test ENOENT",
+      request: { cwd, task: "Test ENOENT", allowWrite: true }
+    });
     const enoent = new Error("spawn mimo ENOENT") as NodeJS.ErrnoException;
     enoent.code = "ENOENT";
 
-    const result = await runComposeWorkflow(
-      { cwd, workflow: "dev", task: "Test ENOENT", reportDir: path.join(cwd, "reports") },
-      {
-        runMimo: async () => { throw enoent; },
-        writeReport: () => undefined,
-        now: () => new Date("2026-06-24T00:00:00.000Z")
-      }
-    );
+    await runJobWorker(cwd, job.id, {
+      captureStatus: async () => ({ short: "", dirty: false, fingerprints: {} }),
+      captureHead: async () => ({ oid: "abc", short: "abc", subject: "base" }),
+      createHookCallbackController: async () => ({
+        invocationId: "worker-error",
+        token: "token",
+        endpoint: "http://127.0.0.1:1/mimo-hook",
+        configDir: "hook-dir",
+        callbackFile: "callback.json",
+        env: {},
+        waitForCallback: async () => null,
+        close: async () => undefined
+      }),
+      runMimoStreaming: async () => { throw enoent; }
+    });
 
-    expect(result.status).toBe("failed");
-    expect(result.error).toContain("MiMoCode execution failed");
-    expect(result.error).toContain("ENOENT");
-  });
-
-  it("timeout produces exitCode 124 and status timeout", async () => {
-    const cwd = tempWorkspace();
-
-    const result = await runComposeWorkflow(
-      { cwd, workflow: "dev", task: "Test timeout", reportDir: path.join(cwd, "reports") },
-      {
-        ...completedHook,
-        runMimo: async () => ({
-          stdout: "",
-          stderr: "",
-          exitCode: 124
-        }),
-        captureDiff: async () => ({ changedFiles: [], diffStat: "", diff: "" }),
-        captureStatus: async () => ({ short: "", dirty: false }),
-        runVerification: async () => [],
-        writeReport: () => undefined,
-        now: () => new Date("2026-06-24T00:00:00.000Z")
-      }
-    );
-
-    expect(result.status).toBe("timeout");
-  });
-
-  it("disk full (writeFileSync fails) error is not swallowed", async () => {
-    const cwd = tempWorkspace();
-
-    const result = await runComposeWorkflow(
-      { cwd, workflow: "dev", task: "Test disk full", reportDir: path.join(cwd, "reports") },
-      {
-        ...completedHook,
-        runMimo: async () => ({
-          stdout: '{"type":"message","text":"done"}\n',
-          stderr: "",
-          exitCode: 0
-        }),
-        captureDiff: async () => {
-          const diskFull = new Error("ENOSPC: no space left on device") as NodeJS.ErrnoException;
-          diskFull.code = "ENOSPC";
-          throw diskFull;
-        },
-        captureStatus: async () => ({ short: "", dirty: false }),
-        runVerification: async () => [],
-        writeReport: () => undefined,
-        now: () => new Date("2026-06-24T00:00:00.000Z")
-      }
-    );
-
-    expect(result.status).toBe("failed");
-    expect(result.error).toContain("Git diff capture failed");
-    expect(result.error).toContain("ENOSPC");
-  });
-
-  it("network interruption error propagates through runner", async () => {
-    const cwd = tempWorkspace();
-
-    const result = await runComposeWorkflow(
-      { cwd, workflow: "dev", task: "Test network", reportDir: path.join(cwd, "reports") },
-      {
-        runMimo: async () => {
-          throw new Error("ECONNRESET: socket hang up");
-        },
-        writeReport: () => undefined,
-        now: () => new Date("2026-06-24T00:00:00.000Z")
-      }
-    );
-
-    expect(result.status).toBe("failed");
-    expect(result.error).toContain("MiMoCode execution failed");
-    expect(result.error).toContain("ECONNRESET");
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "mimo_run_failed",
+      pid: null
+    });
+    expect(readJob(cwd, job.id)?.error).toBe("MiMoCode job failed.");
+    expect(JSON.stringify(readJob(cwd, job.id))).not.toContain("spawn mimo ENOENT");
   });
 });

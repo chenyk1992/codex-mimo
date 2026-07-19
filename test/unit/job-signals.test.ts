@@ -2,7 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { appendJobSignal, readJobSignals } from "../../src/core/job-signals.js";
+import {
+  ATTENTION_SIGNAL_KINDS,
+  appendJobSignal,
+  isAttentionSignal,
+  readJobSignals
+} from "../../src/core/job-signals.js";
 
 function tempSignalFile(): string {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-signals-")), "signals.jsonl");
@@ -33,7 +38,7 @@ describe("job signals", () => {
     expect(first.signals[0]).toMatchObject({
       jobId: "job-1",
       kind: "phase_changed",
-      summary: "Starting."
+      summary: "MiMoCode entered the starting phase."
     });
 
     const second = readJobSignals(file, { sinceCursor: 1 });
@@ -70,5 +75,49 @@ describe("job signals", () => {
   it("returns an empty cursor result when the signal file is missing", () => {
     const result = readJobSignals(path.join(os.tmpdir(), "missing-codex-mimo-signals.jsonl"));
     expect(result).toEqual({ signals: [], nextCursor: 0 });
+  });
+
+  it("identifies only attention-worthy signal kinds", () => {
+    expect(ATTENTION_SIGNAL_KINDS).toEqual([
+      "needs_input",
+      "blocked",
+      "completed",
+      "failed",
+      "cancelled",
+      "timeout"
+    ]);
+    expect(ATTENTION_SIGNAL_KINDS.every(isAttentionSignal)).toBe(true);
+    expect(isAttentionSignal("phase_changed")).toBe(false);
+    expect(isAttentionSignal({ kind: "milestone" })).toBe(false);
+  });
+
+  it("surfaces stale_queued operator summary when rewriting failed attention signals", () => {
+    const file = tempSignalFile();
+    const signal = appendJobSignal(file, {
+      jobId: "job-1",
+      kind: "failed",
+      level: "error",
+      status: "failed",
+      summary: "Job stuck in queued state for longer than 300s.",
+      errorCode: "stale_queued"
+    });
+
+    expect(signal.summary).toBe("MiMoCode job stayed queued too long.");
+    expect(signal).not.toHaveProperty("errorCode");
+  });
+
+  it("keeps generic failed signal summary for unknown errorCode values", () => {
+    const file = tempSignalFile();
+    const signal = appendJobSignal(file, {
+      jobId: "job-1",
+      kind: "failed",
+      level: "error",
+      status: "failed",
+      summary: "SECRET leaked path",
+      errorCode: "agent_said_something_secret"
+    });
+
+    expect(signal.summary).toBe("MiMoCode job failed.");
+    expect(JSON.stringify(signal)).not.toContain("SECRET");
   });
 });

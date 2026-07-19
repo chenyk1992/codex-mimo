@@ -1,15 +1,87 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { renderMarkdownReport } from "../../src/compose/report.js";
+import {
+  createComposeReport,
+  renderMarkdownReport,
+  writeComposeReport
+} from "../../src/compose/report.js";
 
 describe("compose report", () => {
+  it("persists only structural event summaries, never arbitrary MiMo text or raw payloads", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-report-events-"));
+    const secret = "PROMPT_ECHO_REPORT_SECRET";
+    try {
+      const report = createComposeReport({
+        id: "safe-report",
+        createdAt: "2026-07-18T00:00:00.000Z",
+        workflow: "dev",
+        cwd: root,
+        requestedSkills: ["compose:execute"],
+        status: "passed",
+        events: [
+          { type: "message", text: secret, raw: { text: secret } },
+          { type: "error", text: secret, raw: { error: secret } },
+          { type: "tool", toolName: "bash", text: `echo ${secret}`, raw: { command: secret } }
+        ],
+        diff: { changedFiles: [], diffStat: "", diff: "" },
+        verification: [],
+        reportDir: path.join(root, "reports"),
+        eventsDir: path.join(root, "events"),
+        diffsDir: path.join(root, "diffs")
+      });
+      writeComposeReport(report);
+
+      expect(JSON.stringify(report)).not.toContain(secret);
+      expect(fs.readFileSync(report.reportPaths.json, "utf8")).not.toContain(secret);
+      expect(fs.readFileSync(report.reportPaths.markdown, "utf8")).not.toContain(secret);
+      expect(fs.readFileSync(report.reportPaths.eventsJsonl, "utf8")).not.toContain(secret);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("omits task and prompt arguments from persisted JSON and Markdown reports", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-report-redaction-"));
+    const secret = "ghp_report_prompt_secret_123";
+    try {
+      const unsafeInput = {
+        id: "secret-report",
+        createdAt: "2026-07-18T00:00:00.000Z",
+        workflow: "dev" as const,
+        cwd: root,
+        task: `Implement ${secret}`,
+        mimoArgs: ["run", "--format", "json", `Objective: Implement ${secret}`],
+        requestedSkills: ["compose:tdd"],
+        status: "passed",
+        events: [],
+        diff: { changedFiles: [], diffStat: "", diff: "" },
+        verification: [],
+        reportDir: path.join(root, "reports"),
+        eventsDir: path.join(root, "events"),
+        diffsDir: path.join(root, "diffs")
+      };
+      const report = createComposeReport(unsafeInput);
+
+      writeComposeReport(report);
+
+      expect(report).not.toHaveProperty("task");
+      expect(report).not.toHaveProperty("mimoArgs");
+      expect(JSON.stringify(report)).not.toContain(secret);
+      expect(fs.readFileSync(report.reportPaths.json, "utf8")).not.toContain(secret);
+      expect(fs.readFileSync(report.reportPaths.markdown, "utf8")).not.toContain(secret);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("renders workflow, status, changed files, and verification", () => {
     const markdown = renderMarkdownReport({
       id: "run_1",
       createdAt: "2026-06-21T18:40:00.000Z",
       workflow: "dev",
       cwd: "E:/project/app",
-      task: "Implement login throttling",
-      mimoArgs: ["run", "--agent", "compose"],
       requestedSkills: ["compose:brainstorm", "compose:plan"],
       status: "passed",
       events: [],
@@ -44,8 +116,6 @@ describe("compose report", () => {
       createdAt: "2026-06-21T18:40:00.000Z",
       workflow: "dev",
       cwd: "E:/project/app",
-      task: "Test task",
-      mimoArgs: ["run", "--agent", "compose"],
       requestedSkills: ["compose:tdd"],
       status: "passed",
       events: [],
@@ -72,8 +142,6 @@ describe("compose report", () => {
       createdAt: "2026-06-28T09:20:12.720Z",
       workflow: "plan",
       cwd: "E:/project/app",
-      task: "Plan only",
-      mimoArgs: ["run", "--agent", "compose"],
       requestedSkills: ["compose:plan"],
       status: "failed",
       events: [],
@@ -107,8 +175,6 @@ describe("compose report", () => {
       createdAt: "2026-06-21T18:40:00.000Z",
       workflow: "dev",
       cwd: "E:/project/app",
-      task: "Test task",
-      mimoArgs: ["run", "--agent", "compose"],
       requestedSkills: ["compose:tdd"],
       status: "passed",
       events: [],
@@ -133,8 +199,6 @@ describe("compose report", () => {
       createdAt: "2026-06-21T18:40:00.000Z",
       workflow: "dev",
       cwd: "E:/project/app",
-      task: "Test task",
-      mimoArgs: ["run", "--agent", "compose"],
       requestedSkills: ["compose:tdd"],
       status: "failed",
       events: [],
@@ -159,17 +223,14 @@ describe("compose report", () => {
       createdAt: "2026-06-21T18:40:00.000Z",
       workflow: "dev",
       cwd: "E:/project/app",
-      task: "Test task",
-      mimoArgs: ["run", "--agent", "compose"],
       requestedSkills: ["compose:tdd"],
       status: "passed",
       events: [],
       changedFiles: [],
       diffStat: "",
       verification: [],
-      callback: {
+      executionCallback: {
         invocationId: "compose-dev-1",
-        event: "session.post",
         outcome: "completed",
         sessionId: "ses_callback",
         receivedAt: "2026-06-21T18:41:00.000Z"
@@ -181,7 +242,7 @@ describe("compose report", () => {
       }
     });
 
-    expect(markdown).toContain("## Completion Callback");
+    expect(markdown).toContain("## Execution Callback");
     expect(markdown).toContain("Outcome: `completed`");
     expect(markdown).toContain("Session ID: `ses_callback`");
     expect(markdown).toContain("Received At: `2026-06-21T18:41:00.000Z`");
@@ -193,15 +254,16 @@ describe("compose report", () => {
       createdAt: "2026-06-21T18:40:00.000Z",
       workflow: "dev",
       cwd: "E:/project/app",
-      task: "Test task",
-      mimoArgs: ["run", "--agent", "compose"],
       requestedSkills: ["compose:tdd"],
       status: "failed",
       events: [],
       changedFiles: [],
       diffStat: "",
       verification: [],
-      callbackTimedOut: true,
+      executionCallback: {
+        invocationId: "compose-dev-timeout",
+        outcome: "missing"
+      },
       reportPaths: {
         json: "report.json",
         markdown: "report.md",
@@ -209,7 +271,7 @@ describe("compose report", () => {
       }
     });
 
-    expect(markdown).toContain("## Completion Callback");
+    expect(markdown).toContain("## Execution Callback");
     expect(markdown).toContain("No session.post callback was received");
   });
 });

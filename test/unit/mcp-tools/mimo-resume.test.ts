@@ -1,19 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi, beforeEach } from "vitest";
-
-const mocks = vi.hoisted(() => ({
-  execa: vi.fn(),
-  runAndCapture: vi.fn()
-}));
-
-vi.mock("execa", () => ({ execa: mocks.execa }));
-vi.mock("../../../src/mimo/mimo-runner.js", () => ({
-  runAndCapture: mocks.runAndCapture
-}));
-
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mimoResume } from "../../../src/codex/tools.js";
+import { createJobStore, listJobs, readJob, updateJob } from "../../../src/core/job-store.js";
 
 const tempDirs: string[] = [];
 function tempWorkspace(): string {
@@ -23,83 +13,146 @@ function tempWorkspace(): string {
 }
 
 afterEach(() => {
-  for (const d of tempDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  for (const cwd of tempDirs.splice(0)) fs.rmSync(cwd, { recursive: true, force: true });
 });
 
+function parent(cwd: string, status: "needs_input" | "blocked" = "blocked") {
+  const record = createJobStore(cwd).create({
+    kind: "implement",
+    task: "Build feature",
+    request: { cwd, task: "Build feature", allowWrite: true },
+    notificationTarget: { type: "codex", threadId: "thread-parent" }
+  });
+  return updateJob(cwd, record.id, { status, sessionId: "ses_parent", summary: "Need help." });
+}
+
 describe("mimo_resume", () => {
-  beforeEach(() => {
-    mocks.execa.mockReset();
-    mocks.runAndCapture.mockReset();
-  });
+  it.each(["needs_input", "blocked"] as const)
+    ("creates a queued resume child for a %s parent and inherits its frozen target", async (status) => {
+      const cwd = tempWorkspace();
+      const source = parent(cwd, status);
+      const spawnJobSupervisor = vi.fn().mockReturnValue(123);
 
-  it("returns summary and sessionId on success", async () => {
-    const cwd = tempWorkspace();
-    mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
-    mocks.runAndCapture.mockResolvedValue({
-      sessionId: "ses_resume1",
-      summary: "Resumed and completed.",
-      changedFiles: ["src/feature.ts"],
-      commands: [],
-      errors: [],
-      exitCode: 0,
-      raw: []
-    });
-    const result = await mimoResume({ cwd, session: "ses_resume1", task: "Continue work" });
-    expect(result.summary).toBe("Resumed and completed.");
-    expect(result.sessionId).toBe("ses_resume1");
-    expect(result.changedFiles).toContain("src/feature.ts");
-  });
+      const receipt = await mimoResume({ cwd, jobId: source.id, task: "Continue" }, {
+        env: { CODEX_THREAD_ID: "thread-drifted" }, spawnJobSupervisor
+      });
 
-  it("propagates errors when session is invalid", async () => {
-    const cwd = tempWorkspace();
-    mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
-    mocks.runAndCapture.mockRejectedValue(new Error("session not found"));
-    await expect(
-      mimoResume({ cwd, session: "bad_session", task: "Continue" })
-    ).rejects.toThrow("session not found");
-  });
-
-  it("throws when direct MiMo run returns a nonzero exit code", async () => {
-    const cwd = tempWorkspace();
-    mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
-    mocks.runAndCapture.mockResolvedValue({
-      sessionId: "ses_resume_failed",
-      summary: "Completed.",
-      changedFiles: [],
-      commands: [],
-      errors: ["MiMoCode error: hook failed"],
-      exitCode: 1,
-      raw: [],
-      callback: {
-        invocationId: "inv-resume-failed",
-        event: "session.post",
-        receivedAt: "2026-06-27T00:00:00.000Z",
-        sessionId: "ses_resume_failed",
-        outcome: "error",
-        error: "hook failed"
-      }
+      expect(receipt).toEqual({
+        jobId: expect.any(String), kind: "resume", status: "queued",
+        actions: {
+          status: "mimo_status", events: "mimo_events", result: "mimo_result", cancel: "mimo_cancel"
+        }
+      });
+      const child = readJob(cwd, receipt.jobId)!;
+      expect(child).toMatchObject({
+        kind: "resume",
+        parentJobId: source.id,
+        notificationTarget: { type: "codex", threadId: "thread-parent" },
+        request: { cwd, jobId: source.id, task: "Continue", sessionId: "ses_parent" }
+      });
+      expect(spawnJobSupervisor).toHaveBeenCalledWith(cwd);
     });
 
-    await expect(
-      mimoResume({ cwd, session: "ses_resume_failed", task: "Continue" })
-    ).rejects.toThrow("MiMoCode resume failed: MiMoCode error: hook failed");
+  it("uses an explicit notification override instead of the parent target", async () => {
+    const cwd = tempWorkspace();
+    const source = parent(cwd);
+    const receipt = await mimoResume({
+      cwd,
+      jobId: source.id,
+      task: "Continue",
+      notify: { type: "webhook", url: "https://example.test/hook", secretEnv: "HOOK_SECRET" }
+    }, { env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123) });
+
+    expect(readJob(cwd, receipt.jobId)?.notificationTarget).toEqual({
+      type: "webhook", url: "https://example.test/hook", secretEnv: "HOOK_SECRET"
+    });
   });
 
-  it("wraps task in Objective prompt and passes session to runAndCapture", async () => {
+  it("inherits the absence of a target without re-resolving ambient CODEX_THREAD_ID", async () => {
     const cwd = tempWorkspace();
-    mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "", stderr: "" });
-    mocks.runAndCapture.mockResolvedValue({
-      sessionId: "ses_r3",
-      summary: "Done.",
-      changedFiles: [],
-      commands: [],
-      errors: [],
-      exitCode: 0,
-      raw: []
+    const source = createJobStore(cwd).create({
+      kind: "plan",
+      task: "Plan",
+      request: { cwd, task: "Plan" }
     });
-    await mimoResume({ cwd, session: "ses_r3", task: "Fix the bug" });
-    const call = mocks.runAndCapture.mock.calls[0][0];
-    expect(call.message).toContain("Objective:\nFix the bug");
-    expect(call.session).toBe("ses_r3");
+    updateJob(cwd, source.id, { status: "needs_input", sessionId: "ses_parent" });
+    const receipt = await mimoResume({ cwd, jobId: source.id, task: "Continue" }, {
+      env: { CODEX_THREAD_ID: "must-not-drift" }, spawnJobSupervisor: vi.fn().mockReturnValue(123)
+    });
+    expect(readJob(cwd, receipt.jobId)?.notificationTarget).toBeUndefined();
+  });
+
+  it.each([
+    ["completed", "ses_parent", "must be needs_input or blocked"],
+    ["blocked", null, "does not have a sessionId"]
+  ] as const)("rejects invalid parent status/session without persisting a child", async (status, sessionId, message) => {
+    const cwd = tempWorkspace();
+    const source = createJobStore(cwd).create({ kind: "plan", task: "Plan", request: {} });
+    updateJob(cwd, source.id, { status, sessionId });
+
+    await expect(mimoResume({ cwd, jobId: source.id, task: "Continue" }, {
+      env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
+    })).rejects.toThrow(message);
+    expect(listJobs(cwd).map((job) => job.id)).toEqual([source.id]);
+  });
+
+  it.each([
+    ["plan", { task: "Plan", cwd: "" }, { agent: "plan", writesAllowed: false }],
+    ["review", { base: "HEAD", cwd: "" }, { agent: "plan", writesAllowed: false }],
+    ["compose", { workflow: "plan", task: "Plan", cwd: "" }, { agent: "compose", writesAllowed: false }],
+    ["compose", { workflow: "dev", task: "Build", cwd: "" }, { agent: "compose", writesAllowed: true }]
+  ] as const)("freezes the effective %s parent policy into the child request", async (kind, template, expected) => {
+    const cwd = tempWorkspace();
+    const source = createJobStore(cwd).create({
+      kind,
+      task: "Parent task",
+      request: { ...template, cwd }
+    });
+    updateJob(cwd, source.id, { status: "blocked", sessionId: "ses_parent" });
+
+    const receipt = await mimoResume({ cwd, jobId: source.id, task: "Continue" }, {
+      env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
+    });
+
+    expect(readJob(cwd, receipt.jobId)?.request).toMatchObject({ executionPolicy: expected });
+  });
+
+  it("preserves the original policy across recursive resumes", async () => {
+    const cwd = tempWorkspace();
+    const source = createJobStore(cwd).create({
+      kind: "plan",
+      task: "Plan",
+      request: { cwd, task: "Plan" }
+    });
+    updateJob(cwd, source.id, { status: "blocked", sessionId: "ses_parent" });
+    const first = await mimoResume({ cwd, jobId: source.id, task: "Continue once" }, {
+      env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
+    });
+    updateJob(cwd, first.jobId, { status: "blocked", sessionId: "ses_child" });
+
+    const second = await mimoResume({ cwd, jobId: first.jobId, task: "Continue twice" }, {
+      env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
+    });
+
+    expect(readJob(cwd, second.jobId)?.request).toMatchObject({
+      executionPolicy: { agent: "plan", writesAllowed: false }
+    });
+  });
+
+  it("does not expose a public write-policy override", async () => {
+    const cwd = tempWorkspace();
+    const source = createJobStore(cwd).create({
+      kind: "plan",
+      task: "Plan",
+      request: { cwd, task: "Plan" }
+    });
+    updateJob(cwd, source.id, { status: "blocked", sessionId: "ses_parent" });
+
+    await expect(mimoResume({
+      cwd,
+      jobId: source.id,
+      task: "Continue",
+      allowWrite: true
+    }, { env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123) })).rejects.toThrow();
   });
 });

@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import type { ExecutionCallbackSummary } from "../core/jobs.js";
 
 export const CALLBACK_HEADER = "x-codex-mimo-callback-token";
 export type MimoHookEventName = "session.post";
@@ -11,37 +12,21 @@ export interface MimoHookCallbackPayload {
   invocationId: string;
   event: MimoHookEventName;
   timestamp: string;
-  sessionID?: string;
-  agentID?: string;
-  task_id?: string;
-  outcome?: MimoHookOutcome;
-  error?: string;
-  finalText?: string;
-  assistantMessageID?: string;
-  metadata?: {
-    trajectoryLength?: number;
-    [key: string]: unknown;
-  };
+  sessionID: string;
+  outcome: MimoHookOutcome;
 }
 
 export interface MimoHookCallbackSummary {
   invocationId: string;
   event: MimoHookEventName;
   receivedAt: string;
-  sessionId?: string;
-  agentId?: string;
-  taskId?: string;
-  outcome?: MimoHookOutcome;
-  error?: string;
-  finalText?: string;
-  assistantMessageId?: string;
-  trajectoryLength?: number;
+  sessionId: string;
+  outcome: MimoHookOutcome;
 }
 
 export interface HookConfigPaths {
   configDir: string;
-  hookDir: string;
-  hooksDir: string;
+  pluginDir: string;
   hookFile: string;
 }
 
@@ -60,6 +45,10 @@ export interface HookCallbackControllerDeps {
   writeHookConfig?: typeof writeHookConfig;
 }
 
+export interface ExecutionCallbackEvidence {
+  executionCallback: ExecutionCallbackSummary;
+}
+
 export function createInvocationId(
   prefix: string,
   now: () => number = Date.now,
@@ -75,13 +64,35 @@ export function buildCallbackSummary(payload: MimoHookCallbackPayload): MimoHook
     event: payload.event,
     receivedAt: payload.timestamp,
     sessionId: payload.sessionID,
-    agentId: payload.agentID,
-    taskId: payload.task_id,
-    outcome: payload.outcome,
-    error: payload.error,
-    finalText: payload.finalText,
-    assistantMessageId: payload.assistantMessageID,
-    trajectoryLength: payload.metadata?.trajectoryLength
+    outcome: payload.outcome
+  };
+}
+
+export function toExecutionCallbackEvidence(
+  invocationId: string,
+  callback: MimoHookCallbackSummary | null
+): ExecutionCallbackEvidence {
+  if (!callback) {
+    return {
+      executionCallback: {
+        invocationId,
+        outcome: "missing",
+        error: "MiMoCode exited before codex-mimo received session.post."
+      }
+    };
+  }
+  return {
+    executionCallback: {
+      invocationId: callback.invocationId,
+      outcome: callback.outcome,
+      sessionId: callback.sessionId,
+      receivedAt: callback.receivedAt,
+      ...(callback.outcome === "error"
+        ? { error: "MiMoCode completion callback reported an error." }
+        : callback.outcome === "cancelled"
+          ? { error: "MiMoCode completion callback reported cancellation." }
+          : {})
+    }
   };
 }
 
@@ -92,13 +103,13 @@ export function writeHookConfig(input: {
   token: string;
 }): HookConfigPaths {
   const configDir = path.join(input.cwd, ".codex-mimo", "runtime-hooks", input.invocationId);
-  const hooksDir = path.join(configDir, "hooks");
-  const hookFile = path.join(hooksDir, "codex-mimo-callback.js");
+  const pluginDir = path.join(configDir, "plugin");
+  const hookFile = path.join(pluginDir, "codex-mimo-callback.js");
 
-  fs.mkdirSync(hooksDir, { recursive: true });
+  fs.mkdirSync(pluginDir, { recursive: true });
   fs.writeFileSync(hookFile, buildHookSource(), "utf-8");
 
-  return { configDir, hookDir: hooksDir, hooksDir, hookFile };
+  return { configDir, pluginDir, hookFile };
 }
 
 function buildHookSource(): string {
@@ -111,8 +122,9 @@ function pick(input, ...keys) {
   return undefined;
 }
 
-export default {
-  "session.post": async (input = {}) => {
+export default async function codexMimoCallbackPlugin() {
+  return {
+    "session.post": async (input = {}) => {
     const endpoint = process.env.CODEX_MIMO_CALLBACK_ENDPOINT;
     const token = process.env.CODEX_MIMO_CALLBACK_TOKEN;
     const invocationId = process.env.CODEX_MIMO_INVOCATION_ID;
@@ -123,15 +135,7 @@ export default {
       event: "session.post",
       timestamp: new Date().toISOString(),
       sessionID: pick(input, "sessionID", "sessionId"),
-      agentID: pick(input, "agentID", "agentId"),
-      task_id: pick(input, "task_id", "taskId"),
-      outcome: input.outcome,
-      error: input.error,
-      finalText: input.finalText,
-      assistantMessageID: pick(input, "assistantMessageID", "assistantMessageId"),
-      metadata: {
-        trajectoryLength: Array.isArray(input.trajectory) ? input.trajectory.length : input.metadata?.trajectoryLength
-      }
+      outcome: input.outcome
     };
 
     await fetch(endpoint, {
@@ -142,8 +146,9 @@ export default {
       },
       body: JSON.stringify(payload)
     });
-  }
-};
+    }
+  };
+}
 `;
 }
 
@@ -225,7 +230,11 @@ export async function createHookCallbackController(input: {
 
         if (!settled) {
           const summary = buildCallbackSummary(payload);
-          fs.writeFileSync(callbackFile, JSON.stringify(payload, null, 2), "utf-8");
+          fs.writeFileSync(
+            callbackFile,
+            JSON.stringify(summary, null, 2),
+            "utf-8"
+          );
           settled = true;
           clearCallbackTimer();
           resolveCallback(summary);
@@ -286,6 +295,7 @@ function closeServer(server: http.Server): Promise<void> {
       if (error) reject(error);
       else resolve();
     });
+    server.closeAllConnections();
   });
 }
 

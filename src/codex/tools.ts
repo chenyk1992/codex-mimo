@@ -1,582 +1,399 @@
 import { execa } from "execa";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import {
-  ComposeInput,
   FixCiInput,
   HealthcheckInput,
   ImplementInput,
   JobCancelInput,
   JobEventsInput,
-  JobWakeInput,
-  JobWaitInput,
   JobListInput,
   JobResultInput,
   JobStatusInput,
+  JobWaitInput,
   PlanInput,
+  parseComposeInput,
   ResumeInput,
-  ResumeJobInput,
   ReviewInput
 } from "./tool-schemas.js";
-import { implementPrompt, planPrompt, reviewPrompt } from "../core/prompt.js";
-import { runAndCapture, type MimoRunResult } from "../mimo/mimo-runner.js";
-import { runComposeWorkflow } from "../compose/runner.js";
-import { compactComposeReportForCodex } from "./compact.js";
-import type { CompactComposeReport } from "./compact.js";
-import { createJobStore, listJobs, readJob, updateJob } from "../core/job-store.js";
-import { spawnJobWorker, terminateJobProcess } from "../core/job-process.js";
-import { isActiveJobStatus, type JobRecord } from "../core/jobs.js";
-import { renderJobLaunch, renderJobResult, renderJobStatus } from "../core/job-render.js";
+import { launchJob, type LaunchJobDependencies } from "../core/job-launcher.js";
+import { bindJobDefinition } from "../core/job-definitions.js";
+import { listJobs, readJob, resolveJobPaths } from "../core/job-store.js";
+import { recoverStaleQueuedJobs } from "../core/job-recovery.js";
+import {
+  spawnNotificationWorker,
+  terminateOwnedJobProcess,
+  type OwnedProcessTermination
+} from "../core/job-process.js";
+import type { JobNotificationStatus, JobRecord } from "../core/jobs.js";
+import { renderJobResult, renderJobStatus } from "../core/job-render.js";
 import { readRecentJobLogLines } from "../core/job-log.js";
-import { readJobSignals } from "../core/job-signals.js";
-import { cancelRuntimeJob, failRuntimeJob } from "../core/job-runtime.js";
-import { SessionStore } from "../core/sessions.js";
-import { resolveMimoCommand } from "../mimo/run-json.js";
-import { detectDirectSemanticFailure } from "../compose/post-checks.js";
-import { buildCodexWakeHint } from "./wake.js";
+import {
+  isAttentionSignal,
+  readJobSignalPage,
+  type JobSignalReadResult
+} from "../core/job-signals.js";
+import { requestJobCancellation, transitionJob } from "../core/job-transition.js";
+import { ProcessLockUnavailableError, withProcessLock } from "../core/process-lock.js";
+import { buildMimoProbeEnvironment, resolveMimoProcessSelection } from "../mimo/run-json.js";
+import {
+  readNotificationDeliveries,
+  summarizeJobNotification
+} from "../notify/dispatcher.js";
+import type { NotificationDelivery } from "../notify/types.js";
+import { startNotificationDispatch } from "../notify/dispatch-process.js";
+
+const WAIT_CHECK_INTERVAL_MS = 1_000;
 
 export async function mimoHealthcheck(input: unknown) {
   const parsed = HealthcheckInput.parse(input);
   const cwd = parsed.cwd ?? process.cwd();
   try {
-    const result = await execa(resolveMimoCommand(), ["--version"], { cwd });
-    return {
-      ok: true,
-      version: result.stdout.trim(),
-      cwd
-    };
+    const env = buildMimoProbeEnvironment(cwd);
+    const selection = resolveMimoProcessSelection(env);
+    const result = await execa(selection.command, ["--version"], {
+      cwd,
+      env
+    });
+    return { ok: true, version: result.stdout.trim(), cwd };
   } catch {
     return { ok: false, error: "mimo not found or not working", cwd };
   }
 }
 
-export async function mimoPlan(input: unknown) {
+export async function mimoPlan(input: unknown, deps: LaunchJobDependencies = {}) {
   const parsed = PlanInput.parse(input);
-  const result = await runAndCapture({
-    cwd: parsed.cwd,
-    agent: parsed.agent,
-    model: parsed.model,
-    message: planPrompt(parsed.task),
-    timeoutMs: parsed.timeoutMs
-  });
-  assertMimoRunSucceeded(result, "plan");
-  return {
-    summary: result.summary,
-    sessionId: result.sessionId,
-    changedFiles: result.changedFiles,
-    verification: result.commands
-  };
+  const { notify, ...request } = parsed;
+  return launchJob({ kind: "plan", cwd: parsed.cwd, task: parsed.task, request, notify }, deps);
 }
 
-export async function mimoImplement(input: unknown) {
+export async function mimoImplement(input: unknown, deps: LaunchJobDependencies = {}) {
   const parsed = ImplementInput.parse(input);
-  if (!parsed.allowWrite) {
-    throw new Error("mimo_implement requires allowWrite=true.");
-  }
-  const store = createJobStore(parsed.cwd);
-  const job = store.create({
-    kind: "implement",
-    task: parsed.task,
-    request: parsed
-  });
-  updateJob(parsed.cwd, job.id, { status: "running", phase: "starting", startedAt: new Date().toISOString() });
-
-  const before = await captureWorktreeFiles(parsed.cwd);
-  let result: Awaited<ReturnType<typeof runAndCapture>>;
-  try {
-    result = await runAndCapture({
-      cwd: parsed.cwd,
-      agent: "build",
-      message: implementPrompt(parsed.task),
-      timeoutMs: parsed.timeoutMs
-    });
-  } catch (error) {
-    updateJob(parsed.cwd, job.id, {
-      status: "failed",
-      phase: "failed",
-      completedAt: new Date().toISOString(),
-      error: error instanceof Error ? error.message : String(error)
-    });
-    throw error;
-  }
-
-  const after = await captureWorktreeFiles(parsed.cwd);
-  const failure = mimoRunFailureMessage(result, "implement");
-  if (failure) {
-    updateJob(parsed.cwd, job.id, {
-      status: "failed",
-      phase: "failed",
-      completedAt: new Date().toISOString(),
-      summary: failure,
-      error: failure
-    });
-    throw new Error(failure);
-  }
-
-  const changedFiles = mergeChangedFiles(result.changedFiles, diffAddedFiles(before, after));
-
-  updateJob(parsed.cwd, job.id, {
-    status: "completed",
-    phase: "done",
-    completedAt: new Date().toISOString(),
-    summary: result.summary,
-    sessionId: result.sessionId,
-    changedFiles
-  });
-
-  return {
-    summary: result.summary,
-    sessionId: result.sessionId,
-    changedFiles,
-    commands: result.commands,
-    risks: result.errors
-  };
+  const { notify, ...request } = parsed;
+  return launchJob({ kind: "implement", cwd: parsed.cwd, task: parsed.task, request, notify }, deps);
 }
 
-export async function mimoReview(input: unknown) {
+export async function mimoReview(input: unknown, deps: LaunchJobDependencies = {}) {
   const parsed = ReviewInput.parse(input);
-  const diffResult = await execa("git", ["diff", parsed.base], { cwd: parsed.cwd, reject: false });
-  if (diffResult.exitCode !== 0) {
-    throw new Error(`Git diff capture failed: ${diffResult.stderr || `exit ${diffResult.exitCode}`}`);
-  }
-
-  const diffFile = diffResult.stdout ? writeReviewDiffInput(parsed.base, diffResult.stdout) : undefined;
-  const prompt = reviewPrompt(
-    diffFile ? `The current diff is attached as @${diffFile}. Review that attached diff.` : "No changes found."
-  );
-
-  const result = await runAndCapture({
+  const { notify, ...request } = parsed;
+  return launchJob({
+    kind: "review",
     cwd: parsed.cwd,
-    agent: "plan",
-    message: prompt,
-    files: diffFile ? [diffFile] : undefined,
-    timeoutMs: parsed.timeoutMs
-  });
-
-  if (result.exitCode !== 0 || result.errors.length > 0) {
-    throw new Error(`MiMoCode review failed: ${result.errors.join("\n") || `exit ${result.exitCode}`}`);
-  }
-
-  if (result.summary === "Completed." && result.raw.length === 0) {
-    throw new Error("MiMoCode review produced no review output.");
-  }
-
-  if (isGreetingResponse(result.summary)) {
-    throw new Error("MiMoCode review returned a greeting instead of review content. Agent may not have initialized properly.");
-  }
-  
-  const findings = result.summary && result.summary !== "Completed."
-    ? [{ severity: "info", title: "Review Summary", body: result.summary }]
-    : [];
-
-  return {
-    summary: result.summary,
-    sessionId: result.sessionId,
-    findings
-  };
+    task: `Review changes since ${parsed.base}.`,
+    request,
+    notify
+  }, deps);
 }
 
-function isGreetingResponse(summary: string | undefined): boolean {
-  if (!summary) return false;
-  const text = summary.toLowerCase().trim();
-  if (text.length > 300) return false;
-  const patterns = [
-    /您好/,
-    /消息.*空/,
-    /有什么.*帮/,
-    /^hello[!\s.]/i,
-    /^hi[!\s.]/i,
-    /^hey[!\s.]/i,
-    /how can i help/i,
-    /how may i help/i,
-    /what can i help/i,
-    /what would you like/i,
-    /how can i assist/i,
-  ];
-  return patterns.some((p) => p.test(text));
-}
-
-function writeReviewDiffInput(base: string, diff: string): string {
-  const dir = path.join(os.tmpdir(), "codex-mimo-review-inputs");
-  fs.mkdirSync(dir, { recursive: true });
-  const safeBase = base.replace(/[^a-zA-Z0-9_.-]/g, "_") || "HEAD";
-  const file = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${safeBase}.diff`);
-  fs.writeFileSync(file, diff, "utf-8");
-  return file;
-}
-
-export async function mimoFixCi(input: unknown) {
+export async function mimoFixCi(input: unknown, deps: LaunchJobDependencies = {}) {
   const parsed = FixCiInput.parse(input);
-  const { result, changedFiles } = await runWritableMimo({
+  const { notify, ...request } = parsed;
+  return launchJob({
+    kind: "fix-ci",
     cwd: parsed.cwd,
-    label: "fix-ci",
-    message: implementPrompt(parsed.task ?? "Fix the CI failures shown in the attached log."),
-    files: [parsed.file],
-    timeoutMs: parsed.timeoutMs
-  });
-  return renderWritableMimoResult(result, changedFiles);
+    task: parsed.task ?? "Fix the CI failures shown in the attached log.",
+    request,
+    notify
+  }, deps);
 }
 
-export async function mimoResume(input: unknown) {
-  const parsed = ResumeInput.parse(input);
-  const { result, changedFiles } = await runWritableMimo({
-    cwd: parsed.cwd,
-    label: "resume",
-    message: implementPrompt(parsed.task),
-    session: parsed.session,
-    timeoutMs: parsed.timeoutMs
-  });
-  return renderWritableMimoResult(result, changedFiles);
-}
-
-export async function mimoCompose(
-  input: unknown,
-  deps: { spawnJobWorker?: typeof spawnJobWorker } = {},
-  options: { signal?: AbortSignal } = {}
-): Promise<CompactComposeReport | ReturnType<typeof renderJobLaunch> | ReturnType<typeof renderJobStatus>> {
-  const parsed = ComposeInput.parse(input);
-  if (parsed.background) {
-    const store = createJobStore(parsed.cwd);
-    const job = store.create({
-      kind: "compose",
-      workflow: parsed.workflow,
-      task: parsed.task ?? `Run ${parsed.workflow} workflow.`,
-      request: parsed
-    });
-    const spawnFn = deps.spawnJobWorker ?? spawnJobWorker;
-    const pid = spawnFn(parsed.cwd, "compose", job.id, {
-      onExit: (code, signal) => {
-        failJobOnUnexpectedWorkerExit(parsed.cwd, job.id, code, signal);
-      }
-    });
-    const queued = updateJob(parsed.cwd, job.id, { pid });
-    if (parsed.wait) {
-      const settled = await waitForJobToSettle(parsed.cwd, job.id, parsed.timeoutMs);
-      return renderJobStatus(settled ?? queued, {
-        progress: readRecentJobLogLines((settled ?? queued).logFile, 5)
-      });
-    }
-    return renderJobLaunch(queued);
-  }
-
-  const store = createJobStore(parsed.cwd);
-  const job = store.create({
+export async function mimoCompose(input: unknown, deps: LaunchJobDependencies = {}) {
+  const parsed = parseComposeInput(input);
+  const { notify, ...request } = parsed;
+  return launchJob({
     kind: "compose",
-    workflow: parsed.workflow,
+    cwd: parsed.cwd,
     task: parsed.task ?? `Run ${parsed.workflow} workflow.`,
-    request: parsed
-  });
-  updateJob(parsed.cwd, job.id, { status: "running", phase: "starting", startedAt: new Date().toISOString() });
+    request,
+    notify
+  }, deps);
+}
 
-  let report;
-  try {
-    report = await runComposeWorkflow({ ...parsed, signal: options.signal });
-  } catch (error) {
-    updateJob(parsed.cwd, job.id, {
-      status: "failed",
-      phase: "failed",
-      completedAt: new Date().toISOString(),
-      error: error instanceof Error ? error.message : String(error)
-    });
-    throw error;
+export async function mimoResume(input: unknown, deps: LaunchJobDependencies = {}) {
+  const parsed = ResumeInput.parse(input);
+  const parent = readJob(parsed.cwd, parsed.jobId);
+  if (!parent) throw new Error(`No job found for ${parsed.jobId}.`);
+  if (parent.status !== "needs_input" && parent.status !== "blocked") {
+    throw new Error(`Job ${parent.id} must be needs_input or blocked before it can be resumed.`);
   }
+  if (!parent.sessionId) {
+    throw new Error(`Job ${parent.id} does not have a sessionId and cannot be resumed.`);
+  }
+  const executionPolicy = bindJobDefinition(parent).executionPolicy;
 
-  const failedStatus = report.status === "failed" || report.status === "timeout";
-  updateJob(parsed.cwd, job.id, {
-    status: failedStatus ? "failed" : "completed",
-    phase: failedStatus ? "failed" : "done",
-    completedAt: new Date().toISOString(),
-    summary: report.error ?? `Compose ${parsed.workflow} ${report.status}.`,
-    sessionId: report.sessionId,
-    changedFiles: report.changedFiles,
-    callback: report.callback
-      ? {
-          invocationId: report.callback.invocationId,
-          outcome: report.callback.outcome ?? "error",
-          sessionId: report.callback.sessionId ?? null,
-          receivedAt: report.callback.receivedAt,
-          error: report.callback.error
-        }
-      : report.callbackTimedOut
-      ? {
-          invocationId: "foreground-compose",
-          outcome: "missing",
-          error: "MiMoCode exited before codex-mimo received session.post."
-        }
-      : undefined,
-    reportPaths: report.reportPaths
-  });
-
-  return compactComposeReportForCodex(report);
+  const { notify, ...options } = parsed;
+  return launchJob({
+    kind: "resume",
+    cwd: parsed.cwd,
+    task: parsed.task,
+    parentJobId: parent.id,
+    request: { ...options, sessionId: parent.sessionId, executionPolicy },
+    ...(notify === undefined
+      ? { notificationTarget: parent.notificationTarget ?? null }
+      : { notify })
+  }, deps);
 }
 
 export async function mimoStatus(input: unknown) {
   const parsed = JobStatusInput.parse(input);
-  const jobs = listJobs(parsed.cwd);
-  const job = parsed.jobId ? readJob(parsed.cwd, parsed.jobId) : jobs[0];
+  const job = parsed.jobId ? readJob(parsed.cwd, parsed.jobId) : listJobs(parsed.cwd)[0];
   if (!job) throw new Error("No jobs recorded for this workspace.");
   return renderJobStatus(job, {
-    progress: readRecentJobLogLines(job.logFile, 5)
+    progress: readRecentJobLogLines(job.logFile, 5),
+    notification: notificationStatus(job)
   });
 }
 
 export async function mimoEvents(input: unknown) {
   const parsed = JobEventsInput.parse(input);
   const job = resolveJobForSignals(parsed.cwd, parsed.jobId);
-  return renderJobSignals(job, readJobSignals(job.signalsFile, {
+  return renderJobSignals(job, readJobSignalPage(job.signalsFile, {
     sinceCursor: parsed.sinceCursor,
     limit: parsed.limit,
     minLevel: parsed.minLevel
   }));
 }
 
-export async function mimoWait(input: unknown) {
+export interface MimoWaitDependencies {
+  now?: () => number;
+  sleep?: (milliseconds: number) => Promise<void>;
+  intervalMs?: number;
+  readSignals?: typeof readAttentionSignals;
+}
+
+export async function mimoWait(input: unknown, deps: MimoWaitDependencies = {}) {
   const parsed = JobWaitInput.parse(input);
   const selected = resolveJobForSignals(parsed.cwd, parsed.jobId);
-  const startedAt = Date.now();
+  const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? delay;
+  const intervalMs = deps.intervalMs ?? WAIT_CHECK_INTERVAL_MS;
+  const readSignals = deps.readSignals ?? readAttentionSignals;
+  const startedAt = now();
   const deadline = startedAt + parsed.timeoutMs;
   let job = selected;
-  let result = readJobSignals(job.signalsFile, {
-    sinceCursor: parsed.sinceCursor,
-    limit: parsed.limit,
-    minLevel: parsed.minLevel
-  });
+  let scanCursor = parsed.sinceCursor;
+  let result = readSignals(job, { ...parsed, sinceCursor: scanCursor });
 
-  while (result.signals.length === 0 && isActiveJobStatus(job.status) && Date.now() < deadline) {
-    await sleep(Math.min(parsed.pollMs, Math.max(1, deadline - Date.now())));
+  while (result.signals.length === 0 && now() < deadline) {
+    scanCursor = result.nextCursor;
+    await sleep(Math.min(intervalMs, Math.max(1, deadline - now())));
     job = readJob(parsed.cwd, selected.id) ?? job;
-    result = readJobSignals(job.signalsFile, {
-      sinceCursor: parsed.sinceCursor,
-      limit: parsed.limit,
-      minLevel: parsed.minLevel
-    });
+    result = readSignals(job, { ...parsed, sinceCursor: scanCursor });
   }
 
+  if (result.signals.length === 0) scanCursor = result.nextCursor;
+  const visibleResult = result.signals.length === 0
+    ? { signals: [], nextCursor: scanCursor }
+    : result;
+
   return {
-    ...renderJobSignals(job, result),
-    timedOut: result.signals.length === 0 && isActiveJobStatus(job.status),
-    waitedMs: Date.now() - startedAt
+    ...renderJobSignals(job, visibleResult),
+    timedOut: result.signals.length === 0,
+    waitedMs: Math.max(0, now() - startedAt)
   };
 }
 
-export async function mimoWake(input: unknown) {
-  const parsed = JobWakeInput.parse(input);
-  const job = resolveJobForSignals(parsed.cwd, parsed.jobId);
-  return buildCodexWakeHint(job, {
-    sinceCursor: parsed.sinceCursor,
-    minLevel: parsed.minLevel,
-    timeoutMs: parsed.timeoutMs
-  });
+export async function mimoResult(input: unknown) {
+  const parsed = JobResultInput.parse(input);
+  const job = parsed.jobId
+    ? readJob(parsed.cwd, parsed.jobId)
+    : listJobs(parsed.cwd).find((candidate) => isResultStatus(candidate.status));
+  if (!job) {
+    throw new Error(parsed.jobId
+      ? `No job found for ${parsed.jobId}.`
+      : "No job results recorded for this workspace.");
+  }
+  if (!isResultStatus(job.status)) {
+    throw new Error(`Job result is not available while ${job.id} is ${job.status}.`);
+  }
+  return renderJobResult(job, notificationStatus(job));
+}
+
+export interface MimoJobsDependencies {
+  recoverStaleQueuedJobs?: typeof recoverStaleQueuedJobs;
+}
+
+export async function mimoJobs(input: unknown, deps: MimoJobsDependencies = {}) {
+  const parsed = JobListInput.parse(input);
+  await (deps.recoverStaleQueuedJobs ?? recoverStaleQueuedJobs)(parsed.cwd);
+  const jobs = listJobs(parsed.cwd);
+  const deliveries = readNotificationDeliveries(parsed.cwd);
+  return (parsed.all ? jobs : jobs.slice(0, 8)).map((job) => renderJobStatus(job, {
+    progress: readRecentJobLogLines(job.logFile, 3),
+    notification: notificationStatus(job, deliveries)
+  }));
+}
+
+export interface MimoCancelDependencies {
+  transitionJob?: typeof transitionJob;
+  terminateProcess?: (
+    pid: number | null | undefined,
+    processIdentity: string | null | undefined
+  ) => OwnedProcessTermination;
+  spawnNotificationWorker?: typeof spawnNotificationWorker;
+  requestJobCancellation?: typeof requestJobCancellation;
+  waitForCancellation?: (cwd: string, jobId: string) => Promise<JobRecord>;
+}
+
+export async function mimoCancel(input: unknown, deps: MimoCancelDependencies = {}) {
+  const parsed = JobCancelInput.parse(input);
+  const existing = readJob(parsed.cwd, parsed.jobId);
+  if (!existing) throw new Error(`No job found for ${parsed.jobId}.`);
+  if (existing.status === "cancelled") {
+    return renderJobResult(existing, notificationStatus(existing));
+  }
+  if (existing.status !== "queued" && existing.status !== "running") {
+    throw new Error(`Job ${existing.id} cannot be cancelled while ${existing.status}.`);
+  }
+
+  const requested = await (deps.requestJobCancellation ?? requestJobCancellation)(
+    parsed.cwd,
+    existing.id
+  );
+  if (requested.status === "cancelled") {
+    return renderJobResult(requested, notificationStatus(requested));
+  }
+  if (requested.status !== "queued" && requested.status !== "running") {
+    throw new Error(`Job ${requested.id} cannot be cancelled while ${requested.status}.`);
+  }
+
+  let transitioned;
+  try {
+    transitioned = await withProcessLock(
+      `${resolveJobPaths(parsed.cwd, existing.id).jobFile}.worker-ownership`,
+      async () => {
+        const current = readJob(parsed.cwd, existing.id);
+        if (!current) throw new Error(`No job found for ${existing.id}.`);
+        if (current.status === "cancelled") return undefined;
+        if (current.status !== "queued" && current.status !== "running") {
+          throw new Error(`Job ${current.id} cannot be cancelled while ${current.status}.`);
+        }
+        if (current.status === "running" && current.pid !== null) {
+          const termination = (deps.terminateProcess ?? terminateOwnedJobProcess)(
+            current.pid,
+            current.processIdentity
+          );
+          if (termination.status === "unconfirmed") {
+            throw new Error(
+              `Cancellation could not be confirmed for ${current.id}: ${termination.evidence}`
+            );
+          }
+        }
+        return (deps.transitionJob ?? transitionJob)(parsed.cwd, current.id, {
+          status: "cancelled",
+          summary: `Cancelled ${current.id}.`,
+          errorCode: "cancelled"
+        });
+      },
+      { timeoutMs: 0 }
+    );
+  } catch (error) {
+    if (error instanceof ProcessLockUnavailableError) {
+      const pending = await (deps.waitForCancellation ?? waitForCancellation)(
+        parsed.cwd,
+        existing.id
+      );
+      if (pending.status === "cancelled") {
+        return renderJobResult(pending, notificationStatus(pending));
+      }
+      return renderJobStatus(pending, {
+        progress: readRecentJobLogLines(pending.logFile, 3),
+        notification: notificationStatus(pending)
+      });
+    }
+    const raced = readJob(parsed.cwd, existing.id);
+    if (raced?.status === "cancelled") {
+      return renderJobResult(raced, notificationStatus(raced));
+    }
+    throw error;
+  }
+
+  if (!transitioned) {
+    const cancelled = readJob(parsed.cwd, existing.id);
+    if (!cancelled || cancelled.status !== "cancelled") {
+      throw new Error(`Cancellation did not finalize ${existing.id}.`);
+    }
+    return renderJobResult(cancelled, notificationStatus(cancelled));
+  }
+
+  if (transitioned.deliveryCreated) {
+    startNotificationDispatch(parsed.cwd, {
+      spawnNotificationWorker: deps.spawnNotificationWorker
+    });
+  }
+  return renderJobResult(transitioned.job, notificationStatus(transitioned.job));
+}
+
+async function waitForCancellation(cwd: string, jobId: string): Promise<JobRecord> {
+  const deadline = Date.now() + 250;
+  while (true) {
+    const job = readJob(cwd, jobId);
+    if (!job) throw new Error(`No job found for ${jobId}.`);
+    if (job.status !== "running" || !job.cancellationRequestedAt || Date.now() >= deadline) {
+      return job;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 function resolveJobForSignals(cwd: string, jobId?: string): JobRecord {
-  const jobs = listJobs(cwd);
-  const job = jobId ? readJob(cwd, jobId) : jobs[0];
+  const job = jobId ? readJob(cwd, jobId) : listJobs(cwd)[0];
   if (!job) {
     throw new Error(jobId ? `No job found for ${jobId}.` : "No jobs recorded for this workspace.");
   }
   return job;
 }
 
-function renderJobSignals(job: JobRecord, result: ReturnType<typeof readJobSignals>) {
+function readAttentionSignals(
+  job: JobRecord,
+  options: { sinceCursor: number; limit: number; minLevel: "debug" | "info" | "warn" | "error" }
+) {
+  return readJobSignalPage(job.signalsFile, {
+    sinceCursor: options.sinceCursor,
+    minLevel: options.minLevel,
+    limit: options.limit,
+    include: isAttentionSignal
+  });
+}
+
+function renderJobSignals(job: JobRecord, result: JobSignalReadResult) {
+  const canCancel = job.status === "queued" || job.status === "running";
+  const canReadResult = isResultStatus(job.status);
   return {
     jobId: job.id,
     kind: job.kind,
     status: job.status,
-    phase: job.phase,
+    ...(job.phase ? { phase: job.phase } : {}),
     nextCursor: result.nextCursor,
     signals: result.signals,
     actions: {
       status: "mimo_status" as const,
-      result: "mimo_result" as const,
-      ...(isActiveJobStatus(job.status) ? { cancel: "mimo_cancel" as const } : {})
+      ...(canCancel ? { cancel: "mimo_cancel" as const } : {}),
+      ...(canReadResult ? { result: "mimo_result" as const } : {}),
+      ...(job.status === "needs_input" || job.status === "blocked"
+        ? { resume: "mimo_resume" as const }
+        : {})
     }
   };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-export async function mimoResult(input: unknown) {
-  const parsed = JobResultInput.parse(input);
-  const jobs = listJobs(parsed.cwd).filter((job) => job.status !== "queued" && job.status !== "running");
-  const job = parsed.jobId ? readJob(parsed.cwd, parsed.jobId) : jobs[0];
-  if (!job) throw new Error("No finished jobs recorded for this workspace.");
-  if (job.sessionId) {
-    new SessionStore(job.cwd).save({
-      sessionId: job.sessionId,
-      workflow: job.workflow ?? job.kind,
-      task: job.task,
-      cwd: job.cwd,
-      jobId: job.id,
-      parentJobId: job.parentJobId ?? null,
-      status: job.status,
-      reportPaths: job.reportPaths,
-      summary: job.summary
-    });
-  }
-  return renderJobResult(job);
-}
-
-export async function mimoJobs(input: unknown) {
-  const parsed = JobListInput.parse(input);
-  const jobs = listJobs(parsed.cwd);
-  return (parsed.all ? jobs : jobs.slice(0, 8)).map((job) => renderJobStatus(job, {
-    progress: readRecentJobLogLines(job.logFile, 3)
-  }));
-}
-
-export async function mimoCancel(
-  input: unknown,
-  deps: { killProcess?: (pid: number) => void } = {}
-) {
-  const parsed = JobCancelInput.parse(input);
-  const job = readJob(parsed.cwd, parsed.jobId);
-  if (!job) throw new Error(`No job found for ${parsed.jobId}.`);
-  terminateJobProcess(job.pid, { killProcess: deps.killProcess });
-  const cancelled = cancelRuntimeJob(parsed.cwd, job.id);
-  return renderJobResult(cancelled);
-}
-
-export async function mimoResumeJob(
-  input: unknown,
-  deps: { spawnJobWorker?: typeof spawnJobWorker } = {}
-) {
-  const parsed = ResumeJobInput.parse(input);
-  const parent = readJob(parsed.cwd, parsed.jobId);
-  if (!parent) throw new Error(`No job found for ${parsed.jobId}.`);
-  if (!parent.sessionId) {
-    throw new Error(`Job ${parent.id} does not have a sessionId and cannot be resumed.`);
-  }
-  const store = createJobStore(parsed.cwd);
-  const child = store.create({
-    kind: "resume",
-    workflow: parent.workflow,
-    task: parsed.task,
-    request: {
-      cwd: parsed.cwd,
-      workflow: parent.workflow ?? "dev",
-      task: parsed.task,
-      session: parent.sessionId,
-      continue: true,
-      background: parsed.background
-    },
-    parentJobId: parent.id
-  });
-  if (parsed.background) {
-    const spawnFn = deps.spawnJobWorker ?? spawnJobWorker;
-    const pid = spawnFn(parsed.cwd, "compose", child.id, {
-      onExit: (code, signal) => {
-        failJobOnUnexpectedWorkerExit(parsed.cwd, child.id, code, signal);
-      }
-    });
-    return renderJobLaunch(updateJob(parsed.cwd, child.id, { pid }));
-  }
+function notificationStatus(
+  job: JobRecord,
+  deliveries?: readonly NotificationDelivery[]
+): JobNotificationStatus | undefined {
+  if (!job.notificationTarget) return undefined;
+  const summary = summarizeJobNotification(job, deliveries ?? readNotificationDeliveries(job.cwd));
+  if (!summary) return undefined;
   return {
-    jobId: child.id,
-    parentJobId: parent.id,
-    sessionId: parent.sessionId,
-    status: child.status,
-    summary: "Resume job created. Run it in background with background=true."
+    targetType: summary.type,
+    status: summary.status,
+    attempts: summary.attempts,
+    ...(summary.lastError === undefined ? {} : { lastError: summary.lastError })
   };
 }
 
-interface WritableMimoRunInput {
-  cwd: string;
-  label: string;
-  message: string;
-  files?: string[];
-  session?: string;
-  timeoutMs?: number;
+function isResultStatus(status: JobRecord["status"]): boolean {
+  return status !== "queued" && status !== "running";
 }
 
-async function runWritableMimo({ label, ...options }: WritableMimoRunInput): Promise<{
-  result: MimoRunResult;
-  changedFiles: string[];
-}> {
-  const before = await captureWorktreeFiles(options.cwd);
-  const result = await runAndCapture({ ...options, agent: "build" });
-  assertMimoRunSucceeded(result, label);
-  const after = await captureWorktreeFiles(options.cwd);
-  return {
-    result,
-    changedFiles: mergeChangedFiles(result.changedFiles, diffAddedFiles(before, after))
-  };
-}
-
-function renderWritableMimoResult(
-  { summary, sessionId, commands, errors }: MimoRunResult,
-  changedFiles: string[]
-) {
-  return {
-    summary,
-    sessionId,
-    changedFiles,
-    commands,
-    risks: errors
-  };
-}
-
-async function captureWorktreeFiles(cwd: string): Promise<Set<string> | undefined> {
-  try {
-    const result = await execa("git", ["status", "--short", "--untracked-files=all"], {
-      cwd,
-      reject: false
-    });
-    return new Set(
-      (result.stdout ?? "")
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .map((line) => line.slice(3).trim())
-        .filter(Boolean)
-    );
-  } catch {
-    return undefined;
-  }
-}
-
-function failJobOnUnexpectedWorkerExit(cwd: string, jobId: string, code: number | null, signal: string | null): void {
-  const current = readJob(cwd, jobId);
-  if (!current || !isActiveJobStatus(current.status)) return;
-  failRuntimeJob(cwd, jobId, {
-    errorCode: "worker_exit",
-    error: `Worker process exited unexpectedly (code=${code}, signal=${signal}).`
-  });
-}
-
-function diffAddedFiles(before: Set<string> | undefined, after: Set<string> | undefined): string[] {
-  if (!before || !after) return [];
-  return [...after].filter((file) => !before.has(file));
-}
-
-function mergeChangedFiles(primary: string[], fallback: string[]): string[] {
-  return [...new Set([...primary, ...fallback])];
-}
-
-function assertMimoRunSucceeded(result: MimoRunResult, label: string): void {
-  const failure = mimoRunFailureMessage(result, label);
-  if (failure) throw new Error(failure);
-}
-
-function mimoRunFailureMessage(result: MimoRunResult, label: string): string | null {
-  const semanticFailure = detectDirectSemanticFailure(result.summary);
-  if (semanticFailure) return `MiMoCode ${label} failed: ${semanticFailure}`;
-  if (result.exitCode === 0) return null;
-  return `MiMoCode ${label} failed: ${result.errors.join("\n") || `exit ${result.exitCode}`}`;
-}
-
-const BACKGROUND_WAIT_POLL_MS = 250;
-const BACKGROUND_WAIT_CALLBACK_GRACE_MS = 10_000;
-
-async function waitForJobToSettle(cwd: string, jobId: string, waitMs: number) {
-  const deadline = Date.now() + waitMs + BACKGROUND_WAIT_CALLBACK_GRACE_MS;
-  while (Date.now() < deadline) {
-    const job = readJob(cwd, jobId);
-    if (!job || !isActiveJobStatus(job.status)) return job;
-    await new Promise((resolve) => setTimeout(resolve, BACKGROUND_WAIT_POLL_MS));
-  }
-  return readJob(cwd, jobId);
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

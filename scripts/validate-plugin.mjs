@@ -1,10 +1,98 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { spawn } from "node:child_process";
 import path from "node:path";
+import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_SERVER_NAME = "codex-mimocode";
 const DEFAULT_SERVER_ENTRY = "dist/codex/mcp-server.js";
+const EXPECTED_TOOL_NAMES = [
+  "mimo_healthcheck",
+  "mimo_plan",
+  "mimo_implement",
+  "mimo_review",
+  "mimo_fix_ci",
+  "mimo_resume",
+  "mimo_compose",
+  "mimo_status",
+  "mimo_events",
+  "mimo_wait",
+  "mimo_result",
+  "mimo_cancel",
+  "mimo_jobs"
+];
+const STRING_SCHEMA = { type: "string", minLength: 1 };
+const NOTIFY_SCHEMA = {
+  anyOf: [
+    {
+      type: "object",
+      properties: {
+        type: { type: "string", const: "codex" },
+        threadId: STRING_SCHEMA
+      },
+      required: ["type"],
+      additionalProperties: false
+    },
+    {
+      type: "object",
+      properties: {
+        type: { type: "string", const: "webhook" },
+        url: STRING_SCHEMA,
+        secretEnv: STRING_SCHEMA
+      },
+      required: ["type", "url", "secretEnv"],
+      additionalProperties: false
+    }
+  ]
+};
+const COMMON_JOB_PROPERTIES = {
+  cwd: STRING_SCHEMA,
+  model: STRING_SCHEMA,
+  timeoutMs: { type: "integer", exclusiveMinimum: 0, default: 1_800_000 },
+  notify: NOTIFY_SCHEMA
+};
+
+function canonicalWorkSchema(properties, required) {
+  return {
+    type: "object",
+    properties: { ...COMMON_JOB_PROPERTIES, ...properties },
+    required,
+    additionalProperties: false,
+    $schema: "http://json-schema.org/draft-07/schema#"
+  };
+}
+
+const CANONICAL_WORK_TOOL_SCHEMAS = {
+  mimo_plan: canonicalWorkSchema({ task: STRING_SCHEMA }, ["cwd", "task"]),
+  mimo_implement: canonicalWorkSchema(
+    { task: STRING_SCHEMA, allowWrite: { type: "boolean" } },
+    ["cwd", "task", "allowWrite"]
+  ),
+  mimo_review: canonicalWorkSchema({ base: { ...STRING_SCHEMA, default: "HEAD" } }, ["cwd"]),
+  mimo_fix_ci: canonicalWorkSchema(
+    { file: STRING_SCHEMA, task: STRING_SCHEMA },
+    ["cwd", "file"]
+  ),
+  mimo_resume: canonicalWorkSchema(
+    { jobId: STRING_SCHEMA, task: STRING_SCHEMA },
+    ["cwd", "jobId", "task"]
+  ),
+  mimo_compose: canonicalWorkSchema({
+    workflow: {
+      type: "string",
+      enum: [
+        "brainstorm", "dev", "fix", "fix-ci", "plan", "execute-plan", "review",
+        "parallel", "worktree", "merge", "new-skill"
+      ]
+    },
+    task: STRING_SCHEMA,
+    file: STRING_SCHEMA,
+    since: STRING_SCHEMA,
+    verification: { type: "array", items: STRING_SCHEMA },
+    reportDir: STRING_SCHEMA
+  }, ["cwd", "workflow"])
+};
 
 function usage() {
   return [
@@ -210,7 +298,8 @@ function validateSkill(root, skillDir, errors) {
     return;
   }
 
-  const parsed = parseFrontmatter(readFileSync(skillFile, "utf8"));
+  const content = readFileSync(skillFile, "utf8");
+  const parsed = parseFrontmatter(content);
   if (parsed.error) {
     errors.push(`${relativeSkillFile} ${parsed.error}`);
     return;
@@ -230,6 +319,15 @@ function validateSkill(root, skillDir, errors) {
   if (!parsed.body) {
     errors.push(`${relativeSkillFile} must include skill instructions after frontmatter`);
   }
+  if (/\b(?:loop|poll|frequent(?:ly)?|repeat(?:ed|edly)?)\b[^\n.]{0,100}\bmimo_wait\b|\bmimo_wait\b[^\n.]{0,100}\b(?:loop|poll|frequent(?:ly)?|repeat(?:ed|edly)?)\b/i.test(parsed.body)) {
+    errors.push(`${relativeSkillFile} must not instruct Codex to poll or loop on mimo_wait`);
+  }
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (!isObject(value)) return JSON.stringify(value);
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
 }
 
 function validateSkills(root, errors) {
@@ -252,7 +350,83 @@ function validateSkills(root, errors) {
   }
 }
 
-export function validatePlugin(rootDir = process.cwd()) {
+async function validateBuiltTools(root, errors) {
+  const mcp = readJson(root, ".mcp.json", errors);
+  const server = mcp?.mcpServers?.[DEFAULT_SERVER_NAME];
+  if (!isObject(server) || typeof server.command !== "string" || !Array.isArray(server.args)) return;
+
+  let child;
+  try {
+    child = spawn(server.command, server.args, {
+      cwd: path.resolve(root, typeof server.cwd === "string" ? server.cwd : "."),
+      env: { ...process.env, ...(isObject(server.env) ? server.env : {}) },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true
+    });
+  } catch (error) {
+    errors.push(`built MCP server could not start: ${error.message}`);
+    return;
+  }
+
+  const lines = readline.createInterface({ input: child.stdout });
+  const pending = new Map();
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  lines.on("line", (line) => {
+    try {
+      const message = JSON.parse(line);
+      const waiter = pending.get(message.id);
+      if (waiter) {
+        pending.delete(message.id);
+        message.error ? waiter.reject(new Error(message.error.message ?? "MCP error")) : waiter.resolve(message.result);
+      }
+    } catch {}
+  });
+
+  const request = (id, method, params) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`timed out waiting for ${method}`));
+    }, 5_000);
+    pending.set(id, {
+      resolve: (value) => { clearTimeout(timer); resolve(value); },
+      reject: (error) => { clearTimeout(timer); reject(error); }
+    });
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+  });
+
+  try {
+    await request(1, "initialize", {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "codex-mimo-plugin-validator", version: "1" }
+    });
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
+    const result = await request(2, "tools/list", {});
+    const tools = Array.isArray(result?.tools) ? result.tools : [];
+    const names = tools.map((tool) => tool?.name).filter((name) => typeof name === "string");
+    if (JSON.stringify(names) !== JSON.stringify(EXPECTED_TOOL_NAMES)) {
+      errors.push(`built MCP server must expose exactly the 13 supported tools in canonical order; found: ${names.join(", ")}`);
+    }
+    for (const [name, expectedSchema] of Object.entries(CANONICAL_WORK_TOOL_SCHEMAS)) {
+      const tool = tools.find((candidate) => candidate?.name === name);
+      if (stableJson(tool?.inputSchema) !== stableJson(expectedSchema)) {
+        errors.push(`${name} input schema must match the canonical contract`);
+      }
+    }
+  } catch (error) {
+    errors.push(`built MCP tool inspection failed: ${error.message}${stderr.trim() ? ` (${stderr.trim()})` : ""}`);
+  } finally {
+    for (const waiter of pending.values()) waiter.reject(new Error("MCP probe closed"));
+    pending.clear();
+    lines.close();
+    child.stdin.destroy();
+    child.kill();
+  }
+}
+
+export async function validatePlugin(rootDir = process.cwd()) {
   const root = path.resolve(rootDir);
   const errors = [];
 
@@ -261,6 +435,7 @@ export function validatePlugin(rootDir = process.cwd()) {
   validatePluginManifest(root, errors);
   validateMcpConfig(root, errors);
   validateSkills(root, errors);
+  if (errors.length === 0) await validateBuiltTools(root, errors);
 
   return {
     ok: errors.length === 0,
@@ -269,14 +444,14 @@ export function validatePlugin(rootDir = process.cwd()) {
   };
 }
 
-function main(argv) {
+async function main(argv) {
   const args = parseArgs(argv);
   if (args.help) {
     console.log(usage());
     return 0;
   }
 
-  const result = validatePlugin(args.root);
+  const result = await validatePlugin(args.root);
   if (!result.ok) {
     for (const error of result.errors) {
       console.error(error);
@@ -291,7 +466,7 @@ function main(argv) {
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   try {
-    process.exitCode = main(process.argv.slice(2));
+    process.exitCode = await main(process.argv.slice(2));
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

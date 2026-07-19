@@ -10,10 +10,10 @@ const runSmoke = process.env.RUN_LOCAL_MIMO_HOOK_SMOKE === "1";
 const describeSmoke = runSmoke ? describe : describe.skip;
 
 function writeFullHookProject(root: string, markerPath: string): void {
-  const hookDir = path.join(root, ".mimocode", "hooks");
-  fs.mkdirSync(hookDir, { recursive: true });
+  const pluginDir = path.join(root, ".mimocode", "plugin");
+  fs.mkdirSync(pluginDir, { recursive: true });
   fs.writeFileSync(
-    path.join(hookDir, "capture.js"),
+    path.join(pluginDir, "capture.js"),
     `
 import fs from "node:fs/promises";
 
@@ -27,14 +27,16 @@ async function dump(stage, input) {
   }
 }
 
-export default {
-  "session.pre": async (input, output) => {
-    await dump("pre", { input, output });
-  },
-  "session.post": async (input) => {
-    await dump("post", input);
-  }
-};
+export default async function capturePlugin() {
+  return {
+    "session.pre": async (input, output) => {
+      await dump("pre", { input, output });
+    },
+    "session.post": async (input) => {
+      await dump("post", input);
+    }
+  };
+}
 `,
     "utf-8"
   );
@@ -146,13 +148,7 @@ describeSmoke("local MiMoCode hook payload shape", () => {
         callbackReceived: callback !== null,
         callbackKeys: callback ? Object.keys(callback) : null,
         callbackOutcome: callback?.outcome,
-        callbackError: callback?.error,
-        callbackSessionId: callback?.sessionId,
-        callbackAgentId: callback?.agentId,
-        callbackTaskId: callback?.taskId,
-        callbackAssistantMessageId: callback?.assistantMessageId,
-        callbackTrajectoryLength: callback?.trajectoryLength,
-        callbackFinalTextSample: callback?.finalText?.slice(0, 200) ?? null
+        callbackSessionId: callback?.sessionId
       };
       fs.writeFileSync(path.join(root, "runtime-report.json"), JSON.stringify(report, null, 2), "utf-8");
       // eslint-disable-next-line no-console
@@ -161,7 +157,9 @@ describeSmoke("local MiMoCode hook payload shape", () => {
       expect(result.exitCode).toBe(0);
       expect(callback).toBeTruthy();
       expect(callback?.sessionId).toBeTruthy();
-      expect(typeof callback?.finalText).toBe("string");
+      expect(Object.keys(callback ?? {}).sort()).toEqual([
+        "event", "invocationId", "outcome", "receivedAt", "sessionId"
+      ]);
     } finally {
       await hook.close();
     }

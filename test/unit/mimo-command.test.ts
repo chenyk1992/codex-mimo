@@ -16,4 +16,11 @@ describe("resolveMimoCommand", () => {
   it("uses MIMO_COMMAND when CODEX_MIMO_COMMAND is not set", () => {
     expect(resolveMimoCommand({ MIMO_COMMAND: "mimo-local" })).toBe("mimo-local");
   });
+
+  it("uses Windows case-insensitive command lookup without changing POSIX semantics", () => {
+    const env = { codex_mimo_command: "C:/tools/mimo-lower.cmd" };
+
+    expect(resolveMimoCommand(env, "win32")).toBe("C:/tools/mimo-lower.cmd");
+    expect(resolveMimoCommand(env, "linux")).toBe("mimo");
+  });
 });

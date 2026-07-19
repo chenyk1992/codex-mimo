@@ -1,19 +1,37 @@
-export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+import type { NotificationTarget } from "../notify/types.js";
+
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "needs_input"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "timeout";
 
 export type JobPhase =
-  | "queued"
   | "starting"
   | "planning"
   | "investigating"
   | "editing"
   | "verifying"
   | "reviewing"
-  | "finalizing"
-  | "done"
-  | "failed"
-  | "cancelled";
+  | "finalizing";
 
-export type JobKind = "plan" | "implement" | "review" | "fix-ci" | "compose" | "resume" | "acp";
+export type JobKind = "plan" | "implement" | "review" | "fix-ci" | "resume" | "compose";
+
+export interface JobReceipt {
+  jobId: string;
+  kind: JobKind;
+  status: "queued";
+  actions: {
+    status: "mimo_status";
+    events: "mimo_events";
+    result: "mimo_result";
+    cancel: "mimo_cancel";
+  };
+}
 
 export interface JobVerification {
   command: string;
@@ -29,20 +47,7 @@ export interface JobReportPaths {
   diff?: string;
 }
 
-export interface JobSignalsHint {
-  tool: "mimo_events";
-  waitTool: "mimo_wait";
-  jobId: string;
-  sinceCursor: number;
-}
-
-export interface JobWakeHint {
-  tool: "mimo_wake";
-  jobId: string;
-  sinceCursor: number;
-}
-
-export interface JobCallbackSummary {
+export interface ExecutionCallbackSummary {
   invocationId: string;
   outcome: "completed" | "error" | "cancelled" | "missing";
   sessionId?: string | null;
@@ -50,16 +55,43 @@ export interface JobCallbackSummary {
   error?: string;
 }
 
+export interface JobTransitionFields {
+  status: JobStatus;
+  summary: string;
+  phase?: JobPhase;
+  pid?: number | null;
+  processIdentity?: string | null;
+  startedAt?: string;
+  completedAt?: string;
+  sessionId?: string | null;
+  changedFiles?: string[];
+  verification?: JobVerification[];
+  executionCallback?: ExecutionCallbackSummary;
+  reportPaths?: JobReportPaths;
+  error?: string;
+  errorCode?: string;
+}
+
+export interface PendingJobTransition extends JobTransitionFields {
+  version: 1;
+  stage: "prepared" | "finalized";
+  fromStatus: JobStatus;
+  signalCursor: number;
+  signalCreatedAt: string;
+  requestHash: string;
+}
+
 export interface JobRecord {
   id: string;
   kind: JobKind;
-  workflow?: string;
   cwd: string;
   task: string;
   request: unknown;
   status: JobStatus;
-  phase: JobPhase;
+  phase?: JobPhase;
   pid?: number | null;
+  processIdentity: string | null;
+  cancellationRequestedAt?: string;
   sessionId?: string | null;
   parentJobId?: string | null;
   createdAt: string;
@@ -69,67 +101,67 @@ export interface JobRecord {
   summary?: string;
   changedFiles: string[];
   verification: JobVerification[];
-  callback?: JobCallbackSummary;
+  executionCallback?: ExecutionCallbackSummary;
+  pendingTransition?: PendingJobTransition;
+  notificationTarget?: NotificationTarget;
   reportPaths?: JobReportPaths;
   logFile: string;
   eventsFile: string;
   signalsFile: string;
+  notificationOutboxFile: string;
   error?: string;
   errorCode?: string;
-}
-
-export interface JobLaunchResult {
-  jobId: string;
-  status: JobStatus;
-  phase: JobPhase;
-  summary: string;
-  actions: {
-    status: "mimo_status";
-    result: "mimo_result";
-    cancel: "mimo_cancel";
-  };
-  signals: JobSignalsHint;
-  wake: JobWakeHint;
 }
 
 export interface JobStatusResult {
   jobId: string;
   kind: JobKind;
+  parentJobId: string | null;
   status: JobStatus;
-  phase: JobPhase;
+  phase?: JobPhase;
   elapsedMs: number | null;
   sessionId: string | null;
   summary: string;
   changedFiles: string[];
-  callback?: JobCallbackSummary;
+  cancellationRequested?: true;
+  executionCallback?: ExecutionCallbackSummary;
   progress: string[];
-  signals: JobSignalsHint;
-  wake?: JobWakeHint;
+  notification?: JobNotificationStatus;
   actions: {
+    events: "mimo_events";
+    wait?: "mimo_wait";
     result?: "mimo_result";
     cancel?: "mimo_cancel";
+    resume?: "mimo_resume";
   };
+}
+
+export interface JobNotificationStatus {
+  targetType: "codex" | "webhook";
+  status: "pending" | "delivering" | "delivered" | "failed";
+  attempts: number;
+  lastError?: string;
 }
 
 export interface JobResult {
   jobId: string;
+  kind: JobKind;
+  parentJobId: string | null;
   status: JobStatus;
+  resultType: "partial" | "final";
   summary: string;
   sessionId: string | null;
   changedFiles: string[];
   verification: JobVerification[];
-  callback?: JobCallbackSummary;
+  executionCallback?: ExecutionCallbackSummary;
   error?: string;
   errorCode?: string;
   reportPaths?: JobReportPaths;
-  signals: JobSignalsHint;
-  resumeHint?: {
-    tool: "mimo_resume_job";
-    jobId: string;
-  };
-  directResumeHint?: {
-    tool: "mimo_resume";
-    session: string;
+  notification?: JobNotificationStatus;
+  actions: {
+    status: "mimo_status";
+    events: "mimo_events";
+    resume?: "mimo_resume";
   };
 }
 

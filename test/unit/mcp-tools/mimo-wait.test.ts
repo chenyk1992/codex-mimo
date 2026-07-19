@@ -1,13 +1,16 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mimoWait } from "../../../src/codex/tools.js";
 import { createJobStore, updateJob } from "../../../src/core/job-store.js";
-import { appendJobSignal } from "../../../src/core/job-signals.js";
+import {
+  appendJobSignal,
+  isAttentionSignal,
+  readJobSignalPage
+} from "../../../src/core/job-signals.js";
 
 const tempDirs: string[] = [];
-
 function tempWorkspace(): string {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-wait-"));
   tempDirs.push(cwd);
@@ -15,62 +18,134 @@ function tempWorkspace(): string {
 }
 
 afterEach(() => {
-  for (const d of tempDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  for (const cwd of tempDirs.splice(0)) fs.rmSync(cwd, { recursive: true, force: true });
 });
 
 describe("mimo_wait", () => {
-  it("returns immediately when signals are already available", async () => {
+  it("ignores ordinary progress and returns only attention signals", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
-    updateJob(cwd, job.id, { status: "running", phase: "investigating", pid: 100 });
+    updateJob(cwd, job.id, {
+      status: "running", phase: "investigating", pid: 100, processIdentity: "start-100"
+    });
     appendJobSignal(job.signalsFile, {
-      jobId: job.id,
-      kind: "milestone",
-      level: "info",
-      phase: "investigating",
-      summary: "Found test files."
+      jobId: job.id, kind: "milestone", level: "info", summary: "Ordinary progress."
     });
 
-    const result = await mimoWait({ cwd, jobId: job.id, timeoutMs: 100, pollMs: 5 });
+    let now = 0;
+    const delays: number[] = [];
+    const result = await mimoWait({ cwd, jobId: job.id, timeoutMs: 10_000 }, {
+      now: () => now,
+      intervalMs: 1_000,
+      sleep: async (milliseconds) => {
+        delays.push(milliseconds);
+        now += milliseconds;
+        appendJobSignal(job.signalsFile, {
+          jobId: job.id,
+          kind: "completed",
+          level: "info",
+          status: "completed",
+          summary: "Done."
+        });
+      }
+    });
 
+    expect(delays).toEqual([1_000]);
+    expect(result.signals.map((signal) => signal.kind)).toEqual(["completed"]);
+    expect(result.nextCursor).toBe(2);
     expect(result.timedOut).toBe(false);
-    expect(result.nextCursor).toBe(1);
-    expect(result.signals).toHaveLength(1);
-    expect(result.signals[0]).toMatchObject({ summary: "Found test files." });
   });
 
-  it("waits until a new signal arrives", async () => {
+  it("continues internal scans after the last confirmed ordinary signal", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
-    updateJob(cwd, job.id, { status: "running", phase: "starting", pid: 100 });
+    appendJobSignal(job.signalsFile, {
+      jobId: job.id, kind: "milestone", level: "info", summary: "Ordinary progress."
+    });
+    const scanCursors: number[] = [];
+    const readSignals = vi.fn((selected, options) => {
+      scanCursors.push(options.sinceCursor);
+      return readJobSignalPage(selected.signalsFile, { ...options, include: isAttentionSignal });
+    });
+    let now = 0;
 
-    setTimeout(() => {
-      appendJobSignal(job.signalsFile, {
-        jobId: job.id,
-        kind: "phase_changed",
-        level: "info",
-        phase: "verifying",
-        summary: "Verification started."
-      });
-    }, 20);
+    const result = await mimoWait({ cwd, jobId: job.id, timeoutMs: 10_000 }, {
+      now: () => now,
+      intervalMs: 1_000,
+      readSignals,
+      sleep: async (milliseconds) => {
+        now += milliseconds;
+        appendJobSignal(job.signalsFile, {
+          jobId: job.id, kind: "completed", level: "info", summary: "Done."
+        });
+      }
+    });
 
-    const result = await mimoWait({ cwd, jobId: job.id, sinceCursor: 0, timeoutMs: 500, pollMs: 5 });
-
+    expect(scanCursors).toEqual([0, 1]);
+    expect(result.signals.map((signal) => signal.cursor)).toEqual([2]);
+    expect(result.nextCursor).toBe(2);
     expect(result.timedOut).toBe(false);
-    expect(result.signals).toHaveLength(1);
-    expect(result.signals[0]).toMatchObject({ kind: "phase_changed", phase: "verifying" });
   });
 
-  it("returns a timeout marker without loading verbose status output", async () => {
+  it("does not expose pollMs in the public schema", async () => {
     const cwd = tempWorkspace();
-    const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
-    updateJob(cwd, job.id, { status: "running", phase: "editing", pid: 100 });
+    const job = createJobStore(cwd).create({ kind: "plan", task: "Plan", request: {} });
+    await expect(mimoWait({ cwd, jobId: job.id, timeoutMs: 1, pollMs: 1 }))
+      .rejects.toThrow();
+  });
 
-    const result = await mimoWait({ cwd, jobId: job.id, timeoutMs: 25, pollMs: 5 });
+  it("returns empty signals and current status on timeout without a heartbeat", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "review", task: "Review", request: {} });
+    updateJob(cwd, job.id, {
+      status: "running", phase: "reviewing", pid: 101, processIdentity: "start-101"
+    });
+    appendJobSignal(job.signalsFile, {
+      jobId: job.id, kind: "phase_changed", level: "info", summary: "Reviewing."
+    });
+    let now = 0;
 
-    expect(result.timedOut).toBe(true);
-    expect(result.status).toBe("running");
-    expect(result.phase).toBe("editing");
+    const result = await mimoWait({ cwd, jobId: job.id, timeoutMs: 2_500 }, {
+      now: () => now,
+      intervalMs: 1_000,
+      sleep: async (milliseconds) => { now += milliseconds; }
+    });
+
+    expect(result).toMatchObject({ status: "running", phase: "reviewing", timedOut: true, waitedMs: 2_500 });
     expect(result.signals).toEqual([]);
+    expect(result.nextCursor).toBe(1);
+    expect(JSON.stringify(result)).not.toMatch(/heartbeat|wake/i);
+  });
+
+  it("paginates attention signals without advancing past an omitted attention", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "compose", task: "Run", request: {} });
+    for (const [kind, summary] of [
+      ["needs_input", "one"], ["blocked", "two"], ["completed", "three"]
+    ] as const) {
+      appendJobSignal(job.signalsFile, { jobId: job.id, kind, level: "warn", summary });
+    }
+
+    const first = await mimoWait({ cwd, jobId: job.id, sinceCursor: 0, limit: 2, timeoutMs: 10 });
+    expect(first.signals.map((signal) => signal.cursor)).toEqual([1, 2]);
+    expect(first.nextCursor).toBe(2);
+
+    const second = await mimoWait({ cwd, jobId: job.id, sinceCursor: first.nextCursor, limit: 2, timeoutMs: 10 });
+    expect(second.signals.map((signal) => signal.cursor)).toEqual([3]);
+    expect(second.nextCursor).toBe(3);
+  });
+
+  it("advances across ordinary signals before an attention page", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "plan", task: "Plan", request: {} });
+    appendJobSignal(job.signalsFile, { jobId: job.id, kind: "milestone", level: "info", summary: "ordinary" });
+    appendJobSignal(job.signalsFile, { jobId: job.id, kind: "completed", level: "info", summary: "first" });
+    appendJobSignal(job.signalsFile, { jobId: job.id, kind: "failed", level: "error", summary: "second" });
+
+    const first = await mimoWait({ cwd, jobId: job.id, limit: 1, timeoutMs: 10 });
+    expect(first.signals.map((signal) => signal.cursor)).toEqual([2]);
+    expect(first.nextCursor).toBe(2);
+    expect((await mimoWait({ cwd, jobId: job.id, sinceCursor: 2, limit: 1, timeoutMs: 10 })).signals[0]?.cursor)
+      .toBe(3);
   });
 });

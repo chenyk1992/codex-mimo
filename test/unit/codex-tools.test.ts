@@ -1,283 +1,112 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-const mocks = vi.hoisted(() => ({
-  execa: vi.fn(),
-  runAndCapture: vi.fn(),
-  runComposeWorkflow: vi.fn()
-}));
-
-vi.mock("execa", () => ({
-  execa: mocks.execa
-}));
-
-vi.mock("../../src/mimo/mimo-runner.js", () => ({
-  runAndCapture: mocks.runAndCapture
-}));
-
-vi.mock("../../src/compose/runner.js", () => ({
-  runComposeWorkflow: mocks.runComposeWorkflow
-}));
-
-import { mimoCompose, mimoReview, mimoStatus, mimoResult } from "../../src/codex/tools.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  mimoCompose,
+  mimoFixCi,
+  mimoImplement,
+  mimoPlan,
+  mimoReview
+} from "../../src/codex/tools.js";
 import { MIMO_TOOL_NAMES } from "../../src/codex/tool-names.js";
-import { readJob, updateJob } from "../../src/core/job-store.js";
-import { readJobSignals } from "../../src/core/job-signals.js";
+import {
+  ComposeInput,
+  FixCiInput,
+  ImplementInput,
+  PlanInput,
+  ResumeInput,
+  ReviewInput
+} from "../../src/codex/tool-schemas.js";
+import type { JobKind } from "../../src/core/jobs.js";
 
-function buildComposeReport(overrides: Record<string, unknown> = {}) {
-  return {
-    id: "2026-01-01T00-00-00-000Z-compose-dev",
-    createdAt: "2026-01-01T00:00:00.000Z",
-    workflow: "dev",
-    cwd: "/tmp/proj",
-    task: "Test task",
-    mimoArgs: [],
-    requestedSkills: ["implement"],
-    status: "passed",
-    events: [],
-    changedFiles: ["src/a.ts"],
-    diffStat: "1 file changed",
-    verification: [{ command: "npm test", exitCode: 0, passed: true, durationMs: 100 }],
-    reportPaths: {
-      json: "/tmp/proj/.codex-mimo/reports/report.json",
-      markdown: "/tmp/proj/.codex-mimo/reports/report.md",
-      eventsJsonl: "/tmp/proj/.codex-mimo/events/report.jsonl"
-    },
-    ...overrides
-  };
-}
+const dirs: string[] = [];
+afterEach(() => dirs.splice(0).forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })));
 
-describe("codex tool handlers", () => {
-  beforeEach(() => {
-    mocks.execa.mockReset();
-    mocks.runAndCapture.mockReset();
-  });
-
-  it("passes review diffs to MiMoCode as an attached file instead of an inline prompt", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-review-"));
-    const diff = "diff --git a/src/app.ts b/src/app.ts\n+const value = 1;\n";
-    mocks.execa.mockResolvedValue({ exitCode: 0, stdout: diff, stderr: "" });
-    mocks.runAndCapture.mockResolvedValue({
-      sessionId: "ses_123",
-      summary: "No findings.",
-      changedFiles: [],
-      commands: [],
-      errors: [],
-      exitCode: 0,
-      raw: [{ type: "text" }]
-    });
-
-    const result = await mimoReview({ cwd, base: "HEAD" });
-
-    expect(result.findings).toHaveLength(1);
-    expect(mocks.runAndCapture).toHaveBeenCalledTimes(1);
-    const runInput = mocks.runAndCapture.mock.calls[0][0];
-    expect(runInput.files).toHaveLength(1);
-    expect(fs.readFileSync(runInput.files[0], "utf-8")).toBe(diff);
-    expect(runInput.message).toContain("attached");
-    expect(runInput.message).not.toContain(diff);
-  });
-
-  it("fails review when MiMoCode execution fails", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-review-"));
-    mocks.execa.mockResolvedValue({ exitCode: 0, stdout: "diff --git a/a b/a\n", stderr: "" });
-    mocks.runAndCapture.mockResolvedValue({
-      sessionId: null,
-      summary: "Completed.",
-      changedFiles: [],
-      commands: [],
-      errors: ["command line too long"],
-      exitCode: 1,
-      raw: []
-    });
-
-    await expect(mimoReview({ cwd, base: "HEAD" })).rejects.toThrow("MiMoCode review failed");
-  });
-
-  it("returns a clear error when git diff capture fails", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-review-"));
-    mocks.execa.mockResolvedValue({
-      exitCode: 128,
-      stdout: "",
-      stderr: "fatal: bad revision 'missing'"
-    });
-
-    await expect(mimoReview({ cwd, base: "missing" })).rejects.toThrow("Git diff capture failed");
-    expect(mocks.runAndCapture).not.toHaveBeenCalled();
-  });
-
-  it("starts compose in background and returns a job launch response", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-bg-"));
-    const result = await mimoCompose(
-      {
-        cwd,
-        workflow: "dev",
-        task: "Implement login throttling",
-        background: true
-      },
-      {
-        spawnJobWorker: () => 999
-      }
-    );
-
-    expect(result).toMatchObject({
+describe("codex work tool handlers", () => {
+  it.each([
+    ["mimo_plan", "plan", (cwd: string, spawnJobSupervisor: () => number) =>
+      mimoPlan({ cwd, task: "Plan it" }, { env: {}, spawnJobSupervisor })],
+    ["mimo_implement", "implement", (cwd: string, spawnJobSupervisor: () => number) =>
+      mimoImplement({ cwd, task: "Build it", allowWrite: true }, { env: {}, spawnJobSupervisor })],
+    ["mimo_review", "review", (cwd: string, spawnJobSupervisor: () => number) =>
+      mimoReview({ cwd, base: "HEAD" }, { env: {}, spawnJobSupervisor })],
+    ["mimo_fix_ci", "fix-ci", (cwd: string, spawnJobSupervisor: () => number) =>
+      mimoFixCi({ cwd, file: "ci.log", task: "Fix" }, { env: {}, spawnJobSupervisor })],
+    ["mimo_compose", "compose", (cwd: string, spawnJobSupervisor: () => number) =>
+      mimoCompose({ cwd, workflow: "dev", task: "Build" }, { env: {}, spawnJobSupervisor })]
+  ] as const)("%s returns only a queued %s receipt", async (_name, kind: JobKind, run) => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-work-tool-"));
+    dirs.push(cwd);
+    const spawnJobSupervisor = vi.fn().mockReturnValue(123);
+    const result = await run(cwd, spawnJobSupervisor);
+    expect(result).toEqual({
+      jobId: expect.any(String),
+      kind,
       status: "queued",
-      phase: "queued",
       actions: {
         status: "mimo_status",
+        events: "mimo_events",
         result: "mimo_result",
         cancel: "mimo_cancel"
       }
     });
-    expect(result.jobId).toMatch(/^compose-/);
+    expect(spawnJobSupervisor).toHaveBeenCalledWith(cwd);
   });
 
-  it("marks job as failed when background worker exits prematurely", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-exit-"));
-    let capturedOnExit: ((code: number | null, signal: string | null) => void) | undefined;
+  it("exposes exactly the final 13-tool surface", () => {
+    expect(MIMO_TOOL_NAMES).toEqual([
+      "mimo_healthcheck",
+      "mimo_plan",
+      "mimo_implement",
+      "mimo_review",
+      "mimo_fix_ci",
+      "mimo_resume",
+      "mimo_compose",
+      "mimo_status",
+      "mimo_events",
+      "mimo_wait",
+      "mimo_result",
+      "mimo_cancel",
+      "mimo_jobs"
+    ]);
+    expect(MIMO_TOOL_NAMES).not.toContain("mimo_wake");
+    expect(MIMO_TOOL_NAMES).not.toContain("mimo_resume_job");
+  });
 
-    await mimoCompose(
-      {
-        cwd,
-        workflow: "dev",
-        task: "Some task",
-        background: true
-      },
-      {
-        spawnJobWorker: (_cwd, _kind, _jobId, options) => {
-          capturedOnExit = options?.onExit;
-          return 999;
-        }
-      }
-    );
-
-    expect(capturedOnExit).toBeDefined();
-    capturedOnExit!(1, null);
-
-    const jobs = fs.readdirSync(path.join(cwd, ".codex-mimo", "jobs"))
-      .filter((f) => f.endsWith(".json") && f !== "state.json");
-    expect(jobs).toHaveLength(1);
-    const job = JSON.parse(fs.readFileSync(path.join(cwd, ".codex-mimo", "jobs", jobs[0]), "utf-8"));
-    expect(job.status).toBe("failed");
-    expect(job.errorCode).toBe("worker_exit");
-    expect(readJobSignals(job.signalsFile).signals.at(-1)).toMatchObject({
-      kind: "failed",
-      level: "error",
-      status: "failed",
-      phase: "failed",
-      summary: "Worker process exited unexpectedly (code=1, signal=null)."
+  it("contains no superseded runtime identifiers in source", () => {
+    const sourceFiles = collectTypeScriptFiles(path.resolve("src"));
+    const forbidden = [
+      /mimo_wake/g,
+      /mimo_resume_job/g,
+      /compose-worker/g,
+      /runAndCapture/g,
+      /runComposeWorkflow/g,
+      /runComposeJobWorker/g,
+      /JobWakeHint/g,
+      /JobKind[^\n]*["']acp["']/g
+    ];
+    const matches = sourceFiles.flatMap((file) => {
+      const contents = fs.readFileSync(file, "utf8");
+      return forbidden.flatMap((pattern) =>
+        [...contents.matchAll(pattern)].map((match) => `${path.relative(process.cwd(), file)}:${match[0]}`)
+      );
     });
+    expect(matches).toEqual([]);
   });
 
-  it("registers all job runtime MCP tools", () => {
-    const toolNames = [...MIMO_TOOL_NAMES];
-    expect(toolNames).toContain("mimo_status");
-    expect(toolNames).toContain("mimo_events");
-    expect(toolNames).toContain("mimo_wait");
-    expect(toolNames).toContain("mimo_wake");
-    expect(toolNames).toContain("mimo_result");
-    expect(toolNames).toContain("mimo_cancel");
-    expect(toolNames).toContain("mimo_jobs");
-    expect(toolNames).toContain("mimo_resume_job");
-  });
-
-  it("forwards AbortSignal to compose runner", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-signal-"));
-    const controller = new AbortController();
-    mocks.runComposeWorkflow.mockResolvedValue(buildComposeReport());
-    await mimoCompose({ cwd, workflow: "dev", task: "Test" }, {}, { signal: controller.signal });
-    expect(mocks.runComposeWorkflow).toHaveBeenCalledWith(
-      expect.objectContaining({ signal: controller.signal })
-    );
-  });
-
-  it("passes dryRun to compose runner", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-dry-"));
-    mocks.runComposeWorkflow.mockResolvedValue(buildComposeReport({ status: "needs_review" }));
-    const result = await mimoCompose({ cwd, workflow: "plan", task: "Plan only", dryRun: true });
-    expect(mocks.runComposeWorkflow).toHaveBeenCalledWith(
-      expect.objectContaining({ dryRun: true })
-    );
-    expect(result.status).toBe("needs_review");
-  });
-
-  it("includes planText in compact report when present", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-plan-"));
-    mocks.runComposeWorkflow.mockResolvedValue(buildComposeReport({
-      planText: "## Implementation Plan\n1. Add auth\n2. Add tests"
-    }));
-    const result = await mimoCompose({ cwd, workflow: "plan", task: "Plan auth" });
-    expect(result.planText).toContain("Implementation Plan");
-  });
-
-  it("handles already-aborted signal gracefully", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-aborted-"));
-    const controller = new AbortController();
-    controller.abort();
-    mocks.runComposeWorkflow.mockResolvedValue(buildComposeReport({ status: "failed", error: "Aborted" }));
-    const result = await mimoCompose({ cwd, workflow: "dev", task: "Test" }, {}, { signal: controller.signal });
-    expect(result.status).toBe("failed");
-  });
-
-  it("surfaces timeout status in compact report", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-timeout-"));
-    mocks.runComposeWorkflow.mockResolvedValue(buildComposeReport({
-      status: "timeout",
-      error: "MiMoCode process timed out after 1800000ms"
-    }));
-    const result = await mimoCompose({ cwd, workflow: "dev", task: "Long task" });
-    expect(result.status).toBe("timeout");
-    expect(result.error).toContain("timed out");
-    const status = await mimoStatus({ cwd });
-    expect(status.status).toBe("failed");
-    expect(status.phase).toBe("failed");
-  });
-
-  it("passes custom reportDir to compose runner", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-reportdir-"));
-    const customDir = path.join(cwd, "custom-reports");
-    mocks.runComposeWorkflow.mockResolvedValue(buildComposeReport());
-    await mimoCompose({ cwd, workflow: "dev", task: "Test", reportDir: customDir });
-    expect(mocks.runComposeWorkflow).toHaveBeenCalledWith(
-      expect.objectContaining({ reportDir: customDir })
-    );
-  });
-
-  it("creates a job record for foreground compose discoverable by mimo_status", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-compose-fg-"));
-    mocks.runComposeWorkflow.mockResolvedValue(buildComposeReport({
-      sessionId: "ses_fg_compose",
-      status: "passed"
-    }));
-    await mimoCompose({ cwd, workflow: "dev", task: "Implement feature" });
-
-    const status = await mimoStatus({ cwd });
-    expect(status.jobId).toMatch(/^compose-/);
-    expect(status.status).toBe("completed");
-    expect(status.sessionId).toBe("ses_fg_compose");
-  });
-
-  it("waits briefly for a background compose job when wait=true", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-wait-"));
-    const result = await mimoCompose(
-      { cwd, workflow: "plan", task: "Plan", background: true, wait: true },
-      {
-        spawnJobWorker: (jobCwd, kind, jobId) => {
-          const job = readJob(jobCwd, jobId)!;
-          updateJob(jobCwd, job.id, {
-            status: "completed",
-            phase: "done",
-            completedAt: new Date().toISOString(),
-            summary: "plan completed",
-            reportPaths: { json: "run.json", markdown: "run.md", eventsJsonl: "run.jsonl" }
-          });
-          return 123;
-        }
-      }
-    );
-
-    expect(JSON.stringify(result)).toContain("plan completed");
+  it("keeps background and wait out of every work tool schema", () => {
+    for (const schema of [PlanInput, ImplementInput, ReviewInput, FixCiInput, ResumeInput, ComposeInput]) {
+      expect(schema.keyof().options).not.toContain("background");
+      expect(schema.keyof().options).not.toContain("wait");
+    }
   });
 });
+
+function collectTypeScriptFiles(directory: string): string[] {
+  return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) return collectTypeScriptFiles(target);
+    return entry.isFile() && entry.name.endsWith(".ts") ? [target] : [];
+  });
+}

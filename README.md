@@ -1,236 +1,170 @@
 # Codex MiMoCode Bridge
 
-`codex-mimo` lets Codex invoke MiMoCode as a specialist coding agent for planning, implementation, review, CI repair, and long-running Compose workflows.
-
-The active runtime path is `mimo run --format json`. Direct commands parse MiMoCode JSONL output through `src/mimo/mimo-runner.ts`; Compose commands use a streaming runner and write reports under `.codex-mimo/`.
+Codex-MiMo lets Codex delegate planning, implementation, review, CI repair, continuation, and Compose workflows to MiMoCode. Every work entry creates a persisted background job and returns immediately with a compact receipt.
 
 ## Prerequisites
 
-MiMoCode must be installed and authenticated:
-
-```bash
-mimo --version
-mimo auth list
-```
+- Node.js 20 or newer
+- MiMoCode installed and authenticated (`mimo --version`)
+- Git for diff/status capture and read-only checks
 
 ## Setup
 
-```bash
+```powershell
 npm install
 npm run build
 npm run validate:plugin
 ```
 
-`validate:plugin` checks the plugin manifest, MCP config, skill frontmatter, and built MCP entrypoint. It does not require Python or PyYAML.
+The plugin manifest is `.codex-plugin/plugin.json`; `.mcp.json` starts `dist/codex/mcp-server.js` over stdio. Run `codex-mimo doctor --cwd <project>` to diagnose the selected checkout or installed plugin.
 
-## CLI Usage
+## Unified Job Lifecycle
 
-```bash
-codex-mimo healthcheck
-codex-mimo doctor
-codex-mimo plan "Add login rate limiting"
-codex-mimo implement "Fix failing user-session test"
-codex-mimo review
-codex-mimo fix-ci --file ci.log
-codex-mimo resume --session ses_abc123 "Continue the remaining tests"
-codex-mimo sessions
-codex-mimo compose --workflow dev "Implement login throttling"
-codex-mimo compose --workflow execute-plan --file doc/api-refactor-plan.md
-```
-
-`healthcheck` is a lightweight MiMoCode CLI check. `doctor` is an explicit diagnostics command for plugin and MCP tool visibility: it checks plugin files, `.mcp.json`, starts the packaged MCP server, and verifies that `tools/list` returns the expected `mimo_*` tools. It cannot prove that the current Codex thread has already injected those tools. If `doctor` passes for the same plugin directory Codex is loading but tools are still absent, restart Codex or start a new thread so the host reloads plugin metadata; also check for stale or different plugin cache directories.
-
-The CLI `compose` command runs in the foreground and writes reports under `.codex-mimo/`. Background jobs, `mimo_wait`, and `mimo_wake` are Codex MCP tool workflows rather than standalone CLI commands.
-
-## Compose Workflows
-
-Use `codex-mimo compose` or the `mimo_compose` MCP tool when you want MiMoCode to run a skill-driven workflow:
-
-```bash
-codex-mimo compose --workflow brainstorm "Explore login throttling requirements"
-codex-mimo compose --workflow plan "Plan login throttling"
-codex-mimo compose --workflow dev "Implement login throttling"
-codex-mimo compose --workflow fix "Fix intermittent session loss"
-codex-mimo compose --workflow fix-ci --file ci.log
-codex-mimo compose --workflow execute-plan --file doc/api-refactor-plan.md
-codex-mimo compose --workflow review --since HEAD
-codex-mimo compose --workflow plan --timeout-ms 110000 "Create a validation plan"
-```
-
-Supported workflows are registered in `src/compose/workflow.ts`: `brainstorm`, `dev`, `fix`, `fix-ci`, `plan`, `execute-plan`, `review`, `parallel`, `worktree`, `merge`, and `new-skill`.
-
-Reports are written to:
+The six work tools and matching CLI commands share one launcher, definition registry, worker, status transition engine, and notification outbox:
 
 ```text
-.codex-mimo/reports/
-.codex-mimo/events/
-.codex-mimo/diffs/
+work request -> queued receipt -> job worker -> MiMoCode JSONL + session.post
+             -> finalization/verification -> attention signal -> notification outbox
+             -> webhook receiver or original Codex task
 ```
 
-Each report includes MiMoCode events, changed files, diff stat, verification results, callback status, review text when present, and report file paths. If the caller has its own timeout, set `--timeout-ms` or MCP `timeoutMs` lower than that outer timeout so `codex-mimo` can stop MiMoCode and write a report.
+Job status is one of:
 
-## Codex Plugin Installation
+- `queued`: persisted, worker not yet running
+- `running`: MiMoCode or finalization is active
+- `needs_input`: paused until the caller supplies information
+- `blocked`: paused because an external condition prevents progress
+- `completed`: execution and required verification succeeded
+- `failed`: execution, callback, validation, or verification failed
+- `cancelled`: the caller cancelled the job
+- `timeout`: the configured execution deadline expired
 
-The project is packaged as a Codex plugin. To install or refresh a local plugin copy:
+`needs_input` and `blocked` retain the MiMoCode session. Continue them with `mimo_resume` and the parent `jobId`; the continuation is a new child job and inherits the parent's notification target unless explicitly overridden.
 
-1. Build and validate the project:
+## Work Tools
 
-   ```bash
-   npm run build
-   npm run validate:plugin
-   codex-mimo doctor
-   ```
+The MCP server exposes exactly 13 tools:
 
-2. Confirm the plugin files are present:
-   - `.codex-plugin/plugin.json`
-   - `.mcp.json`
-   - `skills/mimocode/SKILL.md`
-   - `dist/codex/mcp-server.js`
-
-3. Restart Codex or start a new Codex thread after refreshing an installed plugin cache so the host reloads skill and MCP tool metadata.
-
-If an installed plugin cache fails with `ERR_MODULE_NOT_FOUND`, the cache is missing runtime dependencies. Reinstall dependencies in the plugin root or use a bundled plugin build; `dist/` alone is not enough for the current NodeNext build.
-
-## MCP Tools
-
-The MCP server is started by `node dist/codex/mcp-server.js` through `.mcp.json` and exposes:
-
-| Tool | Description |
+| Tool | Purpose |
 | --- | --- |
-| `mimo_healthcheck` | Check MiMoCode installation and auth state |
-| `mimo_plan` | Create an implementation plan without editing files |
-| `mimo_implement` | Implement focused code changes; requires `allowWrite: true` |
-| `mimo_review` | Review the current diff for bugs and regressions |
-| `mimo_fix_ci` | Fix CI failures using an attached log file |
-| `mimo_resume` | Resume a previous MiMoCode session directly |
-| `mimo_compose` | Run a Compose workflow, foreground or background |
-| `mimo_status` | Read a current job snapshot |
-| `mimo_events` | Read cursor-addressed high-signal job events without blocking |
-| `mimo_wait` | Wait inside the MCP server for new high-signal job events |
-| `mimo_wake` | Build a Codex heartbeat prompt for a background job |
-| `mimo_result` | Return compact final output for a finished job |
-| `mimo_cancel` | Cancel an active background job |
-| `mimo_jobs` | List recent jobs for a workspace |
-| `mimo_resume_job` | Create a follow-up job from a previous job session |
+| `mimo_healthcheck` | Check MiMoCode availability |
+| `mimo_plan` | Create a read-only plan job |
+| `mimo_implement` | Create an implementation job; requires `allowWrite: true` |
+| `mimo_review` | Review changes since a base ref |
+| `mimo_fix_ci` | Repair failures from a log file |
+| `mimo_resume` | Create a child job from a paused parent |
+| `mimo_compose` | Run a registered Compose workflow |
+| `mimo_status` | Read a job and notification snapshot |
+| `mimo_events` | Read cursor-based compact progress |
+| `mimo_wait` | Perform one attention-event wait for explicit diagnosis |
+| `mimo_result` | Read a paused or terminal result |
+| `mimo_cancel` | Cancel a queued or running job |
+| `mimo_jobs` | List recent workspace jobs |
 
-Direct tools run synchronously. Use `mimo_compose` with `background: true` for long-running work.
-
-## Long-Running Jobs
-
-For long Compose workflows, pass `background: true` to `mimo_compose` and receive a `jobId` immediately:
+Every work tool returns:
 
 ```json
 {
-  "cwd": "/path/to/repo",
-  "workflow": "dev",
-  "task": "Implement login throttling",
-  "background": true,
-  "wait": false,
-  "timeoutMs": 1800000
+  "jobId": "...",
+  "kind": "implement",
+  "status": "queued",
+  "actions": {
+    "status": "mimo_status",
+    "events": "mimo_events",
+    "result": "mimo_result",
+    "cancel": "mimo_cancel"
+  }
 }
 ```
 
-Job artifacts are stored under `.codex-mimo/jobs/`:
+The default Codex flow does not call `mimo_wait`. Codex returns the receipt, then the notification adapter resumes the original task when the job emits `needs_input`, `blocked`, or a terminal result. The resumed turn calls `mimo_result`.
 
-```text
-<jobId>.json
-<jobId>.log
-<jobId>.events.jsonl
-<jobId>.signals.jsonl
-state.json
+## Notification Targets
+
+Each job freezes at most one target when it is created. Resolution order is explicit `notify`, the current process's `CODEX_THREAD_ID`, then no notification.
+
+Codex Desktop injects `CODEX_THREAD_ID` for each task. Windows users do not need to configure it, and must not set it globally: a stale global value can route a new job to an old task. An explicit Codex target remains available when needed:
+
+```json
+{ "notify": { "type": "codex", "threadId": "thread-id" } }
 ```
 
-Use `mimo_wait` when Codex can keep one MCP call open. It polls inside the MCP server and returns compact cursor-addressed signals. Store `nextCursor` and pass it as `sinceCursor` on the next wait.
+Codex delivery is at-least-once across process crashes. In normal operation, one delivery performs one `thread/resume` and one `turn/start`. If the notification process crashes after App Server accepts `turn/start` but before the outbox is settled, the same persisted event ID can be retried and start a duplicate callback turn. The callback prompt includes that event ID and identifies the notification as a possible retry; repeated `mimo_result` reads remain read-only.
 
-Use `mimo_wake` when Codex should not hold a long tool call open. For active jobs, it returns a heartbeat-ready prompt plus `heartbeat.arguments`; for terminal jobs, it returns a `mimo_result` hint instead.
+Webhook targets name an environment variable; secret values are never stored in job, event, log, report, or outbox files:
 
-Use `mimo_status` for snapshots, `mimo_events` for non-blocking incremental reads, `mimo_result` after terminal signals, and `mimo_cancel` to stop active work.
-
-## Runtime Notes
-
-- `mimo run --format json` emits JSONL, not a single JSON object.
-- Direct runs keep `stdin: "ignore"` so MiMoCode does not wait on inherited stdin.
-- Prompts start with `Objective:`. This avoids MiMoCode treating the call as an empty interactive session.
-- Prompts longer than 8 KB or containing non-ASCII are written to `.codex-mimo/inputs/*.md` and passed as `@file` context.
-- Runs create temporary MiMoCode hook config under `.codex-mimo/runtime-hooks/<invocationId>/` and wait for a `session.post` callback. Missing/error/cancelled callbacks are reflected in result status.
-- The active source tree does not implement ACP. See `doc/acp-message-flow.md` only as a protocol reference.
-
-## Safety Model
-
-`src/core/policy.ts` provides a conservative policy engine:
-
-- Reads outside the workspace: denied
-- Secret files such as `.env`, `.env.*`, private keys, `.npmrc`, and `.pypirc`: denied
-- Workspace writes: ask by default
-- CI/non-interactive mode: ask decisions become deny
-- Destructive commands such as `rm`, `git push`, and `git reset`: denied
-
-Current CLI/MCP execution primarily relies on MiMoCode invocation prompts, post-run checks, and MiMoCode's own permission behavior. There is no active `codex-mimo.config.json` loader in this source tree.
-
-## Architecture
-
-```text
-Codex
-  -> MCP server (src/codex/mcp-server.ts)
-  -> MCP tool handlers (src/codex/tools.ts)
-  -> direct mimo run or Compose runner
-  -> mimo run --format json
-  -> JSONL events + session.post hook callback
-  -> compact result or persisted job/report artifacts
+```json
+{
+  "notify": {
+    "type": "webhook",
+    "url": "https://receiver.example/mimo-events",
+    "secretEnv": "CODEX_MIMO_WEBHOOK_SECRET"
+  }
+}
 ```
 
-## Project Structure
+Requests include `X-Codex-Mimo-Event-Id` for receiver deduplication and `X-Codex-Mimo-Signature`, an HMAC-SHA256 of the exact body using the named secret. Receivers should deduplicate by event ID before processing.
 
-```text
-src/
-  cli/       CLI entrypoint and command wrappers
-  codex/     MCP server, tool schemas, compact responses, wake hints
-  compose/   workflow registry, foreground runner, background worker, reports, events
-  core/      policy, audit, prompt, job runtime/store/signals, sessions, terminal helpers
-  git/       git status and diff capture
-  mimo/      MiMo run args, JSONL capture, prompt transport, hook callback
-test/        Vitest unit and smoke tests
-doc/         Operations, policy, Compose workflow, ACP reference docs
-skills/      Codex skill definitions
-templates/   MiMoCode configuration templates
-scripts/     plugin validator
+Notification delivery is independent of job execution. Transient failures retry in the notification worker using 10 seconds, 1 minute, then 5-minute intervals for up to 30 minutes. A delivery failure is reported by `mimo_status`/`mimo_result` but never changes a successful job to failed. Expired delivery leases are reclaimed after a worker restart.
+
+## CLI
+
+CLI work commands also return queued JSON receipts:
+
+```powershell
+codex-mimo plan --cwd E:\project "Plan the change"
+codex-mimo implement --cwd E:\project --allow-write "Implement the change"
+codex-mimo review --cwd E:\project --base HEAD
+codex-mimo fix-ci --cwd E:\project --file ci.log "Repair CI"
+codex-mimo resume --cwd E:\project --job-id <parent-job-id> "Continue with this answer"
+codex-mimo compose --cwd E:\project --workflow dev "Build the feature"
 ```
 
-## Usage Flow
+Controls are `status`, `events`, `wait`, `result`, `cancel`, and `jobs`, each with `--cwd` and the relevant `--job-id`/cursor flags. Notification flags are `--notify codex --thread-id ...` or `--notify webhook --url ... --secret-env ...`.
 
-For a new feature:
+CLI exit codes are: `0` success; `2` command, input, or schema error; and `1` runtime failure, including an unhealthy `doctor` or `healthcheck`.
 
-```text
-1. Use `mimo_compose` with workflow `brainstorm` when requirements are fuzzy.
-2. Use `mimo_plan` or workflow `plan` when you need an implementation plan.
-3. Use workflow `dev` for an end-to-end development loop, or `mimo_implement` for a focused direct change.
-4. Use `mimo_review` or workflow `review` to inspect the diff.
-5. Run the narrowest meaningful verification, such as `npm test` or `npm run lint`.
-```
+## Compose Workflows
 
-For CI repair:
+Registered workflows are `brainstorm`, `plan`, `dev`, `fix`, `fix-ci`, `execute-plan`, `review`, `parallel`, `worktree`, `merge`, and `new-skill`. Compose uses the same worker and job lifecycle as every other kind; only its prompt, workflow rules, verification, and report finalization differ. See [Compose workflows](doc/compose-workflows.md).
 
-```bash
-codex-mimo fix-ci --file ci.log
-codex-mimo compose --workflow fix-ci --file ci.log
-```
+## Runtime Files and Recovery
 
-For resuming work:
+Runtime state is below `.codex-mimo/`:
 
-```bash
-codex-mimo sessions
-codex-mimo resume --session ses_abc123 "Continue from the previous run"
-```
+- `jobs/<jobId>.json`: authoritative job record
+- `jobs/<jobId>.log`: compact progress log
+- `jobs/<jobId>.events.jsonl`: normalized raw MiMoCode events
+- `jobs/<jobId>.signals.jsonl`: cursor-addressed signals
+- `jobs/notifications.jsonl`: durable notification outbox
+- `callbacks/`: allowlisted internal callback receipts without final text, raw metadata, or callback error strings
+- `reports/`, `events/`, `diffs/`: Compose structural event summaries, verification, and Git artifacts
+- `inputs/`, `runtime-hooks/`: UTF-8 prompt transport and generated internal callback plugins
 
-For background MCP work, use `mimo_resume_job` when a previous job has a session ID, or use the `directResumeHint` returned by `mimo_result` with `mimo_resume`.
+The per-job JSON file is authoritative; `jobs/state.json` is a rebuildable cache. Each launch starts one workspace-scoped internal supervisor, which adopts an existing physical worker owner or replaces a crashed worker while execution or delivery remains unfinished, and exits when the workspace is idle. Worker startup retries are bounded. A restarted job worker never blindly reruns an unknown process: it verifies process ownership and keeps the job `running` with its PID/identity intact while termination remains unconfirmed. Only confirmed exit, identity mismatch, or confirmed termination permits a terminal transition. Pending transitions and outbox delivery identity remain stable across restart.
+
+## Safety
+
+- The active CLI/MCP path relies on explicit write authorization, MiMoCode invocation settings, authenticated internal callbacks, secret-environment isolation, and post-run Git checks.
+- Read-only jobs are checked against Git status, diff, untracked-file fingerprints, and HEAD changes.
+- Webhook secret values are removed from the MiMoCode child environment and are not written to job, signal, report, callback, audit, or notification payload files.
+- `src/core/policy.ts` is a reusable conservative policy engine with unit coverage, but it is not wired into the active MiMoCode process path. See [Policy guide](doc/policy-guide.md).
+- Large or non-ASCII prompts use UTF-8 attachment transport below `.codex-mimo/inputs/`.
 
 ## Development
 
-```bash
+```powershell
+npm test
 npm run build
 npm run lint
-npm test
 npm run validate:plugin
 ```
 
-Source is ESM-only. Keep `.js` extensions in TypeScript imports.
+Real-machine smokes are separately gated:
+
+```powershell
+$env:RUN_LOCAL_MIMO_HOOK_SMOKE='1'; npm run test:smoke:mimo-hooks
+$env:RUN_LOCAL_CODEX_NOTIFY_SMOKE='1'; npm run test:smoke:codex-notify
+```
+
+The Codex notification smoke also requires a real Codex App Server and an idle, dedicated Codex task with its injected `CODEX_THREAD_ID`. Do not run it from a task handling other work: the smoke deliberately resumes that task and asks its callback turn to fetch `mimo_result` and write an external observation marker.
