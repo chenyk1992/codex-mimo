@@ -7,7 +7,6 @@ import {
   emptyState,
   extractWorkReceipt,
   handleAfterMcp,
-  handleStop,
   normalizeToolName,
   upsertWatch,
   watchKey

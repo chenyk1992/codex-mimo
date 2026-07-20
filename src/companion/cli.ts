@@ -42,7 +42,10 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
     if (mode === "stop") {
-      const result = handleStop(payload, state);
+      const hookTimeoutSec = Number(process.env.CODEX_MIMO_COMPANION_HOOK_TIMEOUT_SEC ?? "1860");
+      const result = await handleStop(payload, state, {
+        hookTimeoutMs: (Number.isFinite(hookTimeoutSec) && hookTimeoutSec > 0 ? hookTimeoutSec : 1860) * 1000
+      });
       writeState(file, result.nextState);
       writeStdout(result.output);
       return;
