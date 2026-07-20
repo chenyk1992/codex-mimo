@@ -2,7 +2,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { normalizePath, isPathInside } from "../../../src/core/paths.js";
 import { createJobStore, resolveJobDir } from "../../../src/core/job-store.js";
 
 const tempDirs: string[] = [];
@@ -26,37 +25,6 @@ describe("file system edge cases", () => {
     createJobStore(cwd).create({ kind: "compose", workflow: "dev", task: "Init", request: {} });
 
     expect(fs.existsSync(jobDir)).toBe(true);
-  });
-
-  it("paths with spaces are handled correctly", () => {
-    const cwd = tempWorkspace();
-    const spacedDir = path.join(cwd, "my project (v2)");
-    fs.mkdirSync(spacedDir, { recursive: true });
-
-    const normalized = normalizePath(spacedDir);
-    expect(normalized).toContain("my project (v2)");
-    expect(normalized).not.toContain("\\");
-
-    expect(isPathInside(cwd, spacedDir)).toBe(true);
-  });
-
-  it("paths with special characters are handled correctly", () => {
-    const cwd = tempWorkspace();
-    const specialDir = path.join(cwd, "project[1] & stuff");
-    fs.mkdirSync(specialDir, { recursive: true });
-
-    const normalized = normalizePath(specialDir);
-    expect(normalized).toContain("project[1] & stuff");
-    expect(isPathInside(cwd, specialDir)).toBe(true);
-  });
-
-  it("Windows long paths are normalized correctly", () => {
-    const longSegment = "a".repeat(100);
-    const longPath = `E:/project/${longSegment}/${longSegment}/${longSegment}`;
-
-    const normalized = normalizePath(longPath);
-    expect(normalized).toContain(longSegment);
-    expect(isPathInside("E:/project", normalized)).toBe(true);
   });
 
   it("nested .codex-mimo directories created for deeply nested workspaces", () => {

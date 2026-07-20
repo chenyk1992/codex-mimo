@@ -148,7 +148,6 @@ The per-job JSON file is authoritative; `jobs/state.json` is a rebuildable cache
 - The active CLI/MCP path relies on explicit write authorization, MiMoCode invocation settings, authenticated internal callbacks, secret-environment isolation, and post-run Git checks.
 - Read-only jobs are checked against Git status, diff, untracked-file fingerprints, and HEAD changes.
 - Webhook secret values are removed from the MiMoCode child environment and are not written to job, signal, report, callback, audit, or notification payload files.
-- `src/core/policy.ts` is a reusable conservative policy engine with unit coverage, but it is not wired into the active MiMoCode process path. See [Policy guide](doc/policy-guide.md).
 - Large or non-ASCII prompts use UTF-8 attachment transport below `.codex-mimo/inputs/`.
 
 ## Development

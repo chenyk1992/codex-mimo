@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Codex-MiMo bridge: lets Codex invoke MiMoCode as a specialist coding agent through a local CLI and Codex MCP tools. The active integration path is `mimo run --format json`. Historical ACP notes are kept as protocol reference only; there is no active `src/mimo/acp-*` implementation.
+Codex-MiMo bridge: lets Codex invoke MiMoCode as a specialist coding agent through a local CLI and Codex MCP tools. The active integration path is `mimo run --format json`.
 
 ## Commands
 
@@ -16,7 +16,7 @@ npm run validate:plugin    # plugin manifest, MCP config, skill frontmatter, bui
 No dedicated single-test script. Filter through Vitest:
 
 ```bash
-npm test -- policy.test.ts
+npm test -- job-store.test.ts
 ```
 
 Public CLI commands (bin: `codex-mimo`): `plan`, `implement`, `review`, `fix-ci`, `resume`, `compose`, `status`, `events`, `wait`, `result`, `cancel`, `jobs`, `doctor`, `healthcheck`. Internal runtime commands are `job-supervisor`, `job-worker`, and `notify-worker`; see `src/cli/hints.ts` for the canonical usage line.
@@ -28,11 +28,10 @@ src/
   cli/         main.ts (arg parsing + dispatch), commands.ts, doctor.ts, hints.ts
   codex/       mcp-server.ts (stdio MCP, self-starts), tools.ts, tool-schemas.ts, tool-names.ts
   compose/     workflow.ts (11-workflow registry), events.ts, report.ts, verify.ts, post-checks.ts
-  core/        policy.ts, paths.ts, prompt.ts, audit.ts, terminal.ts,
-               encoding.ts (UTF-8 process env), jobs.ts, job-definitions.ts, job-launcher.ts,
-               job-store.ts, job-log.ts, job-render.ts, job-transition.ts, job-supervisor.ts,
-               job-worker.ts, job-process.ts, job-signals.ts, process-lock.ts,
-               public-summary.ts, worker-ownership.ts
+  core/        prompt.ts, encoding.ts (UTF-8 process env), jobs.ts, job-definitions.ts,
+               job-launcher.ts, job-store.ts, job-log.ts, job-render.ts, job-transition.ts,
+               job-supervisor.ts, job-worker.ts, job-process.ts, job-signals.ts,
+               process-lock.ts, public-summary.ts, worker-ownership.ts
   git/         diff.ts (status/diff capture)
   mimo/        run-json.ts (builds `mimo run --format json` args),
                streaming-runner.ts, prompt-transport.ts, hook-callback.ts
@@ -44,7 +43,6 @@ src/
 - **The workspace supervisor** holds one physical-workspace lock and replaces crashed job/notification workers while durable work remains.
 - **The unified job worker** binds the job definition, starts `mimo run --format json`, persists events/signals, requires `session.post`, finalizes verification/reporting, and writes an atomic terminal transition.
 - **The notification worker** leases append-only outbox records and delivers webhook or Codex task notifications without storing webhook secrets.
-- **ACP** is not active. `doc/acp-message-flow.md` is reference-only.
 
 ## Key Quirks
 
@@ -82,16 +80,11 @@ Reports land in `.codex-mimo/reports/`, with events under `.codex-mimo/events/` 
 
 MCP control tools: `mimo_status`, `mimo_events`, `mimo_wait`, `mimo_result`, `mimo_cancel`, `mimo_jobs`. Normal callers do not launch workers directly; work tools start `codex-mimo job-supervisor`, which owns replacement of `job-worker` and `notify-worker`. Final transitions enqueue delivery through the notification outbox.
 
-## Policy And Audit
-
-`src/core/policy.ts` exposes a conservative engine: reads outside the workspace denied; secret files (`.env`, private keys, `.npmrc`, `.pypirc`) denied; workspace writes default to `ask`; CI/non-interactive converts `ask` to `deny`; destructive commands (`rm`, `git push`, `git reset`) denied. No `core/config.ts` loader exists; treat policy and audit modules as reusable local primitives unless a caller explicitly wires them in.
-
 ## Testing
 
 - Tests live under `test/` with Vitest (`describe` / `it` / `expect` / `vi`).
-- Source imports in tests use `.js` extensions, e.g. `import { defaultPolicy } from "../../src/core/policy.js"`.
+- Source imports in tests use `.js` extensions, e.g. `import { createJobStore } from "../../src/core/job-store.js"`.
 - Layout: `test/unit/` (including `mcp-tools/`, `compose/`, `core/`, `cross-cutting/`), `test/smoke/` (needs a local MiMoCode install).
-- No active ACP implementation tests.
 
 ## Plugin Structure
 
@@ -104,7 +97,5 @@ MCP control tools: `mimo_status`, `mimo_events`, `mimo_wait`, `mimo_result`, `mi
 ## Docs
 
 - `README.md` — setup, CLI, MCP tools, workflow overview
-- `doc/policy-guide.md` — policy engine behavior and limitations
 - `doc/operations-guide.md` — job operations, notification delivery, troubleshooting
 - `doc/compose-workflows.md` — Compose workflow registry and job contract
-- `doc/acp-message-flow.md` — reference-only ACP sketch, not current runtime
