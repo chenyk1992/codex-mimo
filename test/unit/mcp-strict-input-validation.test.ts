@@ -55,7 +55,7 @@ describe("MCP strict input validation", () => {
     });
     expect(legalWait.isError).not.toBe(true);
     expect(waitHandler).toHaveBeenCalledWith(expect.objectContaining({
-      cwd: "E:/project", sinceCursor: 0, limit: 20, minLevel: "debug", timeoutMs: 10
+      cwd: "E:/project", sinceCursor: 0, limit: 20, minLevel: "warn", timeoutMs: 10
     }));
 
     const legalPlan = await client.callTool({
