@@ -1,5 +1,5 @@
 {
-  "$schema": "https://mimo.xiaomi.com//config.json",
+  "$schema": "https://mimo.xiaomi.com/mimocode/config.json",
   "model": "minimax-cn-coding-plan/MiniMax-M3",
   "small_model": "minimax-cn-coding-plan/MiniMax-M3",
   "default_agent": "build",
@@ -28,10 +28,16 @@
     "external_directory": "deny"
   },
   "agent": {
+    "general": {
+      "model": "minimax-cn-coding-plan/MiniMax-M2.7"
+    },
+    "explore": {
+      "model": "minimax-cn-coding-plan/MiniMax-M2.7"
+    },
     "codex-reviewer": {
       "description": "Reviews code for correctness, security, maintainability, and missing tests.",
       "mode": "subagent",
-      "model": "minimax-cn-coding-plan/MiniMax-M3",
+      "model": "minimax-cn-coding-plan/MiniMax-M2.7",
       "tools": {
         "write": false,
         "edit": false
