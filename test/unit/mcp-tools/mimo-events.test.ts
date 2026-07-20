@@ -78,6 +78,19 @@ describe("mimo_events", () => {
     expect(result.signals[0]).toMatchObject({ level: "error", summary: "MiMoCode job failed." });
   });
 
+  it("defaults minLevel to warn", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "plan", task: "Plan", request: {} });
+    appendJobSignal(job.signalsFile, {
+      jobId: job.id, kind: "milestone", level: "info", summary: "info only"
+    });
+    appendJobSignal(job.signalsFile, {
+      jobId: job.id, kind: "failed", level: "error", status: "failed", summary: "boom"
+    });
+    const result = await mimoEvents({ cwd, jobId: job.id });
+    expect(result.signals.map((s) => s.level)).toEqual(["error"]);
+  });
+
   it("throws for missing jobs", async () => {
     const cwd = tempWorkspace();
     await expect(mimoEvents({ cwd, jobId: "compose-missing" })).rejects.toThrow("No job found");
@@ -92,11 +105,11 @@ describe("mimo_events", () => {
       });
     }
 
-    const first = await mimoEvents({ cwd, jobId: job.id, sinceCursor: 0, limit: 2 });
+    const first = await mimoEvents({ cwd, jobId: job.id, sinceCursor: 0, limit: 2, minLevel: "debug" });
     expect(first.signals.map((signal) => signal.cursor)).toEqual([1, 2]);
     expect(first.nextCursor).toBe(2);
 
-    const second = await mimoEvents({ cwd, jobId: job.id, sinceCursor: first.nextCursor, limit: 2 });
+    const second = await mimoEvents({ cwd, jobId: job.id, sinceCursor: first.nextCursor, limit: 2, minLevel: "debug" });
     expect(second.signals.map((signal) => signal.cursor)).toEqual([3]);
     expect(second.nextCursor).toBe(3);
   });

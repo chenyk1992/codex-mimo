@@ -34,7 +34,7 @@ describe("mimo_wait", () => {
 
     let now = 0;
     const delays: number[] = [];
-    const result = await mimoWait({ cwd, jobId: job.id, timeoutMs: 10_000 }, {
+    const result = await mimoWait({ cwd, jobId: job.id, timeoutMs: 10_000, minLevel: "debug" }, {
       now: () => now,
       intervalMs: 1_000,
       sleep: async (milliseconds) => {
@@ -69,7 +69,7 @@ describe("mimo_wait", () => {
     });
     let now = 0;
 
-    const result = await mimoWait({ cwd, jobId: job.id, timeoutMs: 10_000 }, {
+    const result = await mimoWait({ cwd, jobId: job.id, timeoutMs: 10_000, minLevel: "debug" }, {
       now: () => now,
       intervalMs: 1_000,
       readSignals,
@@ -151,10 +151,10 @@ describe("mimo_wait", () => {
     appendJobSignal(job.signalsFile, { jobId: job.id, kind: "completed", level: "info", summary: "first" });
     appendJobSignal(job.signalsFile, { jobId: job.id, kind: "failed", level: "error", summary: "second" });
 
-    const first = await mimoWait({ cwd, jobId: job.id, limit: 1, timeoutMs: 10 });
+    const first = await mimoWait({ cwd, jobId: job.id, limit: 1, timeoutMs: 10, minLevel: "debug" });
     expect(first.signals.map((signal) => signal.cursor)).toEqual([2]);
     expect(first.nextCursor).toBe(2);
-    expect((await mimoWait({ cwd, jobId: job.id, sinceCursor: 2, limit: 1, timeoutMs: 10 })).signals[0]?.cursor)
+    expect((await mimoWait({ cwd, jobId: job.id, sinceCursor: 2, limit: 1, timeoutMs: 10, minLevel: "debug" })).signals[0]?.cursor)
       .toBe(3);
   });
 });
