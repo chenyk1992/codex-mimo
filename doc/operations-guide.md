@@ -74,6 +74,14 @@ Notification state is auxiliary. Delivery failure records `failed`, attempts, an
 
 Normal Codex operation uses none of these until the callback turn; that turn calls `mimo_result`. Ordinary phase and milestone signals do not create a caller notification.
 
+### Cursor companion zero-poll
+
+With the Cursor companion hooks installed (`hosts/cursor/README.md`), agents must not poll MCP control tools while a job is `queued` or `running`. The companion registers each work-tool receipt on `afterMCP` and blocks inside the `stop` hook until the job needs attention or the host wait budget is exhausted.
+
+A long `stop` hook duration while MiMoCode runs is expected — the companion waits for the job, not the agent. When the wait budget is exhausted, the watch remains on disk and the hook emits a short follow-up; the next `stop` can resume waiting. Set `CODEX_MIMO_COMPANION_WAIT_SEC` (for example `60`) to cap the host wait for a quick exhausted diagnostic instead of waiting the full job duration.
+
+Without the companion, callers demote to stop-after-launch: report the receipt and `jobId`, then use control tools only when the user explicitly asks — at most one `mimo_wait` followed by at most one `mimo_status`, never a polling loop.
+
 CLI exit codes are: `0` success; `2` command, input, or schema error; and `1` runtime failure, including an unhealthy `doctor` or `healthcheck`.
 
 The gated real-Codex smoke (`RUN_LOCAL_CODEX_NOTIFY_SMOKE=1`) must run from an idle, dedicated Codex task with the task-injected `CODEX_THREAD_ID`. Its completion notification starts a real callback turn in that task, so using an active task can cause busy retries or mix smoke instructions with unrelated work. The smoke starts the packaged stdio MCP server, lets both detached workers run normally, and accepts only a `completed` result marker written by the resumed task from `mimo_result` fields; its opt-in MCP audit also requires exactly that one job-scoped `mimo_result` call and no `mimo_wait` call.

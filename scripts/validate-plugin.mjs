@@ -322,6 +322,14 @@ function validateSkill(root, skillDir, errors) {
   if (/\b(?:loop|poll|frequent(?:ly)?|repeat(?:ed|edly)?)\b[^\n.]{0,100}\bmimo_wait\b|\bmimo_wait\b[^\n.]{0,100}\b(?:loop|poll|frequent(?:ly)?|repeat(?:ed|edly)?)\b/i.test(parsed.body)) {
     errors.push(`${relativeSkillFile} must not instruct Codex to poll or loop on mimo_wait`);
   }
+  if (skillName === "mimocode") {
+    if (!/companion/i.test(parsed.body) || !/mimo_result/i.test(parsed.body)) {
+      errors.push(`${relativeSkillFile} must document companion wake path using mimo_result`);
+    }
+    if (!/without companion|no companion|without the companion/i.test(parsed.body)) {
+      errors.push(`${relativeSkillFile} must document the no-companion demotion path`);
+    }
+  }
 }
 
 function stableJson(value) {

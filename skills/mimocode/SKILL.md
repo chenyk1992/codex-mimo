@@ -7,16 +7,42 @@ description: Use when a coding task benefits from MiMoCode planning, implementat
 
 MiMoCode is a specialist coding agent. Every work tool creates a persisted job and immediately returns a compact queued receipt. Codex owns task scoping, user communication, acceptance review, and final verification.
 
-## Callback-Driven Workflow
+## Delegation Workflow
 
-For each delegated slice:
+Every work tool creates a persisted job and returns a queued receipt. How the caller waits depends on the host environment.
+
+### Cursor with companion (recommended)
+
+Install the Cursor companion hooks (`hosts/cursor/README.md`). For each delegated slice:
+
+1. Call one work tool with the complete task and workspace.
+2. Return the queued receipt to the user and **stop**. Do not call `mimo_status`, `mimo_events`, or `mimo_wait` while the job is `queued` or `running`.
+3. The companion `stop` hook blocks until the job needs attention or reaches a terminal state, then auto-submits a short follow-up.
+4. On that follow-up only, call `mimo_result` with the receipt's `jobId`, then inspect relevant changes and verify independently.
+
+Never poll or loop on control tools while a job is `queued` or `running`.
+
+### Cursor without companion
+
+When companion hooks are not installed:
+
+1. Call one work tool with the complete task and workspace.
+2. Return the queued receipt and `jobId` to the user, then **stop**. Do not call control tools while the job is running.
+3. If the user explicitly insists on waiting in-session: call **at most one** `mimo_wait`, then **at most one** `mimo_status` if needed. Then stop again.
+4. When the job needs attention or is terminal, call `mimo_result` with the `jobId`.
+
+Never poll or loop on control tools. At most one `mimo_wait`, then at most one `mimo_status`, when the user insists.
+
+### Codex notify (callback-driven)
+
+For Codex Desktop with task-injected `CODEX_THREAD_ID` or an explicit `notify: { type: "codex" }` target:
 
 1. Call one work tool with the complete task and workspace.
 2. Return the queued receipt to the user. Do not call `mimo_wait` after launch.
 3. Rely on the callback turn created when the job needs attention or reaches a terminal state.
 4. When resumed by the callback turn, call `mimo_result` with the receipt's `jobId`, then inspect relevant changes and verify independently.
 
-Use `mimo_status`, `mimo_events`, or one `mimo_wait` only for explicit user diagnostics. Normal progress does not require a Codex tool turn.
+Use `mimo_status`, `mimo_events`, or one `mimo_wait` only for explicit user diagnostics on any path. Normal progress does not require a caller tool turn.
 
 ## Expected MCP Tools (13)
 
