@@ -111,8 +111,17 @@ describe("mimo_wait", () => {
       sleep: async (milliseconds) => { now += milliseconds; }
     });
 
-    expect(result).toMatchObject({ status: "running", phase: "reviewing", timedOut: true, waitedMs: 2_500 });
-    expect(result.signals).toEqual([]);
+    expect(result).toMatchObject({
+      status: "running",
+      phase: "reviewing",
+      timedOut: true,
+      waitedMs: 2_500,
+      signals: [],
+      diagnosis: expect.any(String),
+      nextAction: "status_once"
+    });
+    expect(result.diagnosis.length).toBeGreaterThan(0);
+    expect(result.diagnosis.length).toBeLessThanOrEqual(160);
     expect(result.nextCursor).toBe(1);
     expect(JSON.stringify(result)).not.toMatch(/heartbeat|wake/i);
   });

@@ -40,6 +40,7 @@ import {
 } from "../notify/dispatcher.js";
 import type { NotificationDelivery } from "../notify/types.js";
 import { startNotificationDispatch } from "../notify/dispatch-process.js";
+import { publicProgressSummary } from "../core/public-summary.js";
 
 const WAIT_CHECK_INTERVAL_MS = 1_000;
 
@@ -184,10 +185,19 @@ export async function mimoWait(input: unknown, deps: MimoWaitDependencies = {}) 
     ? { signals: [], nextCursor: scanCursor }
     : result;
 
+  const timedOut = result.signals.length === 0;
   return {
     ...renderJobSignals(job, visibleResult),
-    timedOut: result.signals.length === 0,
-    waitedMs: Math.max(0, now() - startedAt)
+    timedOut,
+    waitedMs: Math.max(0, now() - startedAt),
+    ...(timedOut ? {
+      diagnosis: publicProgressSummary({
+        type: "job",
+        status: job.status,
+        ...(job.phase ? { phase: job.phase } : {})
+      }),
+      nextAction: job.status === "queued" || job.status === "running" ? "status_once" as const : "stop" as const
+    } : {})
   };
 }
 
