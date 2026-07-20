@@ -49,8 +49,8 @@ function hookConfig() {
       stop: [
         {
           command: `${command} stop`,
-          loop_limit: 12,
-          timeout: 30
+          loop_limit: 5,
+          timeout: 1860
         }
       ]
     }
