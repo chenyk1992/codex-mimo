@@ -1,6 +1,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  awaitJobAttention,
+  computeWaitBudgetMs,
+  readJobStatusSnapshot
+} from "./host-wait.js";
 
 export const WORK_TOOLS = new Set([
   "mimo_plan",
@@ -28,6 +33,9 @@ export interface CompanionWatch {
   kind?: string;
   createdAt: string;
   conversationId?: string;
+  waitStartedAt?: string;
+  lastPolledAt?: string;
+  exhaustedAt?: string;
 }
 
 export interface CompanionWatchState {
@@ -166,22 +174,45 @@ export interface StopDecision {
   nextState: CompanionWatchState;
 }
 
-export function decideStopFollowup(
+export const MAX_FOLLOWUP_CHARS = 400;
+
+export function formatAttentionFollowup(cwd: string, jobId: string, status: string): string {
+  const text = [
+    `MiMo job ${jobId} needs attention (status=${status}).`,
+    `Call mimo_result with {"cwd":${JSON.stringify(cwd)},"jobId":${JSON.stringify(jobId)}}.`,
+    "Summarize for the user; do not invent outcomes. If needs_input/blocked, ask user then mimo_resume."
+  ].join(" ");
+  return text.slice(0, MAX_FOLLOWUP_CHARS);
+}
+
+export function formatExhaustedFollowup(jobId: string, status: string): string {
+  const text = [
+    `MiMo job ${jobId} still ${status} after host wait.`,
+    "Call mimo_status once OR mimo_cancel. Do not loop wait/events. Report to user."
+  ].join(" ");
+  return text.slice(0, MAX_FOLLOWUP_CHARS);
+}
+
+function resolveNow(now?: Date | (() => Date)): () => Date {
+  return typeof now === "function" ? now : () => now ?? new Date();
+}
+
+function defaultEnvWaitSec(): number | undefined {
+  const raw = Number(process.env.CODEX_MIMO_COMPANION_WAIT_SEC);
+  return Number.isFinite(raw) && raw > 0 ? raw : undefined;
+}
+
+export async function decideStopFollowup(
   state: CompanionWatchState,
   options: {
-    now?: Date;
-    loopCount?: number;
-    maxActiveLoops?: number;
+    now?: Date | (() => Date);
     hookStatus?: string;
+    hookTimeoutMs?: number;
+    envWaitSec?: number;
+    sleep?: (ms: number) => Promise<void>;
   } = {}
-): StopDecision {
-  const now = options.now ?? new Date();
-  const loopCount = typeof options.loopCount === "number" && Number.isFinite(options.loopCount)
-    ? options.loopCount
-    : 0;
-  const maxActiveLoops = typeof options.maxActiveLoops === "number" && Number.isFinite(options.maxActiveLoops)
-    ? options.maxActiveLoops
-    : 8;
+): Promise<StopDecision> {
+  const nowFn = resolveNow(options.now);
   const status = options.hookStatus ?? "completed";
   if (status === "aborted") {
     return { followup: undefined, nextState: state };
@@ -193,63 +224,88 @@ export function decideStopFollowup(
     acked: { ...state.acked }
   };
 
-  const stillWatching: CompanionWatch[] = [];
-  const attentionHits: Array<CompanionWatch & { job: { status: string; updatedAt?: string } }> = [];
-  const activeHits: Array<CompanionWatch & { job: { status: string; updatedAt?: string } }> = [];
-
+  // 1) Prefer immediate unacked attention (no block)
   for (const watch of next.watches) {
     const job = readJobRecord(watch.cwd, watch.jobId);
     if (!job || typeof job.status !== "string") continue;
+    if (!ATTENTION_STATUSES.has(job.status)) continue;
     const key = watchKey(watch.cwd, watch.jobId);
-    if (ATTENTION_STATUSES.has(job.status)) {
-      // Enhancement 1: same attention status must not re-trigger follow-up.
-      if (next.acked[key]?.status === job.status) continue;
-      attentionHits.push({ ...watch, job: { status: job.status, updatedAt: job.updatedAt } });
-      continue;
-    }
-    if (ACTIVE_STATUSES.has(job.status)) {
-      activeHits.push({ ...watch, job: { status: job.status, updatedAt: job.updatedAt } });
-      stillWatching.push(watch);
-    }
-  }
-
-  if (attentionHits.length > 0) {
-    const hit = attentionHits[0]!;
-    const key = watchKey(hit.cwd, hit.jobId);
-    next.acked[key] = { status: hit.job.status, ackedAt: now.toISOString() };
-    next.watches = [
-      ...attentionHits.slice(1).map(({ job: _job, ...watch }) => watch),
-      ...activeHits.map(({ job: _job, ...watch }) => watch)
-    ];
-    const cwdLiteral = JSON.stringify(hit.cwd);
-    const jobIdLiteral = JSON.stringify(hit.jobId);
+    if (next.acked[key]?.status === job.status) continue;
+    const now = nowFn();
+    next.acked[key] = { status: job.status, ackedAt: now.toISOString() };
+    next.watches = next.watches.filter((item) => watchKey(item.cwd, item.jobId) !== key);
     return {
-      followup: [
-        `MiMoCode job ${hit.jobId} now requires attention (status=${hit.job.status}).`,
-        `In cwd ${hit.cwd}, call the MCP tool mimo_result with {"cwd":${cwdLiteral},"jobId":${jobIdLiteral}}.`,
-        "Summarize the result for the user. Do not invent outcomes. If status is needs_input or blocked, ask the user what to send via mimo_resume."
-      ].join(" "),
+      followup: formatAttentionFollowup(watch.cwd, watch.jobId, job.status),
       nextState: next
     };
   }
 
-  next.watches = stillWatching;
-  if (activeHits.length > 0 && loopCount < maxActiveLoops) {
-    const hit = activeHits[0]!;
-    const cwdLiteral = JSON.stringify(hit.cwd);
-    const jobIdLiteral = JSON.stringify(hit.jobId);
+  // Drop missing / terminal / already-acked watches; keep only active for host wait.
+  const activeWatches: CompanionWatch[] = [];
+  for (const watch of next.watches) {
+    const job = readJobRecord(watch.cwd, watch.jobId);
+    if (!job || typeof job.status !== "string") continue;
+    if (ACTIVE_STATUSES.has(job.status)) activeWatches.push(watch);
+  }
+  next.watches = activeWatches;
+
+  // 2) Else pick first active watch (FIFO), compute budget, awaitJobAttention
+  const activeWatch = next.watches[0];
+  if (!activeWatch) {
+    return { followup: undefined, nextState: next };
+  }
+
+  const snap = readJobStatusSnapshot(activeWatch.cwd, activeWatch.jobId);
+  const now = nowFn();
+  const hookTimeoutMs = typeof options.hookTimeoutMs === "number" && Number.isFinite(options.hookTimeoutMs)
+    ? options.hookTimeoutMs
+    : 1_860_000;
+  const envWaitSec = typeof options.envWaitSec === "number" && Number.isFinite(options.envWaitSec) && options.envWaitSec > 0
+    ? options.envWaitSec
+    : defaultEnvWaitSec();
+  const budgetMs = computeWaitBudgetMs({
+    nowMs: now.getTime(),
+    hookTimeoutMs,
+    jobStartedAt: snap?.startedAt,
+    jobTimeoutMs: snap?.requestTimeoutMs,
+    envWaitSec
+  });
+
+  const waitStartedAt = now.toISOString();
+  next.watches = next.watches.map((watch) =>
+    watchKey(watch.cwd, watch.jobId) === watchKey(activeWatch.cwd, activeWatch.jobId)
+      ? { ...watch, waitStartedAt, lastPolledAt: waitStartedAt }
+      : watch
+  );
+
+  const outcome = await awaitJobAttention({
+    cwd: activeWatch.cwd,
+    jobId: activeWatch.jobId,
+    budgetMs,
+    now: () => nowFn().getTime(),
+    ...(options.sleep ? { sleep: options.sleep } : {})
+  });
+
+  const after = nowFn();
+  const key = watchKey(activeWatch.cwd, activeWatch.jobId);
+
+  if (outcome.type === "attention") {
+    // 3) attention → formatAttentionFollowup + ack status
+    next.acked[key] = { status: outcome.status, ackedAt: after.toISOString() };
+    next.watches = next.watches.filter((item) => watchKey(item.cwd, item.jobId) !== key);
     return {
-      followup: [
-        `MiMoCode job ${hit.jobId} is still ${hit.job.status}.`,
-        `Call mimo_status with {"cwd":${cwdLiteral},"jobId":${jobIdLiteral}} (or one diagnostic mimo_wait).`,
-        "If it is still queued/running, stop after the tool result so the companion can check again.",
-        "Do not invent completion. Do not ask the user to poll manually."
-      ].join(" "),
+      followup: formatAttentionFollowup(activeWatch.cwd, activeWatch.jobId, outcome.status),
       nextState: next
     };
   }
 
-  return { followup: undefined, nextState: next };
+  // 4) exhausted → formatExhaustedFollowup + remove watch + ack "exhausted"
+  next.acked[key] = { status: "exhausted", ackedAt: after.toISOString() };
+  next.watches = next.watches.filter((item) => watchKey(item.cwd, item.jobId) !== key);
+  return {
+    followup: formatExhaustedFollowup(activeWatch.jobId, outcome.status),
+    nextState: next
+  };
 }
 
 export function handleAfterMcp(
@@ -279,19 +335,22 @@ export function handleAfterMcp(
   };
 }
 
-export function handleStop(
+export async function handleStop(
   stdinPayload: Record<string, unknown>,
   state: CompanionWatchState,
-  options: { maxActiveLoops?: number; now?: Date } = {}
-): { output: { followup_message?: string }; nextState: CompanionWatchState } {
-  const loopCount = typeof stdinPayload.loop_count === "number" && Number.isFinite(stdinPayload.loop_count)
-    ? stdinPayload.loop_count
-    : 0;
-  const decided = decideStopFollowup(state, {
-    loopCount,
+  options: {
+    now?: Date | (() => Date);
+    hookTimeoutMs?: number;
+    envWaitSec?: number;
+    sleep?: (ms: number) => Promise<void>;
+  } = {}
+): Promise<{ output: { followup_message?: string }; nextState: CompanionWatchState }> {
+  const decided = await decideStopFollowup(state, {
     hookStatus: typeof stdinPayload.status === "string" ? stdinPayload.status : undefined,
-    maxActiveLoops: options.maxActiveLoops,
-    now: options.now
+    now: options.now,
+    hookTimeoutMs: options.hookTimeoutMs,
+    envWaitSec: options.envWaitSec,
+    sleep: options.sleep
   });
   return {
     output: decided.followup ? { followup_message: decided.followup } : {},

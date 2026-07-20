@@ -91,7 +91,7 @@ describe("mimo companion helpers", () => {
     });
   });
 
-  it("asks for mimo_result when a watched job reaches attention", () => {
+  it("asks for mimo_result when a watched job reaches attention", async () => {
     const cwd = tempDir();
     writeJob(cwd, {
       id: "plan-1",
@@ -105,17 +105,19 @@ describe("mimo companion helpers", () => {
       kind: "plan",
       createdAt: "2026-07-20T00:00:00.000Z"
     });
-    const decided = decideStopFollowup(state, {
-      loopCount: 0,
+    const decided = await decideStopFollowup(state, {
       now: new Date("2026-07-20T01:01:00.000Z")
     });
+    expect(decided.followup).toContain("MiMo job");
     expect(decided.followup).toContain("mimo_result");
     expect(decided.followup).toContain("plan-1");
+    expect(decided.followup).not.toMatch(/mimo_status|mimo_wait/);
+    expect(decided.followup!.length).toBeLessThanOrEqual(400);
     expect(decided.nextState.acked[watchKey(cwd, "plan-1")]?.status).toBe("failed");
     expect(decided.nextState.watches).toHaveLength(0);
   });
 
-  it("does not re-followup an already-acked attention status", () => {
+  it("does not re-followup an already-acked attention status", async () => {
     const cwd = tempDir();
     writeJob(cwd, {
       id: "plan-4",
@@ -128,20 +130,18 @@ describe("mimo companion helpers", () => {
       kind: "plan",
       createdAt: "2026-07-20T00:00:00.000Z"
     });
-    const first = decideStopFollowup(watched, {
-      loopCount: 0,
+    const first = await decideStopFollowup(watched, {
       now: new Date("2026-07-20T01:01:00.000Z")
     });
     expect(first.followup).toContain("mimo_result");
-    const second = decideStopFollowup(first.nextState, {
-      loopCount: 1,
+    const second = await decideStopFollowup(first.nextState, {
       now: new Date("2026-07-20T01:02:00.000Z")
     });
     expect(second.followup).toBeUndefined();
     expect(second.nextState.watches).toHaveLength(0);
   });
 
-  it("clears ack when the same job is watched again", () => {
+  it("clears ack when the same job is watched again", async () => {
     const cwd = tempDir();
     writeJob(cwd, {
       id: "plan-re",
@@ -161,35 +161,73 @@ describe("mimo companion helpers", () => {
       createdAt: "2026-07-20T02:00:00.000Z"
     });
     expect(rewatched.acked[key]).toBeUndefined();
-    const decided = decideStopFollowup(rewatched, {
-      loopCount: 0,
+    const decided = await decideStopFollowup(rewatched, {
       now: new Date("2026-07-20T02:01:00.000Z")
     });
     expect(decided.followup).toContain("mimo_result");
   });
 
-  it("polls active jobs until loop limit", () => {
+  it("blocks on active jobs then asks for mimo_result when completed", async () => {
     const cwd = tempDir();
+    const jobFile = path.join(cwd, ".codex-mimo", "jobs", "plan-2.json");
     writeJob(cwd, {
       id: "plan-2",
       status: "running",
-      updatedAt: "2026-07-20T01:00:00.000Z"
+      startedAt: "2026-07-20T00:00:00.000Z",
+      request: { timeoutMs: 1_800_000 },
+      // Clock must leave job remaining > 0 (timeout ends 00:30); 01:00 would zero the budget.
+      updatedAt: "2026-07-20T00:10:00.000Z"
     });
     const state = upsertWatch(emptyState(), {
-      cwd,
-      jobId: "plan-2",
-      kind: "plan",
-      createdAt: "2026-07-20T00:00:00.000Z"
+      cwd, jobId: "plan-2", kind: "plan", createdAt: "2026-07-20T00:00:00.000Z"
     });
-    const active = handleStop({ status: "completed", loop_count: 0 }, state);
-    expect(active.output.followup_message).toContain("mimo_status");
-    const done = handleStop({ status: "completed", loop_count: 99 }, active.nextState, {
-      maxActiveLoops: 8
+    let now = Date.parse("2026-07-20T00:10:00.000Z");
+    const decided = await decideStopFollowup(state, {
+      hookStatus: "completed",
+      now: () => new Date(now),
+      hookTimeoutMs: 1_860_000,
+      sleep: async (ms) => {
+        now += ms;
+        fs.writeFileSync(jobFile, `${JSON.stringify({
+          id: "plan-2",
+          status: "completed",
+          startedAt: "2026-07-20T00:00:00.000Z",
+          request: { timeoutMs: 1_800_000 }
+        }, null, 2)}\n`);
+      }
     });
-    expect(done.output.followup_message).toBeUndefined();
+    expect(decided.followup).toContain("mimo_result");
+    expect(decided.followup).not.toMatch(/mimo_status|mimo_wait/);
+    expect(decided.followup!.length).toBeLessThanOrEqual(400);
   });
 
-  it("does not follow up on aborted stops", () => {
+  it("exhausts wait budget and leaves the auto-wait queue", async () => {
+    const cwd = tempDir();
+    writeJob(cwd, {
+      id: "plan-ex",
+      status: "running",
+      startedAt: "2026-07-20T00:00:00.000Z",
+      request: { timeoutMs: 1_800_000 }
+    });
+    const state = upsertWatch(emptyState(), {
+      cwd, jobId: "plan-ex", kind: "plan", createdAt: "2026-07-20T00:00:00.000Z"
+    });
+    let now = Date.parse("2026-07-20T00:00:00.000Z");
+    const decided = await decideStopFollowup(state, {
+      hookStatus: "completed",
+      now: () => new Date(now),
+      hookTimeoutMs: 1_860_000,
+      envWaitSec: 50,
+      sleep: async (ms) => { now += ms; }
+    });
+    expect(decided.followup).toMatch(/still running|host wait/i);
+    expect(decided.followup).toContain("mimo_status");
+    expect(decided.followup).not.toMatch(/mimo_wait/);
+    expect(decided.nextState.watches.find((w) => w.jobId === "plan-ex")).toBeUndefined();
+    expect(decided.nextState.acked[watchKey(cwd, "plan-ex")]?.status).toBe("exhausted");
+  });
+
+  it("does not follow up on aborted stops", async () => {
     const cwd = tempDir();
     writeJob(cwd, { id: "plan-3", status: "completed", updatedAt: "2026-07-20T01:00:00.000Z" });
     const state = upsertWatch(emptyState(), {
@@ -198,7 +236,7 @@ describe("mimo companion helpers", () => {
       kind: "plan",
       createdAt: "2026-07-20T00:00:00.000Z"
     });
-    const decided = decideStopFollowup(state, { hookStatus: "aborted", loopCount: 0 });
+    const decided = await decideStopFollowup(state, { hookStatus: "aborted" });
     expect(decided.followup).toBeUndefined();
   });
 });
