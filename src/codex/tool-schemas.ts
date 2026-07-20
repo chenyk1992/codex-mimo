@@ -89,7 +89,9 @@ export const JobEventsInput = z.object({
 }).strict();
 
 export const JobWaitInput = JobEventsInput.extend({
-  timeoutMs: z.number().int().positive().default(1_800_000)
+  timeoutMs: z.number().int().positive().default(1_800_000),
+  // Wait must see completed/cancelled attention signals (level "info" in job-transition).
+  minLevel: z.enum(["debug", "info", "warn", "error"]).default("info")
 }).strict();
 
 export const JobResultInput = z.object({

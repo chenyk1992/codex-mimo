@@ -26,7 +26,7 @@ Also configure the **codex-mimocode** MCP server in Cursor, and use a git worksp
 
 1. Build and install hooks: `npm run build`, then `node hosts/cursor/install.mjs --user` (or `--project`).
 2. Reload Cursor hooks (Settings → Hooks, or restart Cursor).
-3. Ask the agent to call `mimo_plan` with a short task and a valid git `cwd`, then stop. The agent must **not** call `mimo_status` or `mimo_wait` while the job is running.
+3. Ask the agent to call `mimo_plan` with a short task and a valid git `cwd`, then stop. The agent must **not** call `mimo_status`, `mimo_events`, or `mimo_wait` while the job is running.
 4. The stop hook may run for a long time while the job finishes — that is expected. When the job completes, Cursor auto-follows up and asks only for `mimo_result`.
 5. Optional: set `CODEX_MIMO_COMPANION_WAIT_SEC=60` for a short exhausted diagnostic (hook returns quickly instead of waiting the full job duration).
 6. Inspect `~/.codex-mimo/companion-watch.json` if nothing happens.

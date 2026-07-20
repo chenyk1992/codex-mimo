@@ -2,10 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  ATTENTION_STATUSES,
   awaitJobAttention,
   computeWaitBudgetMs,
   readJobStatusSnapshot
 } from "./host-wait.js";
+
+export { ATTENTION_STATUSES };
 
 export const WORK_TOOLS = new Set([
   "mimo_plan",
@@ -14,15 +17,6 @@ export const WORK_TOOLS = new Set([
   "mimo_fix_ci",
   "mimo_resume",
   "mimo_compose"
-]);
-
-export const ATTENTION_STATUSES = new Set([
-  "needs_input",
-  "blocked",
-  "completed",
-  "failed",
-  "cancelled",
-  "timeout"
 ]);
 
 export const ACTIVE_STATUSES = new Set(["queued", "running"]);
@@ -35,9 +29,7 @@ export interface CompanionWatch {
   conversationId?: string;
   waitStartedAt?: string;
   lastPolledAt?: string;
-  exhaustedAt?: string;
 }
-
 export interface CompanionWatchState {
   version: 1;
   watches: CompanionWatch[];

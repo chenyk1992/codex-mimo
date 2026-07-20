@@ -160,6 +160,9 @@ export interface MimoWaitDependencies {
   readSignals?: typeof readAttentionSignals;
 }
 
+/** Timeout guidance only; never promises cancel as an automatic next step. */
+export type MimoWaitNextAction = "status_once" | "stop";
+
 export async function mimoWait(input: unknown, deps: MimoWaitDependencies = {}) {
   const parsed = JobWaitInput.parse(input);
   const selected = resolveJobForSignals(parsed.cwd, parsed.jobId);
@@ -196,7 +199,9 @@ export async function mimoWait(input: unknown, deps: MimoWaitDependencies = {}) 
         status: job.status,
         ...(job.phase ? { phase: job.phase } : {})
       }),
-      nextAction: job.status === "queued" || job.status === "running" ? "status_once" as const : "stop" as const
+      nextAction: (job.status === "queued" || job.status === "running"
+        ? "status_once"
+        : "stop") as MimoWaitNextAction
     } : {})
   };
 }

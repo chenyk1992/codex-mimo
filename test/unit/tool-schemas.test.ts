@@ -80,6 +80,8 @@ describe("work tool schemas", () => {
       "cwd", "jobId", "limit", "minLevel", "sinceCursor", "timeoutMs"
     ]);
     expect(() => JobWaitInput.parse({ cwd: "E:/project", pollMs: 1 })).toThrow();
+    expect(JobEventsInput.parse({ cwd: "E:/project" }).minLevel).toBe("warn");
+    expect(JobWaitInput.parse({ cwd: "E:/project" }).minLevel).toBe("info");
   });
 });
 

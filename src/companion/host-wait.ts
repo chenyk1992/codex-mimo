@@ -6,8 +6,13 @@ export const HOST_POLL_CAP_MS = 60_000;
 export const HOST_HOOK_SAFETY_PAD_MS = 10_000;
 export const DEFAULT_JOB_TIMEOUT_MS = 1_800_000;
 
-const ATTENTION = new Set([
-  "needs_input", "blocked", "completed", "failed", "cancelled", "timeout"
+export const ATTENTION_STATUSES = new Set([
+  "needs_input",
+  "blocked",
+  "completed",
+  "failed",
+  "cancelled",
+  "timeout"
 ]);
 
 export type JobStatusSnapshot = {
@@ -86,7 +91,7 @@ export async function awaitJobAttention(options: {
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? defaultSleep;
   const readJob = options.readJob ?? readJobStatusSnapshot;
-  const isAttention = options.isAttention ?? ((status) => ATTENTION.has(status));
+  const isAttention = options.isAttention ?? ((status) => ATTENTION_STATUSES.has(status));
   const startedAt = now();
   const deadline = startedAt + Math.max(0, options.budgetMs);
   let pollIndex = 0;

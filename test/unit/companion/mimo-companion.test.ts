@@ -116,6 +116,46 @@ describe("mimo companion helpers", () => {
     expect(decided.nextState.watches).toHaveLength(0);
   });
 
+  it("FIFO: first of two watches reaching attention gets follow-up; second remains", async () => {
+    const cwd = tempDir();
+    writeJob(cwd, {
+      id: "job-first",
+      status: "completed",
+      updatedAt: "2026-07-20T01:00:00.000Z"
+    });
+    writeJob(cwd, {
+      id: "job-second",
+      status: "running",
+      startedAt: "2026-07-20T00:00:00.000Z",
+      request: { timeoutMs: 1_800_000 },
+      updatedAt: "2026-07-20T01:00:00.000Z"
+    });
+    let state = upsertWatch(emptyState(), {
+      cwd,
+      jobId: "job-first",
+      kind: "plan",
+      createdAt: "2026-07-20T00:00:00.000Z"
+    });
+    state = upsertWatch(state, {
+      cwd,
+      jobId: "job-second",
+      kind: "implement",
+      createdAt: "2026-07-20T00:00:01.000Z"
+    });
+    expect(state.watches.map((w) => w.jobId)).toEqual(["job-first", "job-second"]);
+
+    const decided = await decideStopFollowup(state, {
+      now: new Date("2026-07-20T01:01:00.000Z")
+    });
+
+    expect(decided.followup).toContain("job-first");
+    expect(decided.followup).toContain("mimo_result");
+    expect(decided.followup).not.toContain("job-second");
+    expect(decided.nextState.watches).toHaveLength(1);
+    expect(decided.nextState.watches[0]).toMatchObject({ jobId: "job-second" });
+    expect(decided.nextState.acked[watchKey(cwd, "job-first")]?.status).toBe("completed");
+  });
+
   it("does not re-followup an already-acked attention status", async () => {
     const cwd = tempDir();
     writeJob(cwd, {

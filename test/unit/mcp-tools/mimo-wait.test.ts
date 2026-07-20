@@ -126,6 +126,24 @@ describe("mimo_wait", () => {
     expect(JSON.stringify(result)).not.toMatch(/heartbeat|wake/i);
   });
 
+  it("defaults minLevel to info so completed attention signals are visible", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "plan", task: "Plan", request: {} });
+    appendJobSignal(job.signalsFile, {
+      jobId: job.id,
+      kind: "completed",
+      level: "info",
+      status: "completed",
+      summary: "Done."
+    });
+
+    const result = await mimoWait({ cwd, jobId: job.id, timeoutMs: 10 });
+
+    expect(result.timedOut).toBe(false);
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]).toMatchObject({ kind: "completed", level: "info" });
+  });
+
   it("paginates attention signals without advancing past an omitted attention", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({ kind: "compose", task: "Run", request: {} });
