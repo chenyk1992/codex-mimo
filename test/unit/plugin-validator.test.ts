@@ -10,6 +10,13 @@ const EXPECTED_TOOLS = [
   "mimo_result", "mimo_cancel", "mimo_jobs"
 ] as const;
 
+const VALID_MIMOCODE_SKILL_BODY = [
+  "### Cursor with companion",
+  "The companion stop hook blocks until attention; on follow-up call mimo_result with the jobId.",
+  "### Cursor without companion",
+  "When companion hooks are not installed, return the receipt and stop; use control tools only if the user insists."
+].join("\n\n");
+
 interface FixtureTool {
   name: string;
   inputSchema: Record<string, unknown>;
@@ -129,7 +136,7 @@ function createPluginFixture(
 
   writeFileSync(
     path.join(root, "skills", "mimocode", "SKILL.md"),
-    `${skillFrontmatter}\n\n# MiMoCode\n\n${options.skillBody ?? "Use MiMoCode as a specialist coding agent."}\n`
+    `${skillFrontmatter}\n\n# MiMoCode\n\n${options.skillBody ?? VALID_MIMOCODE_SKILL_BODY}\n`
   );
   const tools: FixtureTool[] = (options.toolNames ?? EXPECTED_TOOLS).map((name) => ({
     name,
@@ -267,7 +274,7 @@ describe("lightweight plugin validator", () => {
 
   it("rejects skill guidance that tells Codex to loop on mimo_wait", () => {
     const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
-      skillBody: "Loop and call mimo_wait frequently until the work finishes."
+      skillBody: `${VALID_MIMOCODE_SKILL_BODY}\n\nLoop and call mimo_wait frequently until the work finishes.`
     });
 
     const result = runValidator(root);

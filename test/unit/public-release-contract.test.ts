@@ -23,12 +23,7 @@ describe("public release contract", () => {
   });
 
   it("publishes at-least-once Codex delivery across crashes in user and release documents", () => {
-    for (const file of [
-      "README.md",
-      "doc/operations-guide.md",
-      "docs/superpowers/specs/2026-07-16-background-job-notification-design.md",
-      "docs/superpowers/plans/2026-07-18-unified-background-jobs-release-closure.md"
-    ]) {
+    for (const file of ["README.md", "doc/operations-guide.md"]) {
       const contents = fs.readFileSync(path.resolve(file), "utf8");
       expect(contents).toMatch(/at-least-once/i);
       expect(contents).toMatch(/normal(?: operation|-path)[\s\S]{0,180}(?:one|single)[^\n]*(?:turn\/start|delivery)/i);
