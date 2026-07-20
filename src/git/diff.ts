@@ -161,7 +161,12 @@ export async function captureGitHead(
     gitCommandOptions(cwd, options, false)
   );
   if (oid.exitCode !== 0) {
-    throw new Error(`Git HEAD capture failed: ${oid.stderr || oid.stdout || `exit ${oid.exitCode}`}`);
+    const detail = oid.stderr || oid.stdout || `exit ${oid.exitCode}`;
+    // Fresh `git init` / IntelliJ empty projects: branch exists, but HEAD has no commit yet.
+    if (isUnbornHeadError(detail)) {
+      return { oid: "", short: "", subject: "" };
+    }
+    throw new Error(`Git HEAD capture failed: ${detail}`);
   }
   const summary = await execa(
     "git",
@@ -230,4 +235,10 @@ function parseHeadSummary(summary: string): { short: string; subject: string } {
     short: trimmed.slice(0, split),
     subject: trimmed.slice(split + 1)
   };
+}
+
+function isUnbornHeadError(detail: string): boolean {
+  return /Needed a single revision/i.test(detail)
+    || /does not have any commits yet/i.test(detail)
+    || /unknown revision or path not in the working tree/i.test(detail);
 }

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "hooks": {
+    "afterMCPExecution": [
+      {
+        "command": "node ./dist/companion/cli.js after-mcp",
+        "matcher": "mimo_plan|mimo_implement|mimo_review|mimo_fix_ci|mimo_resume|mimo_compose"
+      }
+    ],
+    "stop": [
+      {
+        "command": "node ./dist/companion/cli.js stop",
+        "loop_limit": 12,
+        "timeout": 30
+      }
+    ]
+  }
+}

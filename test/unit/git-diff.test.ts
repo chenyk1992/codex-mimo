@@ -163,6 +163,38 @@ describe("git diff helpers", () => {
     );
   });
 
+  it("returns an empty HEAD snapshot for an unborn branch with no commits", async () => {
+    mockedExeca.mockResolvedValue({
+      exitCode: 128,
+      stdout: "",
+      stderr: "fatal: Needed a single revision"
+    });
+
+    await expect(captureGitHead("E:/repo")).resolves.toEqual({
+      oid: "",
+      short: "",
+      subject: ""
+    });
+    expect(mockedExeca).toHaveBeenCalledTimes(1);
+    expect(mockedExeca).toHaveBeenCalledWith(
+      "git",
+      ["-c", "safe.directory=E:/repo", "rev-parse", "--verify", "HEAD"],
+      { cwd: "E:/repo", reject: false }
+    );
+  });
+
+  it("still throws when HEAD capture fails for a reason other than an unborn branch", async () => {
+    mockedExeca.mockResolvedValue({
+      exitCode: 128,
+      stdout: "",
+      stderr: "fatal: detected dubious ownership in repository"
+    });
+
+    await expect(captureGitHead("E:/repo")).rejects.toThrow(
+      "Git HEAD capture failed: fatal: detected dubious ownership in repository"
+    );
+  });
+
   it("captures commits and files between two git heads", async () => {
     mockedExeca
       .mockResolvedValueOnce({
