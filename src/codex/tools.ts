@@ -139,12 +139,11 @@ export async function mimoStatus(input: unknown, deps: MimoStatusDependencies = 
   const parsed = JobStatusInput.parse(input);
   const job = parsed.jobId ? readJob(parsed.cwd, parsed.jobId) : listJobs(parsed.cwd)[0];
   if (!job) throw new Error("No jobs recorded for this workspace.");
+  const processAlive = probeProcessAlive(job, deps);
   return renderJobStatus(job, {
     progress: readRecentJobLogLines(job.logFile, 5),
     notification: notificationStatus(job),
-    ...(probeProcessAlive(job, deps) !== undefined
-      ? { processAlive: probeProcessAlive(job, deps) }
-      : {})
+    ...(processAlive !== undefined ? { processAlive } : {})
   });
 }
 
