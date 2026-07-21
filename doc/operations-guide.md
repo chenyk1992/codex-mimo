@@ -28,6 +28,16 @@ Every `plan`, `implement`, `review`, `fix-ci`, `resume`, and `compose` request f
 
 The eight statuses are `queued`, `running`, `needs_input`, `blocked`, `completed`, `failed`, `cancelled`, and `timeout`. Only `queued` and `running` are active. `needs_input` and `blocked` are paused results with no PID and may retain `sessionId`.
 
+### Idle stop-loss
+
+Every work request may include optional `idleTimeoutMs` (default 30 minutes; `0` disables idle stop-loss). Absolute `timeoutMs` is unchanged; whichever budget fires first wins. The idle clock measures silence since the last stdout JSONL line; `lastEventAt` is set on run start so boot is not immediately idle.
+
+When silence exceeds the budget, the worker kills the MiMo process tree and finalizes as `timeout` with `errorCode: idle_timeout` (distinct from absolute run-budget timeout, which keeps `errorCode: timeout`). This emits an attention signal and enqueues outbox delivery like other terminal attention events.
+
+Long workflows such as `parallel` may need a raised `idleTimeoutMs` when subagents can run for extended periods without JSONL. Codex auto-callback requires a notification target — task-injected `CODEX_THREAD_ID` or explicit `notify: { type: "codex", ... }`. Without notify, the terminal state is on disk only.
+
+While a job is `running`, `mimo_status` exposes live stall fields: `lastEventAt`, computed `idleMs`, `lastTool`, `processAlive`, and effective `idleTimeoutMs`. Use an occasional `mimo_status` for explicit diagnosis only; do not poll or loop on control tools during normal operation.
+
 ## Codex Task Target
 
 Codex Desktop injects `CODEX_THREAD_ID` into the plugin process for the current task. It is resolved once when the job is created. It is not a machine configuration setting.
@@ -129,6 +139,9 @@ The internal callback endpoint is temporary and authenticated. Callback files co
 | Codex target is wrong | Remove any globally configured `CODEX_THREAD_ID`; let the current task inject it |
 | Need progress for diagnosis | Read `mimo_status` or `mimo_events`; use a single `mimo_wait` only when requested |
 | Job asks for information | Call `mimo_result`, collect the answer, then create a child with `mimo_resume` |
+| Job silent but `running` | Check `mimo_status` for `idleMs`, `lastEventAt`, and `processAlive`; raise `idleTimeoutMs` for long `parallel` runs if needed |
+| Job ended `timeout` / `idle_timeout` | Treat like other attention terminals: callback turn → `mimo_result`; re-run with a narrower task or larger idle budget if appropriate |
+| Terminal job but no Codex callback | Confirm notify target (`CODEX_THREAD_ID` or explicit `notify`); without it, state is on disk only — read `mimo_result` or `mimo_jobs` |
 
 ## Disable or Roll Back
 
