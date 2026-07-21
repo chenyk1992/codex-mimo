@@ -13,21 +13,36 @@ function elapsedMs(job: JobRecord, nowMs = Date.now()): number | null {
   return Math.max(0, nowMs - start);
 }
 
+function idleMsFor(job: JobRecord, nowMs: number): number | null {
+  if (job.status !== "running" || !job.lastEventAt) return null;
+  const last = Date.parse(job.lastEventAt);
+  if (!Number.isFinite(last)) return null;
+  return Math.max(0, nowMs - last);
+}
+
+export interface RenderJobStatusOptions {
+  nowMs?: number;
+  progress?: string[];
+  notification?: JobNotificationStatus;
+  processAlive?: boolean | "unknown";
+}
+
 export function renderJobStatus(
   job: JobRecord,
-  options: {
-    nowMs?: number;
-    progress?: string[];
-    notification?: JobNotificationStatus;
-  } = {}
+  options: RenderJobStatusOptions = {}
 ): JobStatusResult {
+  const nowMs = options.nowMs ?? Date.now();
+  const hasPid = typeof job.pid === "number" && job.pid > 0;
+  const processAlive = options.processAlive !== undefined
+    ? options.processAlive
+    : (job.status === "running" && hasPid ? ("unknown" as const) : undefined);
   return {
     jobId: job.id,
     kind: job.kind,
     parentJobId: job.parentJobId ?? null,
     status: job.status,
     ...(job.phase ? { phase: job.phase } : {}),
-    elapsedMs: elapsedMs(job, options.nowMs),
+    elapsedMs: elapsedMs(job, nowMs),
     sessionId: job.sessionId ?? null,
     summary: publicProgressSummary({
       type: "job",
@@ -45,6 +60,11 @@ export function renderJobStatus(
       ...(job.errorCode !== undefined ? { errorCode: job.errorCode } : {})
     })),
     ...(options.notification ? { notification: publicNotification(options.notification) } : {}),
+    lastEventAt: job.lastEventAt ?? null,
+    idleMs: idleMsFor(job, nowMs),
+    lastTool: job.lastTool ?? null,
+    ...(processAlive !== undefined ? { processAlive } : {}),
+    idleTimeoutMs: job.idleTimeoutMs ?? null,
     actions: statusActions(job.status)
   };
 }

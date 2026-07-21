@@ -130,6 +130,11 @@ export interface JobStatusResult {
   executionCallback?: ExecutionCallbackSummary;
   progress: string[];
   notification?: JobNotificationStatus;
+  lastEventAt?: string | null;
+  idleMs?: number | null;
+  lastTool?: string | null;
+  processAlive?: boolean | "unknown";
+  idleTimeoutMs?: number | null;
   actions: {
     events: "mimo_events";
     wait?: "mimo_wait";
