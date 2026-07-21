@@ -6,4 +6,5 @@ dist/
 .idea/
 .cursor/
 .worktrees/
+.superpowers/
 *.log
