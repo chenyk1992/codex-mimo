@@ -276,6 +276,107 @@ describe("streaming MiMo CLI runner", () => {
     expect(child.listenerCount("close")).toBe(0);
   });
 
+  it("terminates the process when idleTimeoutMs elapses without stdout lines", async () => {
+    let killedPid: number | null | undefined;
+    const result = await runMimoCliStreaming("E:/project/app", ["run"], {
+      idleTimeoutMs: 30,
+      idleCheckIntervalMs: 10,
+      spawnProcess: () => {
+        const child = new EventEmitter() as EventEmitter & {
+          stdout: Readable;
+          stderr: Readable;
+          pid: number;
+          kill: () => boolean;
+        };
+        child.pid = 4242;
+        // Never emits lines; stays open until terminated.
+        child.stdout = new Readable({ read() {} });
+        child.stderr = new Readable({ read() {} });
+        child.kill = () => true;
+        return child;
+      },
+      terminateProcessTree: (pid, child) => {
+        killedPid = pid;
+        queueMicrotask(() => child.emit("close", null));
+      }
+    });
+
+    expect(killedPid).toBe(4242);
+    expect(result.exitCode).toBe(124);
+    expect(result.terminationReason).toBe("idle_timeout");
+  });
+
+  it("does not idle-kill when idleTimeoutMs is 0", async () => {
+    let terminateCalled = false;
+    const childRef = {
+      emitClose: null as null | (() => void)
+    };
+    const runPromise = runMimoCliStreaming("E:/project/app", ["run"], {
+      idleTimeoutMs: 0,
+      timeoutMs: 80,
+      spawnProcess: () => {
+        const child = new EventEmitter() as EventEmitter & {
+          stdout: Readable;
+          stderr: Readable;
+          pid: number;
+          kill: () => boolean;
+        };
+        child.pid = 4243;
+        child.stdout = new Readable({ read() {} });
+        child.stderr = new Readable({ read() {} });
+        child.kill = () => true;
+        childRef.emitClose = () => child.emit("close", null);
+        return child;
+      },
+      terminateProcessTree: (_pid, child) => {
+        terminateCalled = true;
+        queueMicrotask(() => child.emit("close", null));
+      }
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(terminateCalled).toBe(false);
+    const result = await runPromise;
+    expect(result.terminationReason).toBe("process_timeout");
+  });
+
+  it("resets idle clock when stdout lines arrive", async () => {
+    let terminateReason: string | undefined;
+    const result = await runMimoCliStreaming("E:/project/app", ["run"], {
+      idleTimeoutMs: 80,
+      spawnProcess: () => {
+        const child = new EventEmitter() as EventEmitter & {
+          stdout: Readable;
+          stderr: Readable;
+          pid: number;
+          kill: () => boolean;
+        };
+        child.pid = 4244;
+        const stdout = new Readable({ read() {} });
+        child.stdout = stdout;
+        child.stderr = new Readable({ read() {} });
+        child.kill = () => true;
+        queueMicrotask(() => {
+          stdout.push('{"type":"text","sessionID":"ses_x"}\n');
+          setTimeout(() => {
+            stdout.push('{"type":"text","sessionID":"ses_x"}\n');
+            setTimeout(() => {
+              stdout.push(null);
+              child.emit("close", 0);
+            }, 40);
+          }, 40);
+        });
+        return child;
+      },
+      terminateProcessTree: (_pid, child) => {
+        terminateReason = "idle";
+        child.emit("close", null);
+      }
+    });
+    expect(terminateReason).toBeUndefined();
+    expect(result.terminationReason).toBeUndefined();
+    expect(result.exitCode).toBe(0);
+  });
+
   it("terminates the process tree on timeout", async () => {
     let killedPid: number | null | undefined;
     const result = await runMimoCliStreaming("E:/project/app", ["run"], {
