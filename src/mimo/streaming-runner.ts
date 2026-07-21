@@ -309,6 +309,8 @@ export async function runMimoCliStreaming(
     if (termination) return termination;
     if (processClosed) return Promise.resolve();
     terminationReason = reason;
+    // Forced terminations (idle, process timeout, host abort) must end stdout/stderr
+    // so stdoutDone/stderrDone waiters can finish even when pipes never close on their own.
     stdoutReader?.close();
     try {
       child.stdout?.push(null);

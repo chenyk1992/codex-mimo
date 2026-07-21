@@ -343,6 +343,7 @@ describe("streaming MiMo CLI runner", () => {
     let terminateReason: string | undefined;
     const result = await runMimoCliStreaming("E:/project/app", ["run"], {
       idleTimeoutMs: 80,
+      idleCheckIntervalMs: 10,
       spawnProcess: () => {
         const child = new EventEmitter() as EventEmitter & {
           stdout: Readable;
@@ -401,6 +402,35 @@ describe("streaming MiMo CLI runner", () => {
     });
 
     expect(killedPid).toBe(789);
+    expect(result.exitCode).toBe(124);
+    expect(result.terminationReason).toBe("process_timeout");
+  });
+
+  it("completes process_timeout when stdout and stderr never end on their own", async () => {
+    let killedPid: number | null | undefined;
+    const result = await runMimoCliStreaming("E:/project/app", ["run"], {
+      timeoutMs: 30,
+      spawnProcess: () => {
+        const child = new EventEmitter() as EventEmitter & {
+          stdout: Readable;
+          stderr: Readable;
+          pid: number;
+          kill: () => boolean;
+        };
+        child.pid = 4245;
+        // Never emits lines or end; stays open until forced termination drains streams.
+        child.stdout = new Readable({ read() {} });
+        child.stderr = new Readable({ read() {} });
+        child.kill = () => true;
+        return child;
+      },
+      terminateProcessTree: (pid, child) => {
+        killedPid = pid;
+        queueMicrotask(() => child.emit("close", null));
+      }
+    });
+
+    expect(killedPid).toBe(4245);
     expect(result.exitCode).toBe(124);
     expect(result.terminationReason).toBe("process_timeout");
   });
