@@ -12,6 +12,16 @@ describe("publicProgressSummary", () => {
     ).toBe("MiMoCode job stayed queued too long.");
   });
 
+  it("emits a fixed safe summary for known operator errorCode idle_timeout", () => {
+    expect(
+      publicProgressSummary({
+        type: "job",
+        status: "timeout",
+        errorCode: "idle_timeout"
+      })
+    ).toBe("MiMoCode job idle-timed out.");
+  });
+
   it("falls back to the generic failed summary for unknown errorCodes", () => {
     expect(
       publicProgressSummary({

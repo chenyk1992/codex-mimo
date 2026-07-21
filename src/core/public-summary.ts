@@ -3,7 +3,8 @@ import type { JobPhase, JobStatus } from "./jobs.js";
 export const MAX_PUBLIC_SUMMARY_LENGTH = 160;
 
 const KNOWN_OPERATOR_ERROR_SUMMARIES: Readonly<Record<string, string>> = {
-  stale_queued: "MiMoCode job stayed queued too long."
+  stale_queued: "MiMoCode job stayed queued too long.",
+  idle_timeout: "MiMoCode job idle-timed out."
 };
 
 export type PublicSummaryContext =
@@ -63,6 +64,9 @@ function summaryFor(context: PublicSummaryContext): string {
     if (context.kind === "failed") {
       return knownOperatorErrorSummary(context.errorCode) ?? statusSummary("failed");
     }
+    if (context.kind === "timeout") {
+      return knownOperatorErrorSummary(context.errorCode) ?? statusSummary("timeout");
+    }
     return statusSummary(context.kind);
   }
 
@@ -70,6 +74,9 @@ function summaryFor(context: PublicSummaryContext): string {
     if (context.status === "running") return runningSummary(context.phase);
     if (context.status === "failed") {
       return knownOperatorErrorSummary(context.errorCode) ?? statusSummary("failed");
+    }
+    if (context.status === "timeout") {
+      return knownOperatorErrorSummary(context.errorCode) ?? statusSummary("timeout");
     }
     return statusSummary(context.status);
   }
