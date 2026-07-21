@@ -131,6 +131,23 @@ export async function updateRunningJobProcess(
   });
 }
 
+export async function updateRunningJobObservation(
+  cwd: string,
+  jobId: string,
+  patch: {
+    lastEventAt?: string;
+    lastTool?: string;
+    sessionId?: string | null;
+    idleTimeoutMs?: number;
+  }
+): Promise<JobRecord> {
+  return withProcessLock(resolveJobStateLock(cwd, jobId), async () => {
+    const job = requireJob(cwd, jobId);
+    if (job.status !== "running") return job;
+    return updateJobAuthoritative(cwd, jobId, patch);
+  });
+}
+
 export async function requestJobCancellation(
   cwd: string,
   jobId: string

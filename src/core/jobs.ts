@@ -111,6 +111,9 @@ export interface JobRecord {
   notificationOutboxFile: string;
   error?: string;
   errorCode?: string;
+  lastEventAt?: string;
+  lastTool?: string;
+  idleTimeoutMs?: number;
 }
 
 export interface JobStatusResult {
