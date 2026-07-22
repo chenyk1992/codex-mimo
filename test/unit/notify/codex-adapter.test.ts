@@ -6,6 +6,7 @@ import {
   type CodexAppServerClient,
   type ThreadResumeResult
 } from "../../../src/notify/codex-app-server.js";
+import type { PreparedCodexConnection } from "../../../src/notify/codex-connection.js";
 import {
   buildCodexNotificationPrompt,
   classifyCodexError,
@@ -70,6 +71,17 @@ function fakeClient(result: ThreadResumeResult = { exists: true, busy: false }):
   };
 }
 
+function preparedConnection(
+  client: CodexAppServerClient,
+  thread: ThreadResumeResult = { exists: true, busy: false }
+): PreparedCodexConnection {
+  return {
+    probe: { ok: true, source: "path" },
+    client,
+    thread
+  };
+}
+
 describe("Codex notification adapter", () => {
   it("includes the frozen cwd required to fetch the notified job result", () => {
     const prompt = buildCodexNotificationPrompt(delivery, job, signal);
@@ -95,37 +107,44 @@ describe("Codex notification adapter", () => {
     expect(prompt.length).toBeGreaterThan(240);
   });
 
-  it("resumes an idle thread and starts exactly one new turn", async () => {
+  it("starts exactly one new turn for an already prepared idle thread", async () => {
     const calls: string[] = [];
     const client: CodexAppServerClient = {
-      initialize: async () => { calls.push("initialize"); },
-      resumeThread: async (threadId) => {
-        calls.push(`resume:${threadId}`);
-        return { exists: true, busy: false };
-      },
+      initialize: async () => { throw new Error("adapter must not initialize"); },
+      resumeThread: async () => { throw new Error("adapter must not resume"); },
       startTurn: async (threadId, prompt) => { calls.push(`turn:${threadId}:${prompt}`); },
       close: async () => { calls.push("close"); }
     };
 
-    await expect(deliverCodexNotification(delivery, job, signal, client)).resolves.toEqual({
+    await expect(deliverCodexNotification(
+      delivery,
+      job,
+      signal,
+      preparedConnection(client)
+    )).resolves.toEqual({
       outcome: "delivered"
     });
     expect(calls).toEqual([
-      "initialize",
-      "resume:thread-1",
       'turn:thread-1:MiMoCode notification event "implement-1:3:codex" emitted completed and may be a retry. Call mimo_result with cwd "C:\\\\workspace" and jobId "implement-1"; continue handling the original request.',
       "close"
     ]);
   });
 
-  it("returns retry while the original turn is active", async () => {
+  it("retries an already prepared busy thread without starting a turn", async () => {
     const client = fakeClient({ exists: true, busy: true });
 
-    expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({
+    expect(await deliverCodexNotification(
+      delivery,
+      job,
+      signal,
+      preparedConnection(client, { exists: true, busy: true })
+    )).toEqual({
       outcome: "retry",
       error: "Codex thread is busy",
       errorCode: "codex_thread_busy"
     });
+    expect(client.initialize).not.toHaveBeenCalled();
+    expect(client.resumeThread).not.toHaveBeenCalled();
     expect(client.startTurn).not.toHaveBeenCalled();
     expect(client.close).toHaveBeenCalledOnce();
   });
@@ -133,28 +152,35 @@ describe("Codex notification adapter", () => {
   it("returns permanent when the original thread is missing", async () => {
     const client = fakeClient({ exists: false, busy: false });
 
-    expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({
+    expect(await deliverCodexNotification(
+      delivery,
+      job,
+      signal,
+      preparedConnection(client, { exists: false, busy: false })
+    )).toEqual({
       outcome: "permanent",
       error: "Codex thread does not exist",
       errorCode: "codex_thread_missing"
     });
     expect(client.startTurn).not.toHaveBeenCalled();
+    expect(client.close).toHaveBeenCalledOnce();
   });
 
-  it("returns permanent when the original thread is forbidden", async () => {
+  it("returns the preparation failure when the original thread is forbidden", async () => {
     const client = fakeClient();
-    client.resumeThread.mockRejectedValueOnce(
-      new CodexAppServerError("codex_thread_forbidden", "Codex thread is forbidden")
-    );
 
-    expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({
+    expect(await deliverCodexNotification(delivery, job, signal, {
+      probe: { ok: false, source: "path", errorCode: "codex_thread_forbidden" },
+      client
+    })).toEqual({
       outcome: "permanent",
       error: "Codex thread is forbidden",
       errorCode: "codex_thread_forbidden"
     });
+    expect(client.close).toHaveBeenCalledOnce();
   });
 
-  it.each(["initialize", "resumeThread", "startTurn"] as const)(
+  it.each(["startTurn"] as const)(
     "retries a transport failure from %s",
     async (method) => {
       const client = fakeClient();
@@ -162,7 +188,12 @@ describe("Codex notification adapter", () => {
         new CodexAppServerError("codex_app_server_unavailable", "private transport detail")
       );
 
-      expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({
+      expect(await deliverCodexNotification(
+        delivery,
+        job,
+        signal,
+        preparedConnection(client)
+      )).toEqual({
         outcome: "retry",
         error: "Codex App Server request failed",
         errorCode: "codex_app_server_unavailable"
@@ -178,7 +209,12 @@ describe("Codex notification adapter", () => {
     );
     client.close.mockRejectedValueOnce(new Error("close private detail"));
 
-    expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({
+    expect(await deliverCodexNotification(
+      delivery,
+      job,
+      signal,
+      { probe: { ok: false, source: "path", errorCode: "codex_thread_forbidden" }, client }
+    )).toEqual({
       outcome: "permanent",
       error: "Codex thread is forbidden",
       errorCode: "codex_thread_forbidden"
@@ -189,7 +225,12 @@ describe("Codex notification adapter", () => {
     const client = fakeClient();
     client.close.mockRejectedValueOnce(new Error("close private detail"));
 
-    expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({
+    expect(await deliverCodexNotification(
+      delivery,
+      job,
+      signal,
+      preparedConnection(client)
+    )).toEqual({
       outcome: "delivered"
     });
     expect(client.startTurn).toHaveBeenCalledOnce();
@@ -202,7 +243,12 @@ describe("Codex notification adapter", () => {
     );
     client.close.mockRejectedValueOnce(new Error("close private detail"));
 
-    expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({
+    expect(await deliverCodexNotification(
+      delivery,
+      job,
+      signal,
+      preparedConnection(client)
+    )).toEqual({
       outcome: "retry",
       error: "Codex App Server request failed",
       errorCode: "codex_app_server_unavailable"
@@ -296,7 +342,7 @@ describe("Codex notification adapter", () => {
       },
       job,
       signal,
-      client
+      preparedConnection(client)
     )).toEqual({ outcome: "permanent", error: "Notification target is not Codex" });
     expect(client.initialize).not.toHaveBeenCalled();
     expect(client.close).not.toHaveBeenCalled();

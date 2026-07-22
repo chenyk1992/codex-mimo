@@ -30,6 +30,7 @@ import {
   type CodexAppServerClientOptions
 } from "../../src/notify/codex-app-server.js";
 import { CODEX_COMMAND_ENV } from "../../src/notify/codex-command.js";
+import { prepareCodexConnection } from "../../src/notify/codex-connection.js";
 import { mimoImplement, mimoResult } from "../../src/codex/tools.js";
 
 const workspaces: string[] = [];
@@ -84,6 +85,18 @@ function seed(cwd: string, kind: JobKind, target?: JobRecord["notificationTarget
     task: "integration task",
     request,
     notificationTarget: target
+  });
+}
+
+function prepareFakeCodexConnection(
+  createClient: (options?: CodexAppServerClientOptions) => ReturnType<typeof createCodexAppServerClient>,
+  command = process.execPath
+) {
+  return (options: Parameters<typeof prepareCodexConnection>[0]) => prepareCodexConnection({
+    ...options,
+    candidates: [{ command, source: "path" }],
+    execute: async () => ({ exitCode: 0, stdout: "fake-codex 1.0.0" }),
+    createClient
   });
 }
 
@@ -296,7 +309,7 @@ describe("unified background jobs", () => {
         stdio: ["pipe", "pipe", "pipe"]
       })) as ChildProcessWithoutNullStreams
     });
-    await dispatchNextDelivery(cwd, { createCodexClient: createClient });
+    await dispatchNextDelivery(cwd, { prepareCodex: prepareFakeCodexConnection(createClient) });
     const start = readJsonLines(marker).find((call) => call.method === "turn/start")!;
     const params = start.params as { threadId: string; input: Array<{ text: string }> };
     expect(params.threadId).toBe("thread-plan-output");
@@ -577,8 +590,9 @@ describe("unified background jobs", () => {
       })) as ChildProcessWithoutNullStreams
     });
 
-    const delivered = await dispatchNextDelivery(cwd, { createCodexClient: createClient });
-    const duplicate = await dispatchNextDelivery(cwd, { createCodexClient: createClient });
+    const prepareCodex = prepareFakeCodexConnection(createClient);
+    const delivered = await dispatchNextDelivery(cwd, { prepareCodex });
+    const duplicate = await dispatchNextDelivery(cwd, { prepareCodex });
     expect(delivered).toMatchObject({ outcome: "settled", delivery: { status: "delivered" } });
     expect(duplicate).toEqual({ outcome: "idle" });
     const calls = readJsonLines(marker);
@@ -640,7 +654,7 @@ describe("unified background jobs", () => {
       });
 
     const delivered = await dispatchNextDelivery(cwd, {
-      createCodexClient: createClient,
+      prepareCodex: prepareFakeCodexConnection(createClient, configuredCommand),
       env: dispatchEnv
     });
 
@@ -669,8 +683,9 @@ describe("unified background jobs", () => {
       }
     });
 
-    const settled = await dispatchNextDelivery(cwd, { createCodexClient: createClient });
-    const retry = await dispatchNextDelivery(cwd, { createCodexClient: createClient });
+    const prepareCodex = prepareFakeCodexConnection(createClient);
+    const settled = await dispatchNextDelivery(cwd, { prepareCodex });
+    const retry = await dispatchNextDelivery(cwd, { prepareCodex });
 
     expect(completed.status).toBe("completed");
     expect(settled).toMatchObject({ outcome: "settled", delivery: { status: "failed", attempts: 1 } });

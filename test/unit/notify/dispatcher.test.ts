@@ -9,7 +9,6 @@ import {
   retryDelayMs,
   summarizeJobNotification
 } from "../../../src/notify/dispatcher.js";
-import { CodexAppServerError } from "../../../src/notify/codex-app-server.js";
 import {
   claimDueDelivery,
   enqueueDelivery,
@@ -545,27 +544,44 @@ describe("notification dispatcher", () => {
     expect(timers.timers.every((timer) => !timer.active)).toBe(true);
   });
 
-  it("routes only by the frozen target type and creates and closes a Codex client per attempt", async () => {
+  it("re-prepares each Codex delivery with the worker environment without persisting its executable", async () => {
     const cwd = makeCwd();
-    await makeDelivery(cwd, { type: "codex", threadId: "thread-1" });
-    await makeDelivery(cwd, { type: "codex", threadId: "thread-2" });
+    const { job } = await makeDelivery(cwd, { type: "codex", threadId: "thread-1" });
     const close = vi.fn(async () => undefined);
-    const createCodexClient = vi.fn(() => ({
-      initialize: vi.fn(async () => undefined),
-      resumeThread: vi.fn(async () => ({ exists: true, busy: false })),
-      startTurn: vi.fn(async () => undefined),
-      close
+    const startTurn = vi.fn(async () => undefined);
+    const prepareCodex = vi.fn(async () => ({
+      probe: { ok: true as const, source: "configured" as const },
+      client: {
+        initialize: vi.fn(async () => { throw new Error("adapter must not initialize"); }),
+        resumeThread: vi.fn(async () => { throw new Error("adapter must not resume"); }),
+        startTurn,
+        close
+      },
+      thread: { exists: true, busy: false }
     }));
     const deliverWebhook = vi.fn();
+    const env = {
+      CODEX_MIMO_CODEX_BIN: "C:\\Program Files\\Codex\\codex.exe",
+      PATH: "C:\\Program Files\\Codex"
+    };
 
-    await dispatchNextDelivery(cwd, { now: () => new Date(createdAt), createCodexClient, deliverWebhook });
-    await dispatchNextDelivery(cwd, { now: () => new Date(createdAt), createCodexClient, deliverWebhook });
+    await dispatchNextDelivery(cwd, { now: () => new Date(createdAt), prepareCodex, deliverWebhook, env });
 
-    expect(createCodexClient).toHaveBeenCalledTimes(2);
-    expect(createCodexClient).toHaveBeenNthCalledWith(1, { requestTimeoutMs: 10_000 });
-    expect(createCodexClient).toHaveBeenNthCalledWith(2, { requestTimeoutMs: 10_000 });
-    expect(close).toHaveBeenCalledTimes(2);
+    expect(prepareCodex).toHaveBeenCalledWith(expect.objectContaining({
+      threadId: "thread-1",
+      env,
+      signal: expect.any(AbortSignal)
+    }));
+    expect(startTurn).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
     expect(deliverWebhook).not.toHaveBeenCalled();
+    expect(readDeliveries(job.notificationOutboxFile)[0].target).toEqual({
+      type: "codex",
+      threadId: "thread-1"
+    });
+    expect(fs.readFileSync(job.notificationOutboxFile, "utf8")).not.toContain(
+      "C:\\Program Files\\Codex\\codex.exe"
+    );
   });
 
   it("fails safely when the signal does not match the delivery cursor", async () => {
@@ -624,22 +640,23 @@ describe("notification dispatcher", () => {
     });
   });
 
-  it("fails permanently after one attempt when Codex client construction throws", async () => {
+  it("fails permanently after one attempt when delivery-time Codex preparation rejects the target", async () => {
     const cwd = makeCwd();
     const { job } = await makeDelivery(cwd);
-    const createCodexClient = vi.fn(() => {
-      throw new CodexAppServerError(
-        "codex_cli_not_executable",
-        "Codex App Server executable is unavailable"
-      );
-    });
+    const prepareCodex = vi.fn(async () => ({
+      probe: {
+        ok: false as const,
+        source: "configured" as const,
+        errorCode: "codex_cli_not_executable" as const
+      }
+    }));
 
     await dispatchNextDelivery(cwd, {
       now: () => new Date(createdAt),
-      createCodexClient
+      prepareCodex
     });
 
-    expect(createCodexClient).toHaveBeenCalledOnce();
+    expect(prepareCodex).toHaveBeenCalledOnce();
     expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
       status: "failed",
       attempts: 1,

@@ -1,9 +1,9 @@
 import type { JobSignal } from "../core/job-signals.js";
 import type { JobRecord } from "../core/jobs.js";
 import {
-  CodexAppServerError,
-  type CodexAppServerClient
+  CodexAppServerError
 } from "./codex-app-server.js";
+import type { PreparedCodexConnection } from "./codex-connection.js";
 import type {
   DeliveryAttemptResult,
   NotificationDelivery,
@@ -40,47 +40,57 @@ export async function deliverCodexNotification(
   delivery: NotificationDelivery,
   job: JobRecord,
   signal: JobSignal,
-  client: CodexAppServerClient,
+  prepared: PreparedCodexConnection,
   attemptSignal?: AbortSignal
 ): Promise<DeliveryAttemptResult> {
   if (delivery.target.type !== "codex") {
     return { outcome: "permanent", error: "Notification target is not Codex" };
   }
 
-  let result: DeliveryAttemptResult;
+  const client = prepared.client;
   try {
-    await client.initialize(attemptSignal);
-    const thread = await client.resumeThread(delivery.target.threadId, attemptSignal);
-    if (!thread.exists) {
-      result = {
+    if (!prepared.probe.ok) return classifyPreparedConnection(prepared.probe.errorCode);
+    if (!client || !prepared.thread) {
+      return classifyPreparedConnection("codex_app_server_unavailable");
+    }
+    if (!prepared.thread.exists) {
+      return {
         outcome: "permanent",
         error: "Codex thread does not exist",
         errorCode: "codex_thread_missing"
       };
-    } else if (thread.busy) {
-      result = {
+    }
+    if (prepared.thread.busy) {
+      return {
         outcome: "retry",
         error: "Codex thread is busy",
         errorCode: "codex_thread_busy"
       };
-    } else {
-      await client.startTurn(
-        delivery.target.threadId,
-        buildCodexNotificationPrompt(delivery, job, signal),
-        attemptSignal
-      );
-      result = { outcome: "delivered" };
     }
+    await client.startTurn(
+      delivery.target.threadId,
+      buildCodexNotificationPrompt(delivery, job, signal),
+      attemptSignal
+    );
+    return { outcome: "delivered" };
   } catch (error) {
-    result = classifyCodexError(error);
+    return classifyCodexError(error);
+  } finally {
+    try {
+      await client?.close();
+    } catch {
+      // Cleanup is best effort after the delivery outcome has been determined.
+    }
   }
+}
 
-  try {
-    await client.close();
-  } catch {
-    // Cleanup is best effort after the delivery outcome has been determined.
-  }
-  return result;
+function classifyPreparedConnection(
+  errorCode: NotificationErrorCode | undefined
+): DeliveryAttemptResult {
+  return classifyCodexError(new CodexAppServerError(
+    errorCode ?? "codex_app_server_unavailable",
+    "Codex App Server connection is unavailable"
+  ));
 }
 
 export function classifyCodexError(error: unknown): DeliveryAttemptResult {

@@ -3,11 +3,9 @@ import { readJob, resolveJobDir } from "../core/job-store.js";
 import { isAttentionSignal, readJobSignals, type JobSignal } from "../core/job-signals.js";
 import type { JobRecord } from "../core/jobs.js";
 import {
-  createCodexAppServerClient,
-  type CodexAppServerClient,
-  type CodexAppServerClientOptions
-} from "./codex-app-server.js";
-import { classifyCodexError, deliverCodexNotification } from "./codex-adapter.js";
+  prepareCodexConnection
+} from "./codex-connection.js";
+import { deliverCodexNotification } from "./codex-adapter.js";
 import {
   claimDueDelivery,
   completeDelivery,
@@ -39,7 +37,7 @@ export interface DispatcherDependencies {
   ) => Promise<DeliveryAttemptResult>;
   deliverWebhook?: typeof deliverWebhook;
   deliverCodex?: typeof deliverCodexNotification;
-  createCodexClient?: (options?: CodexAppServerClientOptions) => CodexAppServerClient;
+  prepareCodex?: typeof prepareCodexConnection;
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch;
   renewDeliveryLease?: typeof renewDeliveryLease;
@@ -192,19 +190,25 @@ async function deliverByTarget(
     );
   }
 
-  let client: CodexAppServerClient;
+  let prepared: Awaited<ReturnType<typeof prepareCodexConnection>>;
   try {
-    client = (dependencies.createCodexClient ?? createCodexAppServerClient)({
-      requestTimeoutMs: timeoutMs
+    prepared = await (dependencies.prepareCodex ?? prepareCodexConnection)({
+      threadId: delivery.target.threadId,
+      env: dependencies.env,
+      signal: attemptSignal
     });
   } catch (error) {
-    return classifyCodexError(error);
+    return {
+      outcome: "retry",
+      error: "Codex App Server request failed",
+      errorCode: "codex_app_server_unavailable"
+    };
   }
   return (dependencies.deliverCodex ?? deliverCodexNotification)(
     delivery,
     job,
     jobSignal,
-    client,
+    prepared,
     attemptSignal
   );
 }
