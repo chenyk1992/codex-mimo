@@ -54,6 +54,44 @@ function isPathCommand(command: string): boolean {
 }
 
 /**
+ * Resolve a bare command name to an absolute path via PATH (and Windows PATHEXT).
+ * Path-like commands are normalized and returned as-is. Used only for spawning;
+ * never surface the resolved path in probes, logs, or errors.
+ */
+function resolveCommandPath(
+  command: string,
+  env: NodeJS.ProcessEnv
+): string | undefined {
+  if (isPathCommand(command)) {
+    return path.normalize(command);
+  }
+
+  const pathEnv = env.PATH ?? env.Path;
+  if (!pathEnv) return undefined;
+
+  const dirs = pathEnv.split(path.delimiter).filter((dir) => dir.length > 0);
+  const names = [command];
+  if (process.platform === "win32") {
+    const pathext = env.PATHEXT ?? process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM";
+    for (const ext of pathext.split(";")) {
+      if (!ext) continue;
+      const normalizedExt = (ext.startsWith(".") ? ext : `.${ext}`).toLowerCase();
+      names.push(command + normalizedExt);
+    }
+  }
+
+  for (const dir of dirs) {
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
  * Windows Execa (via cross-spawn -> cmd.exe) often reports missing executables as
  * exitCode 1 with no OS `code`/`cause`. When the configured command is an explicit
  * filesystem path that does not exist, treat that as ENOENT for classification only.
@@ -115,10 +153,21 @@ export async function probeCodexCommand(
 ): Promise<CodexCommandProbe> {
   const env = options.env ?? process.env;
   const selection = resolveCodexCommand(env);
+  const resolved = resolveCommandPath(selection.command, env);
+
+  if (resolved === undefined && !isPathCommand(selection.command)) {
+    return {
+      ok: false,
+      source: selection.source,
+      errorCode: "codex_cli_not_found"
+    };
+  }
+
+  const commandToRun = resolved ?? selection.command;
   const execute = options.execute ?? ((command, args, executeOptions) =>
     execa(command, args, executeOptions));
   try {
-    const result = await execute(selection.command, ["--version"], {
+    const result = await execute(commandToRun, ["--version"], {
       env: withUtf8ProcessEnv(env),
       reject: false,
       timeout: 10_000
