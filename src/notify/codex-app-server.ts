@@ -14,10 +14,22 @@ export interface ThreadResumeResult {
   busy: boolean;
 }
 
+export type CodexTurnTerminalStatus = "completed" | "interrupted" | "failed";
+
+export interface CodexTurnCompletion {
+  turnId: string;
+  status: CodexTurnTerminalStatus;
+}
+
 export interface CodexAppServerClient {
   initialize(signal?: AbortSignal): Promise<void>;
   resumeThread(threadId: string, signal?: AbortSignal): Promise<ThreadResumeResult>;
   startTurn(threadId: string, prompt: string, signal?: AbortSignal): Promise<void>;
+  startTurnAndWait(
+    threadId: string,
+    prompt: string,
+    signal?: AbortSignal
+  ): Promise<CodexTurnCompletion>;
   close(): Promise<void>;
 }
 
@@ -91,6 +103,12 @@ export function createCodexAppServerClient(
 class StdioCodexAppServerClient implements CodexAppServerClient {
   private nextId = 1;
   private readonly pending = new Map<number, PendingRequest>();
+  private readonly terminalTurns = new Map<string, CodexTurnCompletion & { threadId: string }>();
+  private readonly turnWaiters = new Map<string, {
+    threadId: string;
+    resolve: (completion: CodexTurnCompletion) => void;
+    reject: (error: CodexAppServerError) => void;
+  }>();
   private initialized = false;
   private initializePromise?: Promise<void>;
   private closePromise?: Promise<void>;
@@ -167,6 +185,23 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     }, signal);
   }
 
+  async startTurnAndWait(
+    threadId: string,
+    prompt: string,
+    signal?: AbortSignal
+  ): Promise<CodexTurnCompletion> {
+    this.requireInitialized();
+    const result = await this.request("turn/start", {
+      threadId,
+      input: [{ type: "text", text: prompt }]
+    }, signal);
+    const started = readTurnStart(result);
+    if (isTerminalTurnStatus(started.status)) {
+      return { turnId: started.turnId, status: started.status };
+    }
+    return this.waitForTurnCompletion(threadId, started.turnId, signal);
+  }
+
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     let resolveClose!: () => void;
@@ -206,6 +241,21 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
         "Codex App Server is not initialized"
       );
     }
+  }
+
+  private waitForTurnCompletion(
+    threadId: string,
+    turnId: string,
+    _signal?: AbortSignal
+  ): Promise<CodexTurnCompletion> {
+    const buffered = this.terminalTurns.get(turnId);
+    if (buffered?.threadId === threadId) {
+      this.terminalTurns.delete(turnId);
+      return Promise.resolve({ turnId, status: buffered.status });
+    }
+    return new Promise((resolve, reject) => {
+      this.turnWaiters.set(turnId, { threadId, resolve, reject });
+    });
   }
 
   private request(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
@@ -468,7 +518,33 @@ function safeCodexErrorMessage(code: NotificationErrorCode): string {
       return "Codex thread is busy";
     case "codex_app_server_unavailable":
       return "Codex App Server request failed";
+    case "codex_turn_interrupted":
+      return "Codex callback turn was interrupted";
+    case "codex_turn_failed":
+      return "Codex callback turn failed";
+    case "codex_turn_timeout":
+      return "Codex callback turn timed out";
   }
+}
+
+function readTurnStart(
+  value: unknown
+): { turnId: string; status: "inProgress" | CodexTurnTerminalStatus } {
+  if (!isTurnStartResult(value)) {
+    throw new CodexAppServerError(
+      "codex_app_server_incompatible",
+      "Invalid Codex turn response"
+    );
+  }
+  const turn = (value as { turn: { id: string; status: string } }).turn;
+  return {
+    turnId: turn.id,
+    status: turn.status as "inProgress" | CodexTurnTerminalStatus
+  };
+}
+
+function isTerminalTurnStatus(value: string): value is CodexTurnTerminalStatus {
+  return value === "completed" || value === "interrupted" || value === "failed";
 }
 
 function isMissingThreadError(error: RpcError): boolean {

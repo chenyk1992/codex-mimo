@@ -15,7 +15,10 @@ export const NOTIFICATION_ERROR_CODES = [
   "codex_app_server_incompatible",
   "codex_thread_busy",
   "codex_thread_missing",
-  "codex_thread_forbidden"
+  "codex_thread_forbidden",
+  "codex_turn_interrupted",
+  "codex_turn_failed",
+  "codex_turn_timeout"
 ] as const;
 
 export type NotificationErrorCode = typeof NOTIFICATION_ERROR_CODES[number];

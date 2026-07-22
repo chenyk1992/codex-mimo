@@ -43,6 +43,10 @@ function preflightRecovery(errorCode: NotificationErrorCode): string {
       return "The selected Codex task is not accessible from this Codex session. Open the target task in Codex Desktop and retry with a task you can access.";
     case "codex_thread_busy":
       return "The selected Codex task is currently busy. Wait for its current turn to finish, then retry.";
+    case "codex_turn_interrupted":
+    case "codex_turn_failed":
+    case "codex_turn_timeout":
+      return "Codex callback delivery failed. Allow durable retry.";
   }
 }
 

@@ -128,6 +128,12 @@ function publicCodexNotificationError(code: NotificationErrorCode): string {
       return "Codex thread is busy";
     case "codex_app_server_unavailable":
       return "Codex App Server request failed";
+    case "codex_turn_interrupted":
+      return "Codex callback turn was interrupted";
+    case "codex_turn_failed":
+      return "Codex callback turn failed";
+    case "codex_turn_timeout":
+      return "Codex callback turn timed out";
   }
 }
 

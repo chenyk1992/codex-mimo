@@ -96,8 +96,11 @@ function threadResumeResult(
   };
 }
 
-function turnStartResult(id = "turn-1"): Record<string, unknown> {
-  return { turn: { id, status: "inProgress", items: [] } };
+function turnStartResult(
+  id = "turn-1",
+  status: "inProgress" | "completed" | "interrupted" | "failed" = "inProgress"
+): Record<string, unknown> {
+  return { turn: { id, status, items: [] } };
 }
 
 function messagesFrom(process: FakeAppServerProcess): unknown[] {
@@ -508,6 +511,20 @@ describe("Codex App Server client", () => {
     respond(process, { id, result: { turn: { id: "turn-1" } } });
 
     await expect(start).rejects.toMatchObject({ code: "codex_app_server_incompatible" });
+    await client.close();
+  });
+
+  it("returns an already terminal turn without waiting for a notification", async () => {
+    const client = await initializeClient(process);
+    const completed = client.startTurnAndWait("thread-1", "continue");
+    const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
+
+    respond(process, { id, result: turnStartResult("turn-terminal", "completed") });
+
+    await expect(completed).resolves.toEqual({
+      turnId: "turn-terminal",
+      status: "completed"
+    });
     await client.close();
   });
 
