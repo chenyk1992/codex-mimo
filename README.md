@@ -77,7 +77,7 @@ Every work tool returns:
 }
 ```
 
-The default Codex flow does not call `mimo_status`, `mimo_events`, or `mimo_wait` after launch. Codex returns the receipt; the notify worker waits on App Server `turn/completed` without model polling and starts one callback turn when the job emits `needs_input`, `blocked`, or a terminal result. That callback turn calls `mimo_result` once and reads `mimo_result.output`. Outbox `delivered` means the matching callback turn completed, not merely that App Server accepted `turn/start`.
+The default Codex flow does not call `mimo_status`, `mimo_events`, or `mimo_wait` after launch. Codex returns the receipt; the notify worker waits on App Server `turn/completed` without model polling and starts one callback turn when the job emits `needs_input`, `blocked`, or a terminal result. That callback prompt already contains the prefetched public job result and must not call any tool. Outbox `delivered` means the matching callback turn completed, not merely that App Server accepted `turn/start`. Direct user diagnostics may still use `mimo_result`.
 
 ## Result privacy boundary
 
@@ -111,7 +111,7 @@ Read `CODEX_THREAD_ID` from the task command environment and supply it as `notif
 2. `CODEX_MIMO_CODEX_BIN` remains the authoritative optional override: set it to force one runnable standalone CLI before Codex Desktop starts, then restart Codex Desktop so the plugin MCP and detached workers inherit it.
 3. Read the current task-scoped `CODEX_THREAD_ID` from the task command environment and pass it explicitly as `notify.threadId`; never store it globally.
 4. Run `mimo_healthcheck` or `codex-mimo doctor` and require `mimo_healthcheck.codexNotification.ok === true` before expecting callbacks. This is basic CLI readiness only: its safe source can be `configured`, `path`, or `desktop-local` and it does not validate a task.
-5. Launch one work job with `notify: { type: "codex", threadId: "..." }`. The target-aware launch preflight validates the selected CLI, App Server protocol, and this explicit target task before job creation. Stop polling and let the callback turn call `mimo_result` and consume `mimo_result.output`.
+5. Launch one work job with `notify: { type: "codex", threadId: "..." }`. The target-aware launch preflight validates the selected CLI, App Server protocol, and this explicit target task before job creation. Stop polling and let the callback turn answer from the prefetched public result without tools.
 
 If preflight failed with `codex_cli_not_found`, `codex_cli_not_executable`, or `codex_app_server_unavailable`, run `mimo_healthcheck` and configure `CODEX_MIMO_CODEX_BIN`. Preflight failure does not automatically relaunch without notify; only an explicit user choice may switch to a no-notify or Cursor companion launch.
 
@@ -140,11 +140,11 @@ CLI users may omit `notify` intentionally or supply `--notify codex --thread-id 
 | `codex_app_server_unavailable` | Temporary process/transport failure | Retry after doctor succeeds. |
 | `codex_thread_busy` | Original task is still active | Let durable backoff retry. |
 | `codex_thread_missing` / `codex_thread_forbidden` | Target cannot be resumed | Verify the explicit task ID and permissions. |
-| `codex_turn_interrupted` | Callback turn ended interrupted | Allow durable retry. |
-| `codex_turn_failed` | Callback turn failed | Allow durable retry; inspect only after repeated failure. |
-| `codex_turn_timeout` | Five-minute callback budget expired | Check task/tool blockage before retry exhaustion. |
+| `codex_turn_interrupted` | Callback turn ended interrupted | At most one retry (two total attempts). |
+| `codex_turn_failed` | Callback turn failed | At most one retry (two total attempts). |
+| `codex_turn_timeout` | Five-minute callback budget expired | Fail the current event immediately after the first attempt. |
 
-Codex delivery is at-least-once across process crashes. A full notified job normally performs two system-only `thread/resume` probes: launch preflight and delivery preparation. In normal operation, each delivery attempt performs exactly one `turn/start`; the notify worker waits on `turn/completed` without calling `mimo_status`, `mimo_events`, or `mimo_wait`, and marks the outbox `delivered` only after the matching callback turn completes. If the notification process crashes after `turn/start` but before callback completion is settled, the same persisted event ID can be retried and start a duplicate callback turn. The callback prompt includes that event ID and identifies the notification as a possible retry; repeated `mimo_result` reads remain read-only.
+Codex delivery is at-least-once across process crashes. A full notified job normally performs two system-only `thread/resume` probes: launch preflight and delivery preparation. In normal operation, each delivery attempt performs exactly one `turn/start`; the notify worker waits on `turn/completed` without calling `mimo_status`, `mimo_events`, or `mimo_wait`, and marks the outbox `delivered` only after the matching callback turn completes. The callback turn receives a prefetched public result and must not call tools. If the notification process crashes after `turn/start` but before callback completion is settled, the same persisted event ID can be retried and start a duplicate callback turn. The callback prompt includes that event ID and identifies the notification as a possible retry.
 
 Webhook targets name an environment variable; secret values are never stored in job, event, log, report, or outbox files:
 
@@ -232,4 +232,4 @@ $env:CODEX_MIMO_INSTALLED_PLUGIN_ROOT='C:\Users\<you>\.codex\plugins\cache\<sour
 $env:RUN_LOCAL_CODEX_NOTIFY_SMOKE='1'; npm run test:smoke:codex-notify
 ```
 
-The Codex notification smoke also requires a real Codex App Server and an idle, dedicated Codex task with its injected `CODEX_THREAD_ID`. `CODEX_MIMO_INSTALLED_PLUGIN_ROOT` must be the absolute installed package root, not this source checkout; the smoke rejects a missing package or a plugin manifest version that differs from the checkout. Before removing Codex-bearing PATH directories and clearing `CODEX_MIMO_CODEX_BIN`, it freezes the resolved MiMoCode command as an absolute `CODEX_MIMO_COMMAND`, so the run deterministically exercises Desktop-local discovery even when MiMoCode and Codex share a directory. Do not run it from a task handling other work: the smoke deliberately resumes that task and asks its callback turn to call `mimo_result` once and copy its exact result fields into an external observation marker.
+The Codex notification smoke also requires a real Codex App Server and an idle, dedicated Codex task with its injected `CODEX_THREAD_ID`. `CODEX_MIMO_INSTALLED_PLUGIN_ROOT` must be the absolute installed package root, not this source checkout; the smoke rejects a missing package or a plugin manifest version that differs from the checkout. Before removing Codex-bearing PATH directories and clearing `CODEX_MIMO_CODEX_BIN`, it freezes the resolved MiMoCode command as an absolute `CODEX_MIMO_COMMAND`, so the run deterministically exercises Desktop-local discovery even when MiMoCode and Codex share a directory. Do not run it from a task handling other work: the smoke deliberately resumes that task and reads the newest assistant response from the target session rollout after the prefetched-result callback completes.

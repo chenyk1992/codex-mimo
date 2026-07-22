@@ -760,8 +760,9 @@ function isNotification(value: Record<string, unknown>): boolean {
     !hasOwn(value, "error");
 }
 
-function isServerRequest(value: Record<string, unknown>): value is RpcServerRequest {
-  return (typeof value.id === "string" || Number.isInteger(value.id)) &&
+function isServerRequest(value: unknown): value is RpcServerRequest {
+  return isRecord(value) &&
+    (typeof value.id === "string" || Number.isInteger(value.id)) &&
     typeof value.method === "string" &&
     hasOwn(value, "params") &&
     !hasOwn(value, "result") &&

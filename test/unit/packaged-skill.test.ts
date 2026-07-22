@@ -10,8 +10,9 @@ describe("packaged MiMoCode skill", () => {
     expect(skill).toMatch(/return the queued receipt/i);
     expect(skill).toMatch(/do not call `mimo_status`, `mimo_events`, or `mimo_wait`/i);
     expect(skill).toMatch(/callback turn/i);
-    expect(skill).toMatch(/when resumed[\s\S]{0,120}`mimo_result`/i);
-    expect(skill).toMatch(/explicit user diagnostics/i);
+    expect(skill).toMatch(/prompt already contains public job result/i);
+    expect(skill).toMatch(/must not call any tool/i);
+    expect(skill).toMatch(/direct user diagnostics/i);
   });
 
   it("contains none of the removed orchestration guidance", () => {

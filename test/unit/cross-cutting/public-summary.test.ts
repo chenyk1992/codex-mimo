@@ -115,7 +115,10 @@ describe("public progress summary boundary", () => {
       status: "blocked",
       summary: marker
     });
-    expect(prompt).not.toContain(marker);
+    expect(prompt).toContain("<mimo_callback_result>");
+    expect(prompt).toContain(`"output":"${marker}"`);
+    expect(prompt).toContain("Do not call mimo_result, mimo_status, mimo_events, mimo_wait, or any other tool.");
+    expect(prompt).not.toContain("Call mimo_result");
 
     const webhookPayload = buildNotificationPayload(
       {

@@ -51,15 +51,11 @@ For Codex Desktop launches:
 5. CLI users may omit `notify` intentionally or supply `--notify codex --thread-id <id>`.
 6. Webhook settings and Codex settings remain mutually exclusive.
 
-After a successful Codex notify launch:
+After a successful Codex notify launch, return queued receipt and stop. Notify worker starts one callback turn whose prompt already contains public job result. Callback must answer using that result and must not call any tool. delivered means matching callback turn completed.
 
-1. Return the queued receipt to the user and **stop**. After launch, do not call `mimo_status`, `mimo_events`, or `mimo_wait`.
-2. The notify worker uses system-level App Server RPC once, waits on `turn/completed` without model polling, and starts one callback turn. That callback calls `mimo_result` once and continues the original request. Outbox `delivered` means the callback turn completed, not merely accepted.
-3. When resumed by the callback turn, call `mimo_result` with the `jobId` and consume `mimo_result.output` as the explicit final assistant output, then inspect relevant changes and verify independently.
+Direct user diagnostics remain unchanged: user may ask for mimo_result, mimo_status, mimo_events, or one mimo_wait; those calls are not part of automatic callback delivery.
 
 A queued receipt alone does not prove a Codex notification target exists unless the explicit Codex notification launch succeeded.
-
-Use `mimo_status`, `mimo_events`, or one `mimo_wait` only for explicit user diagnostics on any path. Normal progress and Codex callback waiting do not require a caller tool turn.
 
 ## Expected MCP Tools (13)
 
@@ -140,7 +136,7 @@ Every work tool returns only this stable receipt shape:
 
 ## Idle stop-loss and stall diagnosis
 
-When MiMo stdout goes silent longer than `idleTimeoutMs`, the job worker terminates the process tree and finalizes as `timeout` with `errorCode: idle_timeout`. Treat this like any other attention terminal: wait for the callback turn (or user follow-up), then call `mimo_result` with the receipt's `jobId`.
+When MiMo stdout goes silent longer than `idleTimeoutMs`, the job worker terminates the process tree and finalizes as `timeout` with `errorCode: idle_timeout`. Treat this like any other attention terminal: wait for the automatic callback turn (which already carries the public result), or for an explicit user follow-up that may call `mimo_result` with the receipt's `jobId`.
 
 Distinguish wakeup paths: MiMo `session.post` is execution evidence; Codex notification wakes the originating task; Cursor companion uses the host stop hook. A work receipt alone does not prove a Codex notification target exists unless the explicit Codex notification launch succeeded. Without a frozen Codex target, the terminal state is on disk only — discover it via `mimo_jobs` or an explicit user request.
 

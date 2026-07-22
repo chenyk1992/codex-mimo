@@ -39,15 +39,6 @@ interface JobStatus {
   status: string;
 }
 
-interface ResultMarker {
-  source: "mimo_result";
-  jobId: string;
-  kind: "implement";
-  status: "completed";
-  resultType: "final";
-  output: string;
-}
-
 interface AppServerAuditRecord {
   timestamp: string;
   pid: number;
@@ -62,8 +53,8 @@ describeSmoke("local Codex notification", () => {
 
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-codex-notify-smoke-"));
     const mimoHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-codex-notify-home-"));
-    const markerFile = path.join(workspace, "codex-notification-result.json");
     const appServerAuditFile = path.join(mimoHome, "app-server-rpc.jsonl");
+    const smokeStartedAt = Date.now();
     let transport: StdioClientTransport | undefined;
     let client: Client | undefined;
     let receipt: JobReceipt | undefined;
@@ -79,7 +70,7 @@ describeSmoke("local Codex notification", () => {
       }
       expect(probe.source).toBe("desktop-local");
 
-      initializeSmokeRepository(workspace, markerFile);
+      initializeSmokeRepository(workspace);
       const server = readPackagedMcpServer(pluginRoot);
       transport = new StdioClientTransport({
         command: server.command,
@@ -112,29 +103,16 @@ describeSmoke("local Codex notification", () => {
         threadId
       });
 
-      // The independently resumed Desktop task runs through a different MCP process,
-      // so transient environment-based auditing here cannot observe its tool call.
-      // This marker is the cross-process contract: that task must call mimo_result
-      // exactly once and copy the returned fields without this process reading them.
-      const marker = await waitForResultMarker(markerFile, 330_000);
-      expect(marker).toMatchObject({
-        source: "mimo_result",
-        jobId: receipt.jobId,
-        kind: "implement",
-        status: "completed",
-        resultType: "final"
-      });
-      expect(marker.output).toContain(OUTPUT_MARKER);
+      const callbackResponse = await waitForTargetAssistantResponse(threadId, 330_000, smokeStartedAt);
+      expect(callbackResponse.trim()).not.toBe("");
+      expect(callbackResponse).toContain(OUTPUT_MARKER);
 
-      const markerWrittenAt = fs.statSync(markerFile).mtimeMs;
       const finalDelivery = await waitForTerminalDelivery(workspace, receipt.jobId, 30_000);
       expect(finalDelivery).toMatchObject({
         status: "delivered",
         attempts: 1
       });
       expect(finalDelivery.deliveredAt).toBeDefined();
-      expect(Date.parse(finalDelivery.deliveredAt!))
-        .toBeGreaterThanOrEqual(markerWrittenAt - 1_000);
 
       const appServerRecords = readAppServerAudit(appServerAuditFile);
       expect(appServerRecords.filter((record) => record.method === "initialize")).toHaveLength(2);
@@ -206,22 +184,13 @@ function stringEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
   );
 }
 
-function initializeSmokeRepository(workspace: string, markerFile: string): void {
-  const markerInstruction = JSON.stringify(markerFile);
+function initializeSmokeRepository(workspace: string): void {
   fs.writeFileSync(path.join(workspace, "AGENTS.md"), [
     "# Codex notification smoke",
     "",
     "Do not modify repository files. Complete the requested inspection successfully.",
     `Your final response must include the exact marker ${JSON.stringify(OUTPUT_MARKER)}.`,
-    "Your final response must instruct the resumed Codex task to do all of the following:",
-    "",
-    "1. Call `mimo_result` exactly once using the notification's exact cwd and jobId.",
-    "2. Do not call `mimo_status`, `mimo_events`, or `mimo_wait`.",
-    `3. Write UTF-8 JSON to ${markerInstruction}.`,
-    "4. Copy the exact `jobId`, `kind`, `status`, `resultType`, and `output` fields from that result.",
-    "5. Add the literal field `\"source\": \"mimo_result\"`.",
-    "6. Do not infer any result field.",
-    "7. Do not copy `summary`; the callback must validate `output`, not the generic completion summary.",
+    "Do not instruct any other agent or callback to call tools or write files.",
     ""
   ].join("\n"), "utf8");
   fs.writeFileSync(path.join(workspace, "README.md"), "Codex notification smoke workspace.\n", "utf8");
@@ -287,19 +256,82 @@ async function waitForTerminalDelivery(
   throw new Error(`Timed out waiting for terminal notification delivery: ${jobId}`);
 }
 
-async function waitForResultMarker(file: string, timeoutMs: number): Promise<ResultMarker> {
+async function waitForTargetAssistantResponse(
+  threadId: string,
+  timeoutMs: number,
+  startedAtMs: number
+): Promise<string> {
+  const sessionsRoot = path.join(
+    process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"),
+    "sessions"
+  );
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (fs.existsSync(file)) {
-      try {
-        return JSON.parse(fs.readFileSync(file, "utf8")) as ResultMarker;
-      } catch {
-        // The resumed task may still be replacing the marker atomically.
-      }
-    }
+    const text = readNewestAssistantResponseAfter(sessionsRoot, threadId, startedAtMs);
+    if (text?.trim()) return text;
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
-  throw new Error(`Timed out waiting for the resumed Codex task marker: ${file}`);
+  throw new Error(`Timed out waiting for target assistant response on thread ${threadId}`);
+}
+
+function readNewestAssistantResponseAfter(
+  sessionsRoot: string,
+  threadId: string,
+  startedAtMs: number
+): string | undefined {
+  if (!fs.existsSync(sessionsRoot)) return undefined;
+  const suffix = `-${threadId}.jsonl`;
+  let newest: { at: number; text: string } | undefined;
+  for (const file of listFilesRecursive(sessionsRoot)) {
+    const base = path.basename(file);
+    if (!base.startsWith("rollout-") || !base.endsWith(suffix)) continue;
+    const content = fs.readFileSync(file, "utf8");
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let record: unknown;
+      try {
+        record = JSON.parse(trimmed) as unknown;
+      } catch {
+        continue;
+      }
+      if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+      const entry = record as Record<string, unknown>;
+      if (entry.type !== "response_item") continue;
+      const at = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+      if (!Number.isFinite(at) || at < startedAtMs) continue;
+      const text = assistantOutputText(entry.payload);
+      if (!text?.trim()) continue;
+      if (!newest || at >= newest.at) newest = { at, text };
+    }
+  }
+  return newest?.text;
+}
+
+function assistantOutputText(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+  const message = payload as Record<string, unknown>;
+  if (message.type !== "message" || message.role !== "assistant") return undefined;
+  if (!Array.isArray(message.content)) return undefined;
+  const parts: string[] = [];
+  for (const item of message.content) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const part = item as Record<string, unknown>;
+    if (part.type === "output_text" && typeof part.text === "string") parts.push(part.text);
+  }
+  const text = parts.join("");
+  return text.trim() ? text : undefined;
+}
+
+function listFilesRecursive(root: string): string[] {
+  const entries = fs.readdirSync(root, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory()) files.push(...listFilesRecursive(full));
+    else if (entry.isFile()) files.push(full);
+  }
+  return files;
 }
 
 function removeTemporaryDirectory(directory: string): void {
