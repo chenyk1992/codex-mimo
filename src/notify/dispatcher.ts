@@ -195,7 +195,8 @@ async function deliverByTarget(
     prepared = await (dependencies.prepareCodex ?? prepareCodexConnection)({
       threadId: delivery.target.threadId,
       env: dependencies.env,
-      signal: attemptSignal
+      signal: attemptSignal,
+      requestTimeoutMs: timeoutMs
     });
   } catch (error) {
     return {

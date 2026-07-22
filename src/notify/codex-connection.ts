@@ -35,6 +35,7 @@ export interface PrepareCodexConnectionOptions {
   threadId: string;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  requestTimeoutMs?: number;
   candidates?: CodexCommandSelection[];
   execute?: (
     command: string,
@@ -128,7 +129,13 @@ async function prepareCandidate(
 ): Promise<PreparedCodexConnection> {
   let client: CodexAppServerClient | undefined;
   try {
-    client = (options.createClient ?? createCodexAppServerClient)({ env, command: candidate });
+    client = (options.createClient ?? createCodexAppServerClient)({
+      env,
+      command: candidate,
+      ...(options.requestTimeoutMs === undefined
+        ? {}
+        : { requestTimeoutMs: options.requestTimeoutMs })
+    });
     await client.initialize(options.signal);
     const thread = await client.resumeThread(options.threadId, options.signal);
     if (thread.exists) {

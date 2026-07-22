@@ -44,3 +44,22 @@ path.
 
 The test suite emitted existing Windows line-ending warnings for temporary test
 workspaces; no verification command failed because of them.
+
+## Review remediation: delivery timeout propagation
+
+The review found that the delivery dispatcher computed `attemptTimeoutMs` but
+did not pass it into target preparation after Task 4 replaced direct client
+creation. This could restore the App Server's default request timeout instead
+of the delivery-wide bound.
+
+1. Added a focused dispatcher regression requiring `attemptTimeoutMs: 4321` to
+   be forwarded as `requestTimeoutMs` to `prepareCodex`.
+2. The new test failed as expected: preparation received only `threadId`,
+   `env`, and `signal`.
+3. Added optional `requestTimeoutMs` to `PrepareCodexConnectionOptions` and
+   forwarded it to `createCodexAppServerClient`; dispatcher now supplies its
+   computed bound on every Codex delivery attempt.
+4. `npm test -- test/unit/notify/dispatcher.test.ts test/unit/notify/codex-connection.test.ts test/unit/notify/codex-adapter.test.ts`
+   — 51 passed.
+5. `npm test -- test/integration/unified-background-jobs.test.ts` — 23 passed.
+6. `npm run lint`, `npm run build`, and `git diff --check` — passed.

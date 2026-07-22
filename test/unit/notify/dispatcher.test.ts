@@ -584,6 +584,25 @@ describe("notification dispatcher", () => {
     );
   });
 
+  it("forwards the configured delivery attempt timeout to Codex preparation", async () => {
+    const cwd = makeCwd();
+    await makeDelivery(cwd);
+    const prepareCodex = vi.fn(async () => ({
+      probe: { ok: false as const, source: "path" as const, errorCode: "codex_thread_missing" as const }
+    }));
+
+    await dispatchNextDelivery(cwd, {
+      now: () => new Date(createdAt),
+      attemptTimeoutMs: 4_321,
+      prepareCodex
+    });
+
+    expect(prepareCodex).toHaveBeenCalledWith(expect.objectContaining({
+      threadId: "thread-1",
+      requestTimeoutMs: 4_321
+    }));
+  });
+
   it("fails safely when the signal does not match the delivery cursor", async () => {
     const cwd = makeCwd();
     const { job } = await makeDelivery(cwd);
