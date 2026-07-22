@@ -169,6 +169,7 @@ const planDefinition: JobDefinition<"plan", PlanJobRequest> = directDefinition({
   kind: "plan",
   agent: "plan",
   writesAllowed: false,
+  requireFinalText: true,
   prompt: (request) => planPrompt(request.task),
   title: "codex-mimo plan"
 });
@@ -332,6 +333,7 @@ interface DirectDefinitionInput<
   kind: Kind;
   agent: "plan" | "build";
   writesAllowed: boolean;
+  requireFinalText?: boolean;
   prompt: (request: Request) => string;
   files?: (request: Request) => string[];
   title: string;
@@ -360,14 +362,15 @@ function directDefinition<
       });
     },
     async finalize(context) {
-      return finalizeDirect(context, input.writesAllowed);
+      return finalizeDirect(context, input.writesAllowed, input.requireFinalText === true);
     }
   };
 }
 
 async function finalizeDirect<Request extends { cwd: string }>(
   context: JobFinalizeContext<Request>,
-  writesAllowed: boolean
+  writesAllowed: boolean,
+  requireFinalText = false
 ): Promise<JobOutcome> {
   const verification = context.verification ?? [];
   const changedFiles = collectChangedFiles(context, writesAllowed);
@@ -376,7 +379,8 @@ async function finalizeDirect<Request extends { cwd: string }>(
     terminationReason: context.run.terminationReason,
     executionCallback: context.executionCallback,
     verification: compactVerification(verification),
-    finalText: finalTextFrom(context)
+    finalText: finalTextFrom(context),
+    ...(requireFinalText ? { requireFinalText: true } : {})
   });
 
   if (!writesAllowed && hasReadOnlyViolation(context, changedFiles)) {
@@ -426,7 +430,8 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     terminationReason: context.run.terminationReason,
     executionCallback: context.executionCallback,
     verification: compactVerification(verification),
-    finalText: finalTextFrom(context)
+    finalText: finalTextFrom(context),
+    ...(workflow.name === "plan" ? { requireFinalText: true } : {})
   });
 
   const readOnlyError = !workflow.writesAllowed && hasReadOnlyViolation(context, changedFiles)

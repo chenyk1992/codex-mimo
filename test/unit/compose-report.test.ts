@@ -42,6 +42,40 @@ describe("compose report", () => {
     }
   });
 
+  it("keeps result_missing structural and omits model output from reports", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-report-result-missing-"));
+    const modelText = "# Secret plan body that must not appear";
+    try {
+      const report = createComposeReport({
+        id: "missing-result-report",
+        createdAt: "2026-07-22T00:00:00.000Z",
+        workflow: "plan",
+        cwd: root,
+        requestedSkills: ["compose:plan"],
+        status: "failed",
+        events: [{ type: "message", text: modelText, raw: { type: "text", part: { text: modelText } } }],
+        diff: { changedFiles: [], diffStat: "", diff: "" },
+        verification: [],
+        error: "MiMoCode did not return a final result.",
+        errorCode: "result_missing",
+        reportDir: path.join(root, "reports"),
+        eventsDir: path.join(root, "events"),
+        diffsDir: path.join(root, "diffs")
+      });
+      writeComposeReport(report);
+
+      expect(report.errorCode).toBe("result_missing");
+      expect(report).not.toHaveProperty("output");
+      expect(JSON.stringify(report)).not.toContain(modelText);
+      expect(fs.readFileSync(report.reportPaths.json, "utf8")).not.toContain(modelText);
+      expect(fs.readFileSync(report.reportPaths.markdown, "utf8")).not.toContain(modelText);
+      expect(fs.readFileSync(report.reportPaths.eventsJsonl, "utf8")).not.toContain(modelText);
+      expect(fs.readFileSync(report.reportPaths.json, "utf8")).toContain("result_missing");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("omits task and prompt arguments from persisted JSON and Markdown reports", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-report-redaction-"));
     const secret = "ghp_report_prompt_secret_123";
