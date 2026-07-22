@@ -80,6 +80,21 @@ describe("git diff helpers", () => {
     );
   });
 
+  it("returns an empty status snapshot when the directory is not a git repository", async () => {
+    mockedExeca.mockResolvedValue({
+      exitCode: 128,
+      stdout: "",
+      stderr: "fatal: not a git repository (or any of the parent directories): .git"
+    });
+
+    await expect(captureGitStatus("E:/repo")).resolves.toEqual({
+      short: "",
+      dirty: false,
+      fingerprints: {}
+    });
+    expect(mockedExeca).toHaveBeenCalledTimes(1);
+  });
+
   it("captures git diff with the cwd trusted for each git command", async () => {
     mockedExeca
       .mockResolvedValueOnce({ stdout: "abc123", stderr: "", exitCode: 0 })
@@ -193,6 +208,34 @@ describe("git diff helpers", () => {
     await expect(captureGitHead("E:/repo")).rejects.toThrow(
       "Git HEAD capture failed: fatal: detected dubious ownership in repository"
     );
+  });
+
+  it("returns an empty HEAD snapshot when the directory is not a git repository", async () => {
+    mockedExeca.mockResolvedValue({
+      exitCode: 128,
+      stdout: "",
+      stderr: "fatal: not a git repository (or any of the parent directories): .git"
+    });
+
+    await expect(captureGitHead("E:/repo")).resolves.toEqual({
+      oid: "",
+      short: "",
+      subject: ""
+    });
+  });
+
+  it("returns an empty diff snapshot when the directory is not a git repository", async () => {
+    mockedExeca.mockResolvedValue({
+      exitCode: 128,
+      stdout: "",
+      stderr: "fatal: not a git repository (or any of the parent directories): .git"
+    });
+
+    await expect(captureGitDiff("E:/repo")).resolves.toEqual({
+      changedFiles: [],
+      diffStat: "",
+      diff: ""
+    });
   });
 
   it("captures commits and files between two git heads", async () => {

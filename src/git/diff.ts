@@ -39,7 +39,12 @@ export async function captureGitStatus(
     gitCommandOptions(cwd, options, false)
   );
   if (result.exitCode !== 0) {
-    throw new Error(`Git status capture failed: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`);
+    const detail = result.stderr || result.stdout || `exit ${result.exitCode}`;
+    // Empty `.git` placeholders / non-repo workspaces: treat as a clean snapshot so jobs can start.
+    if (isMissingGitRepositoryError(detail)) {
+      return { short: "", dirty: false, fingerprints: {} };
+    }
+    throw new Error(`Git status capture failed: ${detail}`);
   }
   const entries = parsePorcelainStatus(result.stdout ?? "");
   return {
@@ -130,7 +135,11 @@ export async function captureGitDiff(
     gitCommandOptions(cwd, options, false)
   );
   if (validated.exitCode !== 0) {
-    throw new Error(`Git diff capture failed for base ${base}: ${validated.stderr || `exit ${validated.exitCode}`}`);
+    const detail = validated.stderr || `exit ${validated.exitCode}`;
+    if (isMissingGitRepositoryError(detail)) {
+      return { changedFiles: [], diffStat: "", diff: "" };
+    }
+    throw new Error(`Git diff capture failed for base ${base}: ${detail}`);
   }
   try {
     const [names, stat, diff] = await Promise.all([
@@ -163,7 +172,8 @@ export async function captureGitHead(
   if (oid.exitCode !== 0) {
     const detail = oid.stderr || oid.stdout || `exit ${oid.exitCode}`;
     // Fresh `git init` / IntelliJ empty projects: branch exists, but HEAD has no commit yet.
-    if (isUnbornHeadError(detail)) {
+    // Also tolerate missing/invalid `.git` placeholders so jobs can bootstrap a real repo.
+    if (isUnbornHeadError(detail) || isMissingGitRepositoryError(detail)) {
       return { oid: "", short: "", subject: "" };
     }
     throw new Error(`Git HEAD capture failed: ${detail}`);
@@ -241,4 +251,8 @@ function isUnbornHeadError(detail: string): boolean {
   return /Needed a single revision/i.test(detail)
     || /does not have any commits yet/i.test(detail)
     || /unknown revision or path not in the working tree/i.test(detail);
+}
+
+function isMissingGitRepositoryError(detail: string): boolean {
+  return /not a git repository/i.test(detail);
 }
