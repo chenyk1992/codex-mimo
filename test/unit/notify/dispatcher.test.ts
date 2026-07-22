@@ -276,10 +276,20 @@ describe("notification dispatcher", () => {
       cancelLeaseRenewal: timers.cancelLeaseRenewal
     });
     await vi.waitFor(() => expect(firstDeliver).toHaveBeenCalledOnce());
+    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+      status: "delivering",
+      attempts: 1
+    });
+    expect(readDeliveries(job.notificationOutboxFile)[0].deliveredAt).toBeUndefined();
 
     for (const elapsed of [10_000, 20_000, 30_000]) {
       nowMs = Date.parse(createdAt) + elapsed;
       await timers.fireNext();
+      expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+        status: "delivering",
+        attempts: 1
+      });
+      expect(readDeliveries(job.notificationOutboxFile)[0].deliveredAt).toBeUndefined();
     }
     nowMs = Date.parse(createdAt) + 31_000;
     const secondResult = await dispatchNextDelivery(cwd, {
@@ -292,12 +302,18 @@ describe("notification dispatcher", () => {
     expect(secondDeliver).not.toHaveBeenCalled();
     adapter.resolve({ outcome: "delivered" });
     await expect(firstDispatch).resolves.toMatchObject({ outcome: "settled" });
+    expect(firstDeliver).toHaveBeenCalledOnce();
     expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
       status: "delivered",
       attempts: 1,
       deliveredAt: "2026-07-16T00:00:31.000Z"
     });
     expect(timers.timers.every((timer) => !timer.active)).toBe(true);
+    const dispatcherSource = fs.readFileSync(
+      path.resolve("src/notify/dispatcher.ts"),
+      "utf8"
+    );
+    expect(dispatcherSource).not.toMatch(/mimo_(status|events|wait)/);
   });
 
   it("returns a stale outcome without overwriting a reclaimed generation", async () => {

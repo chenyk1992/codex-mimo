@@ -389,6 +389,38 @@ describe("notification outbox", () => {
     expect(journal).not.toContain("arbitrary");
   });
 
+  it.each([
+    "codex_turn_interrupted",
+    "codex_turn_failed",
+    "codex_turn_timeout"
+  ] as const)("persists retryable callback error code %s", async (errorCode) => {
+    const file = tempOutbox();
+    const { delivery } = await enqueueDelivery(file, {
+      jobId: `implement-${errorCode}`,
+      signalCursor: 1,
+      target,
+      createdAt: now
+    });
+    const claim = (await claimDueDelivery(file, new Date(now), 30_000))!;
+
+    await retryDelivery(
+      file,
+      delivery.id,
+      claim.attempts,
+      new Date("2026-07-16T00:01:00.000Z"),
+      "Safe callback failure",
+      errorCode
+    );
+
+    expect(readDeliveries(file)[0]).toMatchObject({
+      status: "pending",
+      attempts: 1,
+      nextAttemptAt: "2026-07-16T00:01:00.000Z",
+      lastError: "Safe callback failure",
+      lastErrorCode: errorCode
+    });
+  });
+
   it("persists allowlisted lastErrorCode on failure and retry settlement", async () => {
     const file = tempOutbox();
     const { delivery } = await enqueueDelivery(file, {
