@@ -1221,6 +1221,95 @@ describe("runJobWorker", () => {
     expect(readJob(cwd, job.id)).toMatchObject({ status: "completed" });
   });
 
+  it("completes a read-only plan when MiMo refreshes its existing cron lock", async () => {
+    const cwd = gitWorkspace();
+    const lock = path.join(cwd, ".mimocode", ".cron-lock");
+    fs.mkdirSync(path.dirname(lock), { recursive: true });
+    fs.writeFileSync(lock, '{"pid":1,"startedAt":1}\n', "utf8");
+    const job = createJobStore(cwd).create({
+      kind: "plan", task: "Plan it", request: { cwd, task: "Plan it" }
+    });
+    const deps = workerDeps({
+      runMimoStreaming: async (_cwd, _args, options) => {
+        await options.onStart?.(654);
+        fs.writeFileSync(lock, '{"pid":2,"startedAt":2}\n', "utf8");
+        await options.onLine?.('{"type":"text","text":"Plan complete."}');
+        return { ...completedRun, pid: 654 };
+      }
+    });
+    delete deps.bindJobDefinition;
+    delete deps.captureStatus;
+    delete deps.captureHead;
+    delete deps.captureDiff;
+    delete deps.captureCommitChanges;
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)).toMatchObject({ status: "completed", changedFiles: [] });
+  });
+
+  it("keeps real .mimocode configuration changes as read-only violations", async () => {
+    const cwd = gitWorkspace();
+    const config = path.join(cwd, ".mimocode", "mimocode.jsonc");
+    fs.mkdirSync(path.dirname(config), { recursive: true });
+    fs.writeFileSync(config, '{"before":true}\n', "utf8");
+    const job = createJobStore(cwd).create({
+      kind: "review", task: "Review", request: { cwd, base: "HEAD" }
+    });
+    const deps = workerDeps({
+      runMimoStreaming: async (_cwd, _args, options) => {
+        await options.onStart?.(654);
+        fs.writeFileSync(config, '{"after":true}\n', "utf8");
+        await options.onLine?.('{"type":"text","text":"Review complete."}');
+        return { ...completedRun, pid: 654 };
+      }
+    });
+    delete deps.bindJobDefinition;
+    delete deps.captureStatus;
+    delete deps.captureHead;
+    delete deps.captureDiff;
+    delete deps.captureCommitChanges;
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "failed", errorCode: "read_only_violation", changedFiles: [".mimocode/mimocode.jsonc"]
+    });
+  });
+
+  it("reports only business edits when implement also refreshes the cron lock", async () => {
+    const cwd = gitWorkspace();
+    const lock = path.join(cwd, ".mimocode", ".cron-lock");
+    fs.mkdirSync(path.dirname(lock), { recursive: true });
+    fs.writeFileSync(lock, '{"pid":1,"startedAt":1}\n', "utf8");
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "Implement it",
+      request: { cwd, task: "Implement it", allowWrite: true }
+    });
+    const deps = workerDeps({
+      runMimoStreaming: async (_cwd, _args, options) => {
+        await options.onStart?.(654);
+        fs.writeFileSync(lock, '{"pid":2,"startedAt":2}\n', "utf8");
+        fs.writeFileSync(path.join(cwd, "tracked.txt"), "after\n", "utf8");
+        await options.onLine?.('{"type":"text","text":"Implemented."}');
+        return { ...completedRun, pid: 654 };
+      }
+    });
+    delete deps.bindJobDefinition;
+    delete deps.captureStatus;
+    delete deps.captureHead;
+    delete deps.captureDiff;
+    delete deps.captureCommitChanges;
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "completed",
+      changedFiles: ["tracked.txt"]
+    });
+  });
+
   it("fails a read-only job that changes a workspace file", async () => {
     const cwd = gitWorkspace();
     const job = createJobStore(cwd).create({

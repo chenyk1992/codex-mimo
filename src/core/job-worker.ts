@@ -50,6 +50,7 @@ import {
   withProcessLock
 } from "./process-lock.js";
 import { resolveJobWorkerOwnershipKey } from "./worker-ownership.js";
+import { isRuntimeArtifactPath } from "./runtime-paths.js";
 import type { PublicSummaryContext } from "./public-summary.js";
 
 export interface JobWorkerDependencies {
@@ -691,11 +692,11 @@ function defaultSleep(delayMs: number): Promise<void> {
 
 function withoutRuntimeStatus(status: GitStatusSnapshot): GitStatusSnapshot {
   const fingerprints = Object.fromEntries(
-    Object.entries(status.fingerprints).filter(([file]) => !isRuntimePath(file))
+    Object.entries(status.fingerprints).filter(([file]) => !isRuntimeArtifactPath(file))
   );
   const short = status.short
     .split(/\r?\n/)
-    .filter((line) => !isRuntimePath(line.replace(/^[ MADRCU?!]{2}\s+/, "")))
+    .filter((line) => !isRuntimeArtifactPath(line.replace(/^[ MADRCU?!]{2}\s+/, "")))
     .join("\n");
   return { short, dirty: Object.keys(fingerprints).length > 0, fingerprints };
 }
@@ -703,18 +704,13 @@ function withoutRuntimeStatus(status: GitStatusSnapshot): GitStatusSnapshot {
 function withoutRuntimeDiff(diff: GitDiffSnapshot): GitDiffSnapshot {
   return {
     ...diff,
-    changedFiles: diff.changedFiles.filter((file) => !isRuntimePath(file))
+    changedFiles: diff.changedFiles.filter((file) => !isRuntimeArtifactPath(file))
   };
 }
 
 function withoutRuntimeCommitChanges(changes: GitCommitChangeSnapshot): GitCommitChangeSnapshot {
   return {
     ...changes,
-    changedFiles: changes.changedFiles.filter((file) => !isRuntimePath(file))
+    changedFiles: changes.changedFiles.filter((file) => !isRuntimeArtifactPath(file))
   };
-}
-
-function isRuntimePath(file: string): boolean {
-  const normalized = file.trim().replace(/\\/g, "/").replace(/^\.\//, "");
-  return normalized === ".codex-mimo" || normalized.startsWith(".codex-mimo/");
 }
