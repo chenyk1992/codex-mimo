@@ -150,4 +150,19 @@ describe("public release contract", () => {
       expect(contents).toMatch(/delivery[\s\S]{0,200}(?:independent|later|outbox)/i);
     }
   });
+
+  it("documents unified Desktop-local discovery and target-aware launch preflight", () => {
+    for (const file of [SKILL, "README.md", "doc/operations-guide.md", "skills/build-and-install/SKILL.md"]) {
+      const contents = readDoc(file);
+      expect(contents).toMatch(/desktop-local/i);
+      expect(contents).toMatch(/CODEX_MIMO_CODEX_BIN[\s\S]{0,180}(?:authoritative|override)/i);
+    }
+
+    for (const file of ["README.md", "doc/operations-guide.md", SKILL]) {
+      const contents = readDoc(file);
+      expect(contents).toMatch(/(?:basic CLI readiness|CLI readiness)/i);
+      expect(contents).toMatch(/target-aware/i);
+      expect(contents).toMatch(/root CLI[\s\S]{0,160}(?:older|version-folder)/i);
+    }
+  });
 });

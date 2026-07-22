@@ -86,6 +86,27 @@ describe("mimo_healthcheck", () => {
     });
   });
 
+  it("reports desktop-local as basic CLI readiness without changing MiMo health", async () => {
+    mocks.execa.mockResolvedValue({ stdout: "mimo 0.5.0\n", stderr: "" });
+
+    const result = await mimoHealthcheck({}, {
+      probeCodex: async () => ({
+        ok: true,
+        source: "desktop-local",
+        version: "codex Desktop 2.0.0"
+      })
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      codexNotification: {
+        ok: true,
+        source: "desktop-local",
+        version: "codex Desktop 2.0.0"
+      }
+    });
+  });
+
   it("defaults cwd to process.cwd()", async () => {
     mocks.execa.mockResolvedValue({ stdout: "mimo 0.5.0\n", stderr: "" });
     const result = await mimoHealthcheck({});

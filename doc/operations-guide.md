@@ -52,17 +52,17 @@ Codex notification targets require an explicit `notify.threadId`. The launcher n
 
 ### Codex Desktop launch sequence
 
-1. Install or identify a standalone Codex CLI that can run `codex --version` from Node/PowerShell. A protected WindowsApps Desktop `codex.exe` is not a valid standalone callback CLI.
-2. Set `CODEX_MIMO_CODEX_BIN` to a runnable standalone CLI before Codex Desktop starts, then restart Codex Desktop so the plugin MCP and detached workers inherit it.
+1. Windows Desktop local discovery automatically checks `%LOCALAPPDATA%\\OpenAI\\Codex\\bin` version folders (`desktop-local`) after PATH candidates. It tries newer version folders before the stable root CLI because the root CLI can be older. A protected WindowsApps Desktop `codex.exe` is not a valid standalone callback CLI.
+2. `CODEX_MIMO_CODEX_BIN` remains the authoritative optional override: set it to force one runnable standalone CLI before Codex Desktop starts, then restart Codex Desktop so the plugin MCP and detached workers inherit it.
 3. Read the current task-scoped `CODEX_THREAD_ID` from the task command environment and pass it explicitly as `notify.threadId`; never store it globally.
-4. Run `mimo_healthcheck` or `codex-mimo doctor` and require `mimo_healthcheck.codexNotification.ok === true` before expecting callbacks.
-5. Launch one work job with `notify: { type: "codex", threadId: "..." }`. The launcher preflights the configured Codex CLI's launchability before job creation. Stop polling and let the callback turn call `mimo_result` and consume `mimo_result.output`.
+4. Run `mimo_healthcheck` or `codex-mimo doctor` and require `mimo_healthcheck.codexNotification.ok === true` before expecting callbacks. This is basic CLI readiness only: its safe source can be `configured`, `path`, or `desktop-local` and it does not validate a task.
+5. Launch one work job with `notify: { type: "codex", threadId: "..." }`. The target-aware launch preflight validates the selected CLI, App Server protocol, and this explicit target task before job creation. Stop polling and let the callback turn call `mimo_result` and consume `mimo_result.output`.
 
 Every Codex Desktop work launch must send `notify: { type: "codex", threadId: "..." }`. The target is resolved once when the job is created. If launch fails with `Codex notification requires threadId` or a schema `threadId` required error, stop and keep `notify` on any later Codex callback attempt. Do not add `CODEX_THREAD_ID` to Windows system or user environment variables. CLI may omit notify or pass `--notify codex --thread-id <id>`; Cursor companion launches omit Codex notify and use the stop hook instead.
 
 If preflight failed with `codex_cli_not_found`, `codex_cli_not_executable`, or `codex_app_server_unavailable`, run `mimo_healthcheck` and configure `CODEX_MIMO_CODEX_BIN`. Preflight failure does not automatically relaunch without notify; only an explicit user choice may switch to a no-notify or Cursor companion launch.
 
-Preflight validates CLI launchability before job persistence. Resolved Execa spawn failures (including protected WindowsApps Desktop binaries) classify to safe preflight codes. A successful preflight does not merge later App Server callback delivery into job execution; the durable outbox handles delivery independently after the job is created.
+Target-aware preflight validates CLI launchability and the explicit task before job persistence. Resolved Execa spawn failures (including protected WindowsApps Desktop binaries) classify to safe preflight codes. A successful preflight does not merge later App Server callback delivery into job execution; the durable outbox handles delivery independently after the job is created.
 
 Diagnostic example when MiMo is healthy but Codex notification is not:
 

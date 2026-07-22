@@ -120,7 +120,8 @@ export function formatDoctorReport(report: DoctorReport): string {
     `Plugin files: ${report.pluginFiles.ok ? "ok" : `failed (missing ${report.pluginFiles.missing.join(", ")})`}`,
     `MCP config: ${report.mcpConfig.ok ? "ok" : `failed (${report.mcpConfig.error ?? "unknown error"})`}`,
     `MCP tools: ${report.mcpProbe.ok ? "ok" : "failed"}`,
-    formatCodexNotificationLine(report.codexNotification)
+    formatCodexNotificationLine(report.codexNotification),
+    "Note: Codex CLI readiness only checks command discovery and --version; a Codex notify launch also preflights its explicit target task before job creation."
   ];
 
   if (report.mcpProbe.tools.length > 0) {
@@ -295,10 +296,10 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 function formatCodexNotificationLine(probe: CodexCommandProbe): string {
   if (probe.ok) {
     return probe.version
-      ? `Codex notification CLI: ok (${probe.version})`
-      : "Codex notification CLI: ok";
+      ? `Codex notification CLI readiness: ok (${probe.source}; ${probe.version})`
+      : `Codex notification CLI readiness: ok (${probe.source})`;
   }
-  return `Codex notification CLI: failed (${probe.errorCode ?? "codex_app_server_unavailable"})`;
+  return `Codex notification CLI readiness: failed (${probe.source}; ${probe.errorCode ?? "codex_app_server_unavailable"})`;
 }
 
 function sanitizeMcpServerConfig(server: McpServerConfig): DoctorMcpServerConfig {

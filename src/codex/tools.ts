@@ -52,6 +52,7 @@ export interface MimoHealthcheckDependencies {
   probeCodex?: typeof probeCodexCommand;
 }
 
+/** MiMo runtime health plus basic Codex CLI discovery; notified launches preflight their target separately. */
 export async function mimoHealthcheck(
   input: unknown,
   deps: MimoHealthcheckDependencies = {}

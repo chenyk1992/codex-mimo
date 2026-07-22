@@ -60,10 +60,11 @@ The codex-mimo plugin manifest is at `.codex-plugin/plugin.json`. To install int
 codex plugin list
 ```
 
-If `codex` CLI is not in PATH, the executable is typically at:
+For Windows Desktop, Codex-MiMo automatically discovers `desktop-local` version-folder binaries under:
 ```
 C:\Users\<username>\AppData\Local\OpenAI\Codex\bin\...\codex.exe
 ```
+It tries version folders before the stable root CLI because the root CLI can be older. `CODEX_MIMO_CODEX_BIN` is the authoritative optional override when a specific standalone CLI must be selected; set it before starting Codex Desktop so the plugin and workers inherit it. Basic CLI readiness in `mimo_healthcheck`/`doctor` does not validate a notification target; an explicit `notify.threadId` launch performs target-aware preflight and does not silently switch to no-notify on failure.
 
 ### 6. Validate
 

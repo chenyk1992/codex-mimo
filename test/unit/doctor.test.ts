@@ -135,9 +135,11 @@ describe("codex-mimo doctor", () => {
       source: "path",
       errorCode: "codex_cli_not_executable"
     });
-    expect(formatDoctorReport(result)).toContain("Codex notification CLI: failed (codex_cli_not_executable)");
+    expect(formatDoctorReport(result)).toContain(
+      "Codex notification CLI readiness: failed (path; codex_cli_not_executable)"
+    );
     const codexLine = formatDoctorReport(result).split("\n").find((line) =>
-      line.startsWith("Codex notification CLI:")
+      line.startsWith("Codex notification CLI readiness:")
     );
     expect(codexLine).toBeDefined();
     expect(codexLine).not.toMatch(/C:\\|\/Users\/|\/home\//);
@@ -158,6 +160,30 @@ describe("codex-mimo doctor", () => {
       }
     );
 
-    expect(formatDoctorReport(result)).toContain("Codex notification CLI: ok (codex 2.0.0)");
+    expect(formatDoctorReport(result)).toContain("Codex notification CLI readiness: ok (configured; codex 2.0.0)");
+  });
+
+  it("reports desktop-local as a safe basic CLI readiness source", async () => {
+    const pluginRoot = createPluginRoot();
+    const result = await runDoctor(
+      { cwd: "/project", pluginRoot },
+      {
+        checkMimoVersion: vi.fn().mockResolvedValue({ ok: true, version: "mimo 0.5.0" }),
+        probeMcpTools: vi.fn().mockResolvedValue([...MIMO_TOOL_NAMES]),
+        probeCodex: vi.fn().mockResolvedValue({
+          ok: true,
+          source: "desktop-local",
+          version: "codex Desktop 2.0.0"
+        })
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(formatDoctorReport(result)).toContain(
+      "Codex notification CLI readiness: ok (desktop-local; codex Desktop 2.0.0)"
+    );
+    expect(formatDoctorReport(result)).toContain(
+      "Note: Codex CLI readiness only checks command discovery and --version; a Codex notify launch also preflights its explicit target task before job creation."
+    );
   });
 });
