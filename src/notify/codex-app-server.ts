@@ -2,6 +2,10 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { withUtf8ProcessEnv } from "../core/encoding.js";
+import {
+  resolveCodexCommand,
+  type CodexCommandSelection
+} from "./codex-command.js";
 
 export interface ThreadResumeResult {
   exists: boolean;
@@ -53,6 +57,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
 export interface CodexAppServerClientOptions {
   spawnProcess?: typeof spawn;
+  env?: NodeJS.ProcessEnv;
+  command?: CodexCommandSelection;
   requestTimeoutMs?: number;
   scheduleRequestTimeout?: (callback: () => void, delayMs: number) => unknown;
   cancelRequestTimeout?: (timer: unknown) => void;
@@ -61,13 +67,19 @@ export interface CodexAppServerClientOptions {
 export function createCodexAppServerClient(
   options: CodexAppServerClientOptions = {}
 ): CodexAppServerClient {
+  const processEnv = options.env ?? process.env;
+  const command = options.command ?? resolveCodexCommand(processEnv);
   let child: ChildProcessWithoutNullStreams;
   try {
-    child = (options.spawnProcess ?? spawn)("codex", ["app-server", "--listen", "stdio://"], {
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-      env: withUtf8ProcessEnv()
-    }) as ChildProcessWithoutNullStreams;
+    child = (options.spawnProcess ?? spawn)(
+      command.command,
+      ["app-server", "--listen", "stdio://"],
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+        env: withUtf8ProcessEnv(processEnv)
+      }
+    ) as ChildProcessWithoutNullStreams;
   } catch {
     throw new CodexAppServerError("transport", "Codex App Server transport failed");
   }

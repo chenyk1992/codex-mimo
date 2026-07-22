@@ -168,7 +168,34 @@ describe("Codex App Server client", () => {
         })
       })
     );
+    expect(spawnMock.mock.calls[0][2]).not.toHaveProperty("shell");
     expect(process.stderr.readableFlowing).toBe(true);
+    await client.close();
+  });
+
+  it("spawns a configured executable directly without a shell", async () => {
+    const configuredCommand = "C:\\Tools\\codex.cmd";
+    const env = { CUSTOM: "value" };
+    const client = createCodexAppServerClient({
+      spawnProcess: spawnMock,
+      env,
+      command: { command: configuredCommand, source: "configured" }
+    });
+
+    expect(spawnMock).toHaveBeenCalledWith(
+      configuredCommand,
+      ["app-server", "--listen", "stdio://"],
+      expect.objectContaining({
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+        env: expect.objectContaining({
+          CUSTOM: "value",
+          PYTHONUTF8: "1",
+          PYTHONIOENCODING: "utf-8"
+        })
+      })
+    );
+    expect(spawnMock.mock.calls[0][2]).not.toHaveProperty("shell");
     await client.close();
   });
 
