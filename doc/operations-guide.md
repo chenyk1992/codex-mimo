@@ -52,13 +52,15 @@ Codex notification targets require an explicit `notify.threadId`. The launcher n
 
 ### Codex Desktop launch sequence
 
-1. Install or identify a standalone Codex CLI that can run `codex --version` from Node/PowerShell.
-2. Set `CODEX_MIMO_CODEX_BIN` before Codex Desktop starts, then restart Desktop so the plugin MCP and detached workers inherit it.
+1. Install or identify a standalone Codex CLI that can run `codex --version` from Node/PowerShell. A protected WindowsApps Desktop `codex.exe` is not a valid standalone callback CLI.
+2. Set `CODEX_MIMO_CODEX_BIN` to a runnable standalone CLI before Codex Desktop starts, then restart Codex Desktop so the plugin MCP and detached workers inherit it.
 3. Read the current task-scoped `CODEX_THREAD_ID` from the task command environment and pass it explicitly as `notify.threadId`; never store it globally.
-4. Run `mimo_healthcheck` or `codex-mimo doctor` and require `codexNotification.ok: true` before expecting callbacks.
-5. Launch one work job, stop polling, and let the callback turn call `mimo_result`.
+4. Run `mimo_healthcheck` or `codex-mimo doctor` and require `mimo_healthcheck.codexNotification.ok === true` before expecting callbacks.
+5. Launch one work job with `notify: { type: "codex", threadId: "..." }`. The launcher preflights the configured Codex CLI's launchability before job creation. Stop polling and let the callback turn call `mimo_result` and consume `mimo_result.output`.
 
-Every Codex Desktop work launch must send `notify: { type: "codex", threadId: "..." }`. The target is resolved once when the job is created. If launch fails with `Codex notification requires threadId` or a schema `threadId` required error, stop; do not retry by omitting `notify`. Do not add `CODEX_THREAD_ID` to Windows system or user environment variables. CLI may omit notify or pass `--notify codex --thread-id <id>`; Cursor companion launches omit Codex notify and use the stop hook instead.
+Every Codex Desktop work launch must send `notify: { type: "codex", threadId: "..." }`. The target is resolved once when the job is created. If launch fails with `Codex notification requires threadId` or a schema `threadId` required error, stop and keep `notify` on any later Codex callback attempt. Do not add `CODEX_THREAD_ID` to Windows system or user environment variables. CLI may omit notify or pass `--notify codex --thread-id <id>`; Cursor companion launches omit Codex notify and use the stop hook instead.
+
+If preflight failed with `codex_cli_not_found`, `codex_cli_not_executable`, or `codex_app_server_unavailable`, run `mimo_healthcheck` and configure `CODEX_MIMO_CODEX_BIN`. Preflight failure does not automatically relaunch without notify; only an explicit user choice may switch to a no-notify or Cursor companion launch.
 
 Codex delivery is at-least-once across process crashes. In normal operation, one delivery performs one `thread/resume` and one `turn/start`. If the process crashes after App Server accepts `turn/start` but before durable outbox settlement, the same persisted event ID can be retried and start a duplicate callback turn. The compact prompt exposes the event ID and warns that the notification may be a retry. Busy or temporarily unavailable tasks retry; missing, forbidden, or non-executable CLI launch failures are permanent after one attempt.
 
@@ -66,7 +68,7 @@ Codex delivery is at-least-once across process crashes. In normal operation, one
 
 | Error code | Meaning | Action |
 | --- | --- | --- |
-| `codex_cli_not_found` | No standalone CLI resolved | Set `CODEX_MIMO_CODEX_BIN` to a valid executable. |
+| `codex_cli_not_found` | No standalone CLI resolved (preflight or delivery) | Set `CODEX_MIMO_CODEX_BIN` to a valid executable. |
 | `codex_cli_not_executable` | Resolved path is blocked, including the WindowsApps Desktop binary | Use a standalone CLI outside the protected Desktop package. |
 | `codex_app_server_incompatible` | CLI protocol does not match the client | Upgrade the standalone CLI and rerun doctor. |
 | `codex_app_server_unavailable` | Temporary process/transport failure | Retry after doctor succeeds. |
@@ -105,11 +107,11 @@ Notification state is auxiliary. Delivery failure records `failed`, attempts, an
 - `mimo_status`: current job, phase, recent progress, and notification summary
 - `mimo_events`: cursor-based progress for explicit diagnosis
 - `mimo_wait`: one attention-event wait for an explicit diagnostic request
-- `mimo_result`: partial result for paused jobs or final result for terminal jobs
+- `mimo_result`: partial result for paused jobs or final result for terminal jobs. Final assistant text is available only from an explicit `mimo_result` read as `mimo_result.output`; status/jobs/signals/reports/notifications stay structural and omit model output. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
 - `mimo_cancel`: cancel queued/running work and terminate only its confirmed owned process
 - `mimo_jobs`: list recent authoritative records
 
-Normal Codex operation uses none of these until the callback turn; that turn calls `mimo_result`. Ordinary phase and milestone signals do not create a caller notification.
+Normal Codex operation uses none of these until the callback turn; that turn calls `mimo_result` and consumes `mimo_result.output`. Ordinary phase and milestone signals do not create a caller notification.
 
 ### Cursor companion zero-poll
 
@@ -165,7 +167,9 @@ The internal callback endpoint is temporary and authenticated. Callback files co
 | Webhook signature mismatch | Compute HMAC over the exact raw body and verify the named environment secret |
 | Codex target is wrong | Verify the explicit `notify.threadId` matches the originating task; never rely on a global `CODEX_THREAD_ID` |
 | Launch fails with `Codex notification requires threadId` | Do not retry by omitting `notify`; pass the current task ID explicitly as `notify.threadId` |
-| Notification shows `codex_cli_not_executable` | Point `CODEX_MIMO_CODEX_BIN` at a standalone CLI outside protected WindowsApps packages |
+| Notification shows `codex_cli_not_executable` | Point `CODEX_MIMO_CODEX_BIN` at a standalone CLI outside protected WindowsApps packages; restart Codex Desktop and confirm `mimo_healthcheck.codexNotification.ok === true` |
+| Launch preflight failed before job creation | Report the safe code; do not automatically relaunch without notify; run `mimo_healthcheck` and configure `CODEX_MIMO_CODEX_BIN` |
+| Planning job failed with `result_missing` | The planning run had no readable final result; inspect events only as a diagnostic, then re-run with a clearer task |
 | Need progress for diagnosis | Read `mimo_status` or `mimo_events`; use a single `mimo_wait` only when requested |
 | Job asks for information | Call `mimo_result`, collect the answer, then create a child with `mimo_resume` |
 | Job silent but `running` | Check `mimo_status` for `idleMs`, `lastEventAt`, and `processAlive`; raise `idleTimeoutMs` for long `parallel` runs if needed |

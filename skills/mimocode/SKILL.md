@@ -37,12 +37,13 @@ Never poll or loop on control tools. At most one `mimo_wait`, then at most one `
 
 For Codex Desktop launches:
 
-1. Send `notify: { type: "codex" }` on every work-tool launch. The packaged MCP server forwards task-scoped `CODEX_THREAD_ID`; never configure that variable as a Windows user or system environment value.
-2. If the call returns `Codex notification requires threadId`, stop. Do not retry by omitting `notify`.
-3. An explicit `threadId` is an allowed caller-supplied override when the current task ID is known:
+1. Send `notify: { type: "codex", threadId: "..." }` with the current task ID on the first attempt:
    ```json
-   { "notify": { "type": "codex", "threadId": "optional-explicit-thread" } }
+   { "notify": { "type": "codex", "threadId": "<current-task-id>" } }
    ```
+   Read `CODEX_THREAD_ID` from the task command environment and pass it as `notify.threadId`. The packaged MCP config does not forward `CODEX_THREAD_ID`; never configure that variable as a Windows user or system environment value.
+2. Before creating a job, the work tool preflights the configured Codex CLI's launchability. On preflight failure, report the safe code (for example `codex_cli_not_executable`) and stop. Only an explicit user choice may switch to no-notify or Cursor companion after seeing the diagnostic. Run `mimo_healthcheck` and configure `CODEX_MIMO_CODEX_BIN` when preflight reports `codex_cli_not_found`, `codex_cli_not_executable`, or `codex_app_server_unavailable`.
+3. If the call returns `Codex notification requires threadId` or a schema `threadId` required error, stop and keep `notify` on any later Codex callback attempt.
 4. Cursor companion launches may omit `notify` and must continue using the companion stop hook.
 5. CLI users may omit `notify` intentionally or supply `--notify codex --thread-id <id>`.
 6. Webhook settings and Codex settings remain mutually exclusive.
@@ -51,7 +52,7 @@ After a successful Codex notify launch:
 
 1. Return the queued receipt to the user. Do not call `mimo_wait` after launch.
 2. Rely on the callback turn created when the job needs attention or reaches a terminal state.
-3. When resumed by the callback turn, call `mimo_result` with the receipt's `jobId`, then inspect relevant changes and verify independently.
+3. When resumed by the callback turn, call `mimo_result(jobId)` and consume `mimo_result.output` as the explicit final assistant output, then inspect relevant changes and verify independently.
 
 A queued receipt alone does not prove a Codex notification target exists unless the explicit Codex notification launch succeeded.
 
@@ -68,7 +69,7 @@ Work tools:
 - `mimo_resume`: create a child job from a `needs_input` or `blocked` parent. Required: `cwd`, parent `jobId`, `task`.
 - `mimo_compose`: run a registered workflow. Required for every request: `cwd`, `workflow`. `brainstorm`, `plan`, `dev`, `fix`, `parallel`, `worktree`, `merge`, and `new-skill` also require `task`; `fix-ci` and `execute-plan` require `file`; `review` requires neither. `fix-ci` may additionally include `task`. Optional fields where valid are `since`, `verification`, and `reportDir`.
 
-`verification` is an array of executable commands (no shell). Put acceptance prose in `task`, not in `verification`. The `plan` workflow is read-only: it returns the plan in the job result via `mimo_result` and must not write plan files — asking it to save a file ends as `read_only_violation`.
+`verification` is an array of executable commands (no shell). Put acceptance prose in `task`, not in `verification`. The `plan` workflow is read-only: the plan body is available only as `mimo_result.output` and must not be written to plan files — asking it to save a file ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
 
 ```json
 { "workflow": "plan", "task": "Plan the feature; return the plan only" }
@@ -83,7 +84,7 @@ All work tools accept optional `model`, `timeoutMs`, `idleTimeoutMs`, and one no
 - `idleTimeoutMs`: optional idle stop-loss in milliseconds (default 30 minutes; `0` disables). Absolute `timeoutMs` is unchanged; whichever budget fires first wins.
 
 ```json
-{ "notify": { "type": "codex", "threadId": "optional-explicit-thread" } }
+{ "notify": { "type": "codex", "threadId": "<current-task-id>" } }
 ```
 
 or:
@@ -99,7 +100,7 @@ Control and inspection tools:
 - `mimo_status`: current status and notification delivery state.
 - `mimo_events`: cursor-based compact progress for diagnosis.
 - `mimo_wait`: one attention-event wait for an explicit diagnostic request.
-- `mimo_result`: compact result for `needs_input`, `blocked`, or a terminal job.
+- `mimo_result`: compact result for `needs_input`, `blocked`, or a terminal job. `mimo_result.output` is the explicit final assistant output when present.
 - `mimo_cancel`: cancel a queued or running job.
 - `mimo_jobs`: list workspace jobs.
 - `mimo_healthcheck`: check the local MiMoCode installation.
@@ -123,7 +124,7 @@ Every work tool returns only this stable receipt shape:
 ## Compose Selection
 
 - `brainstorm`: clarify requirements.
-- `plan`: produce a plan from clear requirements; read-only — returns the plan in the job result, do not ask it to write plan files.
+- `plan`: produce a plan from clear requirements; read-only — read the plan from `mimo_result.output`; do not ask it to write plan files.
 - `dev`: implement a feature with TDD, verification, and review.
 - `fix`: diagnose and repair a bug.
 - `fix-ci`: repair CI from an attached log.
@@ -146,7 +147,7 @@ For stall diagnosis only, an occasional `mimo_status` may read `idleMs` and `las
 
 - Keep delegated slices small and provide decisive verification commands (executable strings, not natural-language acceptance criteria).
 - Put state or scope prose such as `计划不修改业务源码` in `task`, not in `verification`.
-- Read `mimo_result` first; inspect linked reports, diffs, or events only when needed.
+- Read `mimo_result` first and consume `mimo_result.output` when present; inspect linked reports, diffs, or events only when needed. Reports stay structural and omit model output.
 - Never paste raw JSONL, complete prompts, or long logs into the Codex task by default.
 - After write jobs, inspect the diff and run the narrowest meaningful tests, lint, or typecheck before reporting completion.
 - Use review workflows for complex or risky changes.
