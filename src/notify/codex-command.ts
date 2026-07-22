@@ -22,14 +22,25 @@ export type CodexCommandErrorCode =
   | "codex_cli_not_executable"
   | "codex_app_server_unavailable";
 
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function osErrorCode(error: unknown): string | undefined {
+  const record = recordValue(error);
+  if (!record) return undefined;
+  if (typeof record.code === "string") return record.code;
+
+  const cause = recordValue(record.cause);
+  return typeof cause?.code === "string" ? cause.code : undefined;
+}
+
 export function codexCommandErrorCode(error: unknown): CodexCommandErrorCode {
-  if (typeof error !== "object" || error === null || !("code" in error)) {
-    return "codex_app_server_unavailable";
-  }
-  if (error.code === "ENOENT") return "codex_cli_not_found";
-  if (error.code === "EPERM" || error.code === "EACCES") {
-    return "codex_cli_not_executable";
-  }
+  const code = osErrorCode(error);
+  if (code === "ENOENT") return "codex_cli_not_found";
+  if (code === "EPERM" || code === "EACCES") return "codex_cli_not_executable";
   return "codex_app_server_unavailable";
 }
 
@@ -40,13 +51,20 @@ export interface CodexCommandProbe {
   errorCode?: CodexCommandErrorCode;
 }
 
+export interface CodexCommandExecutionResult {
+  exitCode?: number | null;
+  stdout?: string;
+  code?: unknown;
+  cause?: unknown;
+}
+
 export interface CodexCommandProbeOptions {
   env?: NodeJS.ProcessEnv;
   execute?: (
     command: string,
     args: string[],
     options: { env: NodeJS.ProcessEnv; reject: false; timeout: number }
-  ) => PromiseLike<{ exitCode: number | null; stdout: string }>;
+  ) => PromiseLike<CodexCommandExecutionResult>;
 }
 
 export async function probeCodexCommand(
@@ -62,13 +80,15 @@ export async function probeCodexCommand(
       reject: false,
       timeout: 10_000
     });
-    return result.exitCode === 0
-      ? { ok: true, source: selection.source, version: result.stdout.trim() }
-      : {
-          ok: false,
-          source: selection.source,
-          errorCode: "codex_app_server_unavailable"
-        };
+    if (result.exitCode === 0) {
+      const version = typeof result.stdout === "string" ? result.stdout.trim() : "";
+      return { ok: true, source: selection.source, version };
+    }
+    return {
+      ok: false,
+      source: selection.source,
+      errorCode: codexCommandErrorCode(result)
+    };
   } catch (error) {
     return {
       ok: false,
