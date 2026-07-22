@@ -51,6 +51,49 @@ describe("launchJob", () => {
     });
   });
 
+  it("stores a frozen Codex target for an explicit Codex launch with task-scoped thread ID", async () => {
+    const cwd = workspace();
+    const spawnJobSupervisor = vi.fn().mockReturnValue(123);
+    const receipt = await launchJob({
+      kind: "plan",
+      cwd,
+      task: "Plan it",
+      request: { cwd, task: "Plan it" },
+      notify: { type: "codex" }
+    }, {
+      env: { CODEX_THREAD_ID: "task-123" },
+      spawnJobSupervisor
+    });
+
+    expect(spawnJobSupervisor).toHaveBeenCalledOnce();
+    expect(readJob(cwd, receipt.jobId)?.notificationTarget).toEqual({
+      type: "codex",
+      threadId: "task-123"
+    });
+  });
+
+  it("does not create a job or spawn when explicit Codex target resolution fails", async () => {
+    const cwd = workspace();
+    const createJob = vi.fn();
+    const spawnJobSupervisor = vi.fn();
+
+    await expect(launchJob({
+      kind: "plan",
+      cwd,
+      task: "Plan it",
+      request: { cwd, task: "Plan it" },
+      notify: { type: "codex" }
+    }, {
+      env: {},
+      createJob,
+      spawnJobSupervisor
+    })).rejects.toThrow("Codex notification requires threadId");
+
+    expect(createJob).not.toHaveBeenCalled();
+    expect(spawnJobSupervisor).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(cwd, ".codex-mimo", "jobs"))).toBe(false);
+  });
+
   it("persists no target when neither explicit notify nor CODEX_THREAD_ID exists", async () => {
     const cwd = workspace();
     const receipt = await launchJob({

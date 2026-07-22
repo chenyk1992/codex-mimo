@@ -35,12 +35,25 @@ Never poll or loop on control tools. At most one `mimo_wait`, then at most one `
 
 ### Codex notify (callback-driven)
 
-For Codex Desktop with task-injected `CODEX_THREAD_ID` or an explicit `notify: { type: "codex" }` target:
+For Codex Desktop launches:
 
-1. Call one work tool with the complete task and workspace.
-2. Return the queued receipt to the user. Do not call `mimo_wait` after launch.
-3. Rely on the callback turn created when the job needs attention or reaches a terminal state.
-4. When resumed by the callback turn, call `mimo_result` with the receipt's `jobId`, then inspect relevant changes and verify independently.
+1. Send `notify: { type: "codex" }` on every work-tool launch. The packaged MCP server forwards task-scoped `CODEX_THREAD_ID`; never configure that variable as a Windows user or system environment value.
+2. If the call returns `Codex notification requires threadId`, stop. Do not retry by omitting `notify`.
+3. An explicit `threadId` is an allowed caller-supplied override when the current task ID is known:
+   ```json
+   { "notify": { "type": "codex", "threadId": "optional-explicit-thread" } }
+   ```
+4. Cursor companion launches may omit `notify` and must continue using the companion stop hook.
+5. CLI users may omit `notify` intentionally or supply `--notify codex --thread-id <id>`.
+6. Webhook settings and Codex settings remain mutually exclusive.
+
+After a successful Codex notify launch:
+
+1. Return the queued receipt to the user. Do not call `mimo_wait` after launch.
+2. Rely on the callback turn created when the job needs attention or reaches a terminal state.
+3. When resumed by the callback turn, call `mimo_result` with the receipt's `jobId`, then inspect relevant changes and verify independently.
+
+A queued receipt alone does not prove a Codex notification target exists unless the explicit Codex notification launch succeeded.
 
 Use `mimo_status`, `mimo_events`, or one `mimo_wait` only for explicit user diagnostics on any path. Normal progress does not require a caller tool turn.
 
@@ -69,7 +82,7 @@ or:
 { "notify": { "type": "webhook", "url": "https://receiver.example/jobs", "secretEnv": "WEBHOOK_SECRET" } }
 ```
 
-If Codex omits `notify`, the plugin uses the current task's injected `CODEX_THREAD_ID` when available. Never ask the user to configure that variable globally.
+Webhook and Codex notification settings are mutually exclusive. Never ask the user to configure `CODEX_THREAD_ID` globally.
 
 Control and inspection tools:
 
@@ -115,7 +128,7 @@ Every work tool returns only this stable receipt shape:
 
 When MiMo stdout goes silent longer than `idleTimeoutMs`, the job worker terminates the process tree and finalizes as `timeout` with `errorCode: idle_timeout`. Treat this like any other attention terminal: wait for the callback turn (or user follow-up), then call `mimo_result` with the receipt's `jobId`.
 
-Codex auto-callback requires a notification target — injected `CODEX_THREAD_ID` or explicit `notify: { type: "codex", ... }`. Without notify, the terminal state is persisted on disk only; discover it via `mimo_jobs` or an explicit user request.
+Distinguish wakeup paths: MiMo `session.post` is execution evidence; Codex notification wakes the originating task; Cursor companion uses the host stop hook. A work receipt alone does not prove a Codex notification target exists unless the explicit Codex notification launch succeeded. Without a frozen Codex target, the terminal state is on disk only — discover it via `mimo_jobs` or an explicit user request.
 
 For stall diagnosis only, an occasional `mimo_status` may read `idleMs` and `lastEventAt` while a job is `running`. Never poll or loop on control tools while a job is active.
 

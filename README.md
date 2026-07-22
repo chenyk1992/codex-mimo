@@ -83,11 +83,21 @@ The default Codex flow does not call `mimo_wait`. Codex returns the receipt, the
 
 Each job freezes at most one target when it is created. Resolution order is explicit `notify`, the current process's `CODEX_THREAD_ID`, then no notification.
 
-Codex Desktop injects `CODEX_THREAD_ID` for each task. Windows users do not need to configure it, and must not set it globally: a stale global value can route a new job to an old task. An explicit Codex target remains available when needed:
+Distinguish three independent signals:
+
+- MiMo `session.post` — execution evidence that the MiMoCode run finished (or failed) inside the job worker.
+- Codex notification — wakes the originating Codex Desktop task through the frozen Codex target.
+- Cursor companion — host stop-hook wakeup; launch without Codex `notify` and continue using the companion path.
+
+A queued work receipt alone does not prove a Codex notification target exists unless the explicit Codex notification launch succeeded.
+
+For Codex Desktop, send `notify: { type: "codex" }` on every work-tool launch so the packaged MCP `env_vars` forwarding can bind the task-scoped `CODEX_THREAD_ID`. If launch fails with `Codex notification requires threadId`, stop and do not retry by omitting `notify`. Windows users must not set `CODEX_THREAD_ID` globally: a stale global value can route a new job to an old task. An explicit Codex target remains available when the current task ID is known:
 
 ```json
 { "notify": { "type": "codex", "threadId": "thread-id" } }
 ```
+
+CLI users may omit `notify` intentionally or supply `--notify codex --thread-id <id>`. Cursor companion launches may omit Codex notify. Webhook and Codex notification settings remain mutually exclusive.
 
 Codex delivery is at-least-once across process crashes. In normal operation, one delivery performs one `thread/resume` and one `turn/start`. If the notification process crashes after App Server accepts `turn/start` but before the outbox is settled, the same persisted event ID can be retried and start a duplicate callback turn. The callback prompt includes that event ID and identifies the notification as a possible retry; repeated `mimo_result` reads remain read-only.
 

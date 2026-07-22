@@ -34,15 +34,23 @@ Every work request may include optional `idleTimeoutMs` (default 30 minutes; `0`
 
 When silence exceeds the budget, the worker kills the MiMo process tree and finalizes as `timeout` with `errorCode: idle_timeout` (distinct from absolute run-budget timeout, which keeps `errorCode: timeout`). This emits an attention signal and enqueues outbox delivery like other terminal attention events.
 
-Long workflows such as `parallel` may need a raised `idleTimeoutMs` when subagents can run for extended periods without JSONL. Codex auto-callback requires a notification target — task-injected `CODEX_THREAD_ID` or explicit `notify: { type: "codex", ... }`. Without notify, the terminal state is on disk only.
+Long workflows such as `parallel` may need a raised `idleTimeoutMs` when subagents can run for extended periods without JSONL.
+
+Distinguish wakeup paths:
+
+- MiMo `session.post` — execution evidence inside the job worker; missing/error/cancelled callbacks can fail the job even with exit code 0.
+- Codex notification — original task wakeup through a frozen Codex target.
+- Cursor companion — host stop-hook wakeup without Codex `notify`.
+
+A work receipt alone does not prove a notification target exists unless the explicit Codex notification launch succeeded. Without a frozen Codex target, the terminal state is on disk only.
 
 While a job is `running`, `mimo_status` exposes live stall fields: `lastEventAt`, computed `idleMs`, `lastTool`, `processAlive`, and effective `idleTimeoutMs`. Use an occasional `mimo_status` for explicit diagnosis only; do not poll or loop on control tools during normal operation.
 
 ## Codex Task Target
 
-Codex Desktop injects `CODEX_THREAD_ID` into the plugin process for the current task. It is resolved once when the job is created. It is not a machine configuration setting.
+The packaged MCP config forwards task-scoped `CODEX_THREAD_ID` through `env_vars` into the plugin STDIO server. Codex Desktop work launches should send `notify: { type: "codex" }` so that value freezes onto the job. It is resolved once when the job is created. It is not a machine configuration setting.
 
-Do not add `CODEX_THREAD_ID` to Windows system or user environment variables. A global value outlives its task and can misroute later completions. Use an explicit `notify: { type: "codex", threadId: "..." }` only when a caller must override the current task.
+If launch fails with `Codex notification requires threadId`, stop; do not retry by omitting `notify`. Do not add `CODEX_THREAD_ID` to Windows system or user environment variables. A global value outlives its task and can misroute later completions. Use an explicit `notify: { type: "codex", threadId: "..." }` only when a caller must override the current task. CLI may omit notify or pass `--notify codex --thread-id <id>`; Cursor companion launches omit Codex notify and use the stop hook instead.
 
 Codex delivery is at-least-once across process crashes. In normal operation, one delivery performs one `thread/resume` and one `turn/start`. If the process crashes after App Server accepts `turn/start` but before durable outbox settlement, the same persisted event ID can be retried and start a duplicate callback turn. The compact prompt exposes the event ID and warns that the notification may be a retry. Busy or temporarily unavailable tasks retry; missing or forbidden tasks are permanent failures.
 
@@ -136,12 +144,13 @@ The internal callback endpoint is temporary and authenticated. Callback files co
 | Job completed but notification failed | Inspect `notification.lastError`; job result remains valid |
 | Webhook gets duplicates | Deduplicate by `X-Codex-Mimo-Event-Id` |
 | Webhook signature mismatch | Compute HMAC over the exact raw body and verify the named environment secret |
-| Codex target is wrong | Remove any globally configured `CODEX_THREAD_ID`; let the current task inject it |
+| Codex target is wrong | Remove any globally configured `CODEX_THREAD_ID`; let the current task inject it via packaged `env_vars` |
+| Launch fails with `Codex notification requires threadId` | Do not retry by omitting `notify`; fix task-scoped forwarding or supply an explicit `threadId` |
 | Need progress for diagnosis | Read `mimo_status` or `mimo_events`; use a single `mimo_wait` only when requested |
 | Job asks for information | Call `mimo_result`, collect the answer, then create a child with `mimo_resume` |
 | Job silent but `running` | Check `mimo_status` for `idleMs`, `lastEventAt`, and `processAlive`; raise `idleTimeoutMs` for long `parallel` runs if needed |
 | Job ended `timeout` / `idle_timeout` | Treat like other attention terminals: callback turn → `mimo_result`; re-run with a narrower task or larger idle budget if appropriate |
-| Terminal job but no Codex callback | Confirm notify target (`CODEX_THREAD_ID` or explicit `notify`); without it, state is on disk only — read `mimo_result` or `mimo_jobs` |
+| Terminal job but no Codex callback | Confirm a frozen Codex target existed at launch; a receipt alone is not proof — without a target, state is on disk only (`mimo_result` / `mimo_jobs`) |
 
 ## Disable or Roll Back
 
