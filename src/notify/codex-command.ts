@@ -138,7 +138,7 @@ function deDuplicateCandidates(
   });
 }
 
-function discoverCodexCandidates(
+export function discoverCodexCandidates(
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform
 ): CodexCommandSelection[] {
@@ -201,7 +201,7 @@ export interface CodexCommandProbeOptions {
   ) => PromiseLike<CodexCommandExecutionResult>;
 }
 
-function classifyProbeFailure(
+export function classifyCodexCommandFailure(
   error: unknown,
   command: string
 ): CodexCommandErrorCode {
@@ -247,13 +247,13 @@ export async function probeCodexCommand(
       failure = {
         ok: false,
         source: candidate.source,
-        errorCode: classifyProbeFailure(result, candidate.command)
+        errorCode: classifyCodexCommandFailure(result, candidate.command)
       };
     } catch (error) {
       failure = {
         ok: false,
         source: candidate.source,
-        errorCode: classifyProbeFailure(error, candidate.command)
+        errorCode: classifyCodexCommandFailure(error, candidate.command)
       };
     }
     if (candidate.source === "configured") return failure;
