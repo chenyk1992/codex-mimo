@@ -389,6 +389,138 @@ describe("notification outbox", () => {
     expect(journal).not.toContain("arbitrary");
   });
 
+  it("persists allowlisted lastErrorCode on failure and retry settlement", async () => {
+    const file = tempOutbox();
+    const { delivery } = await enqueueDelivery(file, {
+      jobId: "implement-5",
+      signalCursor: 1,
+      target,
+      createdAt: now
+    });
+    const claim = (await claimDueDelivery(file, new Date(now), 30_000))!;
+
+    const failed = await failDelivery(
+      file,
+      delivery.id,
+      claim.attempts,
+      "Codex App Server executable is unavailable",
+      "codex_cli_not_executable"
+    );
+    expect(failed).toMatchObject({
+      status: "failed",
+      attempts: 1,
+      lastError: "Codex App Server executable is unavailable",
+      lastErrorCode: "codex_cli_not_executable"
+    });
+    expect(readDeliveries(file)[0]).toMatchObject({
+      status: "failed",
+      attempts: 1,
+      lastError: "Codex App Server executable is unavailable",
+      lastErrorCode: "codex_cli_not_executable"
+    });
+
+    const { delivery: retryTarget } = await enqueueDelivery(file, {
+      jobId: "implement-6",
+      signalCursor: 1,
+      target,
+      createdAt: now
+    });
+    const retryClaim = (await claimDueDelivery(file, new Date(now), 30_000))!;
+    const retried = await retryDelivery(
+      file,
+      retryTarget.id,
+      retryClaim.attempts,
+      new Date("2026-07-16T00:00:10.000Z"),
+      "Codex thread is busy",
+      "codex_thread_busy"
+    );
+    expect(retried).toMatchObject({
+      status: "pending",
+      lastError: "Codex thread is busy",
+      lastErrorCode: "codex_thread_busy"
+    });
+  });
+
+  it("clears stale lastErrorCode when settlement omits errorCode", async () => {
+    const file = tempOutbox();
+    const id = "review-3:1:codex";
+    fs.writeFileSync(file, `${JSON.stringify({
+      id,
+      eventId: id,
+      jobId: "review-3",
+      signalCursor: 1,
+      target,
+      status: "delivering",
+      attempts: 1,
+      createdAt: now,
+      leaseUntil: "2026-07-16T00:00:30.000Z",
+      lastError: "Codex thread is busy",
+      lastErrorCode: "codex_thread_busy"
+    })}\n`, "utf8");
+
+    const retried = await retryDelivery(
+      file,
+      id,
+      1,
+      new Date("2026-07-16T00:00:10.000Z"),
+      "offline"
+    );
+    expect(retried.lastErrorCode).toBeUndefined();
+    expect(readDeliveries(file)[0].lastErrorCode).toBeUndefined();
+  });
+
+  it("drops non-allowlisted lastErrorCode during journal replay", async () => {
+    const file = tempOutbox();
+    const { delivery } = await enqueueDelivery(file, {
+      jobId: "fix-3",
+      signalCursor: 1,
+      target,
+      createdAt: now
+    });
+    fs.appendFileSync(file, `${JSON.stringify({
+      ...delivery,
+      status: "failed",
+      attempts: 1,
+      lastError: "Codex App Server executable is unavailable",
+      lastErrorCode: "private_arbitrary_value"
+    })}\n`, "utf8");
+
+    expect(readDeliveries(file)[0]).toMatchObject({
+      status: "failed",
+      attempts: 1,
+      lastError: "Codex App Server executable is unavailable"
+    });
+    expect(readDeliveries(file)[0]).not.toHaveProperty("lastErrorCode");
+  });
+
+  it("replays existing journal records without lastErrorCode", async () => {
+    const file = tempOutbox();
+    const id = "legacy-1:1:codex";
+    fs.writeFileSync(file, `${JSON.stringify({
+      id,
+      eventId: id,
+      jobId: "legacy-1",
+      signalCursor: 1,
+      target,
+      status: "failed",
+      attempts: 1,
+      createdAt: now,
+      lastError: "Notification delivery failed"
+    })}\n`, "utf8");
+
+    expect(readDeliveries(file)[0]).toEqual({
+      id,
+      eventId: id,
+      jobId: "legacy-1",
+      signalCursor: 1,
+      target,
+      status: "failed",
+      attempts: 1,
+      createdAt: now,
+      lastError: "Notification delivery failed"
+    });
+  });
+
   it.each([
     ["id", { id: "identity-1:2:codex" }],
     ["eventId", { eventId: "identity-1:2:codex" }],

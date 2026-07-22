@@ -132,6 +132,44 @@ describe("compact job rendering", () => {
     });
   });
 
+  it("exposes allowlisted notification errorCode with a generic lastError", () => {
+    const rendered = renderJobStatus(job({ status: "completed", phase: undefined }), {
+      notification: {
+        targetType: "codex",
+        status: "failed",
+        attempts: 1,
+        lastError: "Codex App Server executable is unavailable",
+        errorCode: "codex_cli_not_executable"
+      }
+    });
+
+    expect(rendered.notification).toEqual({
+      targetType: "codex",
+      status: "failed",
+      attempts: 1,
+      lastError: "Notification delivery requires attention.",
+      errorCode: "codex_cli_not_executable"
+    });
+  });
+
+  it("drops non-allowlisted notification errorCode from public rendering", () => {
+    const rendered = renderJobResult(job({ status: "completed", phase: undefined }), {
+      targetType: "codex",
+      status: "failed",
+      attempts: 1,
+      lastError: "secret detail",
+      errorCode: "private_arbitrary_value" as never
+    });
+
+    expect(rendered.notification).toEqual({
+      targetType: "codex",
+      status: "failed",
+      attempts: 1,
+      lastError: "Notification delivery requires attention."
+    });
+    expect(JSON.stringify(rendered.notification)).not.toContain("private_arbitrary_value");
+  });
+
   it("keeps generic failed summaries for unknown errorCode values", () => {
     const failed = job({
       status: "failed",

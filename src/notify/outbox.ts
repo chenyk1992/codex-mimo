@@ -6,9 +6,10 @@ import { renameWithWindowsRetry } from "../core/atomic-file.js";
 import type {
   EnqueueDeliveryInput,
   NotificationDelivery,
+  NotificationErrorCode,
   NotificationTarget
 } from "./types.js";
-import { StaleDeliveryGenerationError as StaleGenerationError } from "./types.js";
+import { isNotificationErrorCode, StaleDeliveryGenerationError as StaleGenerationError } from "./types.js";
 
 export interface EnqueueDeliveryResult {
   delivery: NotificationDelivery;
@@ -140,7 +141,8 @@ export function retryDelivery(
   id: string,
   expectedAttempt: number,
   nextAttemptAt: Date,
-  lastError: string
+  lastError: string,
+  errorCode?: NotificationErrorCode
 ): Promise<NotificationDelivery> {
   return updateDelivery(file, id, expectedAttempt, (delivery) => {
     const retried: NotificationDelivery = {
@@ -151,6 +153,11 @@ export function retryDelivery(
     };
     delete retried.leaseUntil;
     delete retried.deliveredAt;
+    if (errorCode !== undefined) {
+      retried.lastErrorCode = errorCode;
+    } else {
+      delete retried.lastErrorCode;
+    }
     return retried;
   });
 }
@@ -159,7 +166,8 @@ export function failDelivery(
   file: string,
   id: string,
   expectedAttempt: number,
-  lastError: string
+  lastError: string,
+  errorCode?: NotificationErrorCode
 ): Promise<NotificationDelivery> {
   return updateDelivery(file, id, expectedAttempt, (delivery) => {
     const failed: NotificationDelivery = {
@@ -170,6 +178,11 @@ export function failDelivery(
     delete failed.leaseUntil;
     delete failed.nextAttemptAt;
     delete failed.deliveredAt;
+    if (errorCode !== undefined) {
+      failed.lastErrorCode = errorCode;
+    } else {
+      delete failed.lastErrorCode;
+    }
     return failed;
   });
 }
@@ -306,6 +319,9 @@ function sanitizeNotificationDelivery(value: unknown): NotificationDelivery | un
   if (typeof value.leaseUntil === "string") delivery.leaseUntil = value.leaseUntil;
   if (typeof value.deliveredAt === "string") delivery.deliveredAt = value.deliveredAt;
   if (typeof value.lastError === "string") delivery.lastError = value.lastError;
+  if (isNotificationErrorCode(value.lastErrorCode)) {
+    delivery.lastErrorCode = value.lastErrorCode;
+  }
   return delivery;
 }
 

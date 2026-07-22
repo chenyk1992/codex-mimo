@@ -9,6 +9,7 @@ import {
   retryDelayMs,
   summarizeJobNotification
 } from "../../../src/notify/dispatcher.js";
+import { CodexAppServerError } from "../../../src/notify/codex-app-server.js";
 import {
   claimDueDelivery,
   enqueueDelivery,
@@ -581,6 +582,72 @@ describe("notification dispatcher", () => {
     expect(fs.readFileSync(job.notificationOutboxFile, "utf8")).not.toContain("do-not-leak");
   });
 
+  it("passes adapter errorCode into durable failure settlement", async () => {
+    const cwd = makeCwd();
+    const { job } = await makeDelivery(cwd);
+
+    await dispatchNextDelivery(cwd, {
+      now: () => new Date(createdAt),
+      deliver: async () => ({
+        outcome: "permanent",
+        error: "Codex App Server executable is unavailable",
+        errorCode: "codex_cli_not_executable"
+      })
+    });
+
+    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+      status: "failed",
+      attempts: 1,
+      lastError: "Codex App Server executable is unavailable",
+      lastErrorCode: "codex_cli_not_executable"
+    });
+  });
+
+  it("passes adapter errorCode into durable retry settlement", async () => {
+    const cwd = makeCwd();
+    const { job } = await makeDelivery(cwd);
+
+    await dispatchNextDelivery(cwd, {
+      now: () => new Date(createdAt),
+      deliver: async () => ({
+        outcome: "retry",
+        error: "Codex thread is busy",
+        errorCode: "codex_thread_busy"
+      })
+    });
+
+    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+      status: "pending",
+      attempts: 1,
+      lastError: "Codex thread is busy",
+      lastErrorCode: "codex_thread_busy"
+    });
+  });
+
+  it("fails permanently after one attempt when Codex client construction throws", async () => {
+    const cwd = makeCwd();
+    const { job } = await makeDelivery(cwd);
+    const createCodexClient = vi.fn(() => {
+      throw new CodexAppServerError(
+        "codex_cli_not_executable",
+        "Codex App Server executable is unavailable"
+      );
+    });
+
+    await dispatchNextDelivery(cwd, {
+      now: () => new Date(createdAt),
+      createCodexClient
+    });
+
+    expect(createCodexClient).toHaveBeenCalledOnce();
+    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+      status: "failed",
+      attempts: 1,
+      lastError: "Codex App Server executable is unavailable"
+    });
+    expect(readDeliveries(job.notificationOutboxFile)[0].nextAttemptAt).toBeUndefined();
+  });
+
   it("summarizes only the latest delivery's public status fields", async () => {
     const cwd = makeCwd();
     const { job, delivery } = await makeDelivery(cwd, {
@@ -595,7 +662,8 @@ describe("notification dispatcher", () => {
       signalCursor: 2,
       status: "failed",
       attempts: 3,
-      lastError: "Webhook request failed"
+      lastError: "Webhook request failed",
+      lastErrorCode: "codex_app_server_unavailable"
     };
 
     const summary = summarizeJobNotification(job, [delivery, latest]);
@@ -604,7 +672,8 @@ describe("notification dispatcher", () => {
       type: "webhook",
       status: "failed",
       attempts: 3,
-      lastError: "Webhook request failed"
+      lastError: "Webhook request failed",
+      errorCode: "codex_app_server_unavailable"
     });
     expect(JSON.stringify(summary)).not.toContain("private.example");
     expect(JSON.stringify(summary)).not.toContain("PRIVATE_SECRET");

@@ -5,6 +5,7 @@ import type {
   JobStatusResult,
   JobVerification
 } from "./jobs.js";
+import { isNotificationErrorCode } from "../notify/types.js";
 import { publicProgressSummary } from "./public-summary.js";
 
 function elapsedMs(job: JobRecord, nowMs = Date.now()): number | null {
@@ -130,6 +131,9 @@ function publicNotification(notification: JobNotificationStatus): JobNotificatio
     attempts: notification.attempts,
     ...(notification.lastError !== undefined
       ? { lastError: publicProgressSummary({ type: "notification" }) }
+      : {}),
+    ...(notification.errorCode !== undefined && isNotificationErrorCode(notification.errorCode)
+      ? { errorCode: notification.errorCode }
       : {})
   };
 }

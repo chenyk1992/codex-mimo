@@ -7,7 +7,7 @@ import {
   type CodexAppServerClient,
   type CodexAppServerClientOptions
 } from "./codex-app-server.js";
-import { deliverCodexNotification } from "./codex-adapter.js";
+import { classifyCodexError, deliverCodexNotification } from "./codex-adapter.js";
 import {
   claimDueDelivery,
   completeDelivery,
@@ -61,6 +61,7 @@ export interface JobNotificationSummary {
   status: NotificationDelivery["status"];
   attempts: number;
   lastError?: string;
+  errorCode?: NotificationDelivery["lastErrorCode"];
 }
 
 export function retryDelayMs(attempts: number): number {
@@ -121,7 +122,13 @@ export async function dispatchNextDelivery(
   if (result.outcome === "permanent" ||
       settledAt.getTime() - Date.parse(claimed.createdAt) >= MAX_RETRY_AGE_MS) {
     return settleDelivery(outboxFile, claimed, () =>
-      failDelivery(outboxFile, claimed.id, claimed.attempts, result.error)
+      failDelivery(
+        outboxFile,
+        claimed.id,
+        claimed.attempts,
+        result.error,
+        result.errorCode
+      )
     );
   }
 
@@ -131,7 +138,8 @@ export async function dispatchNextDelivery(
       claimed.id,
       claimed.attempts,
       new Date(settledAt.getTime() + retryDelayMs(claimed.attempts)),
-      result.error
+      result.error,
+      result.errorCode
     )
   );
 }
@@ -152,7 +160,8 @@ export function summarizeJobNotification(
     type: latest.target.type,
     status: latest.status,
     attempts: latest.attempts,
-    ...(latest.lastError === undefined ? {} : { lastError: latest.lastError })
+    ...(latest.lastError === undefined ? {} : { lastError: latest.lastError }),
+    ...(latest.lastErrorCode === undefined ? {} : { errorCode: latest.lastErrorCode })
   };
 }
 

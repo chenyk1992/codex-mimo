@@ -1,4 +1,4 @@
-import type { NotificationTarget } from "../notify/types.js";
+import type { NotificationErrorCode, NotificationTarget } from "../notify/types.js";
 
 export type JobStatus =
   | "queued"
@@ -149,6 +149,7 @@ export interface JobNotificationStatus {
   status: "pending" | "delivering" | "delivered" | "failed";
   attempts: number;
   lastError?: string;
+  errorCode?: NotificationErrorCode;
 }
 
 export interface JobResult {

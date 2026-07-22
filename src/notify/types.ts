@@ -1,5 +1,5 @@
 export type NotificationInput =
-  | { type: "codex"; threadId?: string }
+  | { type: "codex"; threadId: string }
   | { type: "webhook"; url: string; secretEnv: string };
 
 export type NotificationTarget =
@@ -7,6 +7,23 @@ export type NotificationTarget =
   | { type: "webhook"; url: string; secretEnv: string };
 
 export type DeliveryStatus = "pending" | "delivering" | "delivered" | "failed";
+
+export const NOTIFICATION_ERROR_CODES = [
+  "codex_cli_not_found",
+  "codex_cli_not_executable",
+  "codex_app_server_unavailable",
+  "codex_app_server_incompatible",
+  "codex_thread_busy",
+  "codex_thread_missing",
+  "codex_thread_forbidden"
+] as const;
+
+export type NotificationErrorCode = typeof NOTIFICATION_ERROR_CODES[number];
+
+export function isNotificationErrorCode(value: unknown): value is NotificationErrorCode {
+  return typeof value === "string" &&
+    (NOTIFICATION_ERROR_CODES as readonly string[]).includes(value);
+}
 
 export interface NotificationDelivery {
   id: string;
@@ -21,6 +38,7 @@ export interface NotificationDelivery {
   leaseUntil?: string;
   deliveredAt?: string;
   lastError?: string;
+  lastErrorCode?: NotificationErrorCode;
 }
 
 export interface EnqueueDeliveryInput {
@@ -32,8 +50,8 @@ export interface EnqueueDeliveryInput {
 
 export type DeliveryAttemptResult =
   | { outcome: "delivered" }
-  | { outcome: "retry"; error: string }
-  | { outcome: "permanent"; error: string };
+  | { outcome: "retry"; error: string; errorCode?: NotificationErrorCode }
+  | { outcome: "permanent"; error: string; errorCode?: NotificationErrorCode };
 
 export class StaleDeliveryGenerationError extends Error {
   readonly code = "STALE_DELIVERY_GENERATION" as const;
