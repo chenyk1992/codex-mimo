@@ -72,7 +72,8 @@ export function renderJobStatus(
 
 export function renderJobResult(
   job: JobRecord,
-  notification?: JobNotificationStatus
+  notification?: JobNotificationStatus,
+  output?: string
 ): JobResult {
   const partial = job.status === "needs_input" || job.status === "blocked";
   return {
@@ -103,6 +104,7 @@ export function renderJobResult(
     ...(job.errorCode ? { errorCode: job.errorCode } : {}),
     ...(job.reportPaths ? { reportPaths: { ...job.reportPaths } } : {}),
     ...(notification ? { notification: publicNotification(notification) } : {}),
+    ...(output?.trim() ? { output } : {}),
     actions: {
       status: "mimo_status",
       events: "mimo_events",

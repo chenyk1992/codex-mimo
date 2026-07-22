@@ -27,6 +27,7 @@ import {
 } from "../core/job-process.js";
 import type { JobNotificationStatus, JobRecord } from "../core/jobs.js";
 import { renderJobResult, renderJobStatus } from "../core/job-render.js";
+import { readFinalJobOutput } from "../core/job-output.js";
 import { readRecentJobLogLines } from "../core/job-log.js";
 import {
   isAttentionSignal,
@@ -257,7 +258,7 @@ export async function mimoResult(input: unknown) {
   if (!isResultStatus(job.status)) {
     throw new Error(`Job result is not available while ${job.id} is ${job.status}.`);
   }
-  return renderJobResult(job, notificationStatus(job));
+  return renderJobResult(job, notificationStatus(job), readFinalJobOutput(job.eventsFile));
 }
 
 export interface MimoJobsDependencies {

@@ -60,7 +60,11 @@ describe("public progress summary boundary", () => {
         error: marker
       }
     });
-    expect(JSON.stringify(await mimoResult({ cwd, jobId: job.id }))).not.toContain(marker);
+    const result = await mimoResult({ cwd, jobId: job.id });
+    expect(result.output).toBe(marker);
+    const resultWithoutOutput = { ...result };
+    delete resultWithoutOutput.output;
+    expect(JSON.stringify(resultWithoutOutput)).not.toContain(marker);
 
     const report = createComposeReport({
       id: job.id,

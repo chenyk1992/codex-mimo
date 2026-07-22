@@ -167,6 +167,7 @@ export interface JobResult {
   errorCode?: string;
   reportPaths?: JobReportPaths;
   notification?: JobNotificationStatus;
+  output?: string;
   actions: {
     status: "mimo_status";
     events: "mimo_events";

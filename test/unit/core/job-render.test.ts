@@ -184,5 +184,6 @@ describe("renderJobStatus idle and process observability fields", () => {
       processAlive: false
     });
     expect(JSON.stringify(status)).not.toMatch(/PRIVATE|request|prompt|logFile|eventsFile|signalsFile|outbox/i);
+    expect(status).not.toHaveProperty("output");
   });
 });
