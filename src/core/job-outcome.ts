@@ -11,6 +11,7 @@ export interface RunEvidence {
   executionCallback?: ExecutionCallbackSummary;
   verification: JobVerification[];
   finalText: string;
+  requireFinalText?: boolean;
 }
 
 export interface JobOutcome {
@@ -129,6 +130,16 @@ export function classifyRunOutcome(evidence: RunEvidence): JobOutcome {
       ? "MiMoCode run was aborted by the host."
       : `MiMoCode exited with code ${evidence.exitCode}.`;
     return failureOutcome("failed", "MiMoCode execution failed.", "mimo_exit_nonzero", common, error);
+  }
+
+  if (evidence.requireFinalText && !finalText) {
+    return failureOutcome(
+      "failed",
+      "MiMoCode did not return a final result.",
+      "result_missing",
+      common,
+      "MiMoCode did not return a final result."
+    );
   }
 
   return {

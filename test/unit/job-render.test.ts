@@ -184,4 +184,15 @@ describe("compact job rendering", () => {
     expect(renderJobResult(failed).error).toBe("MiMoCode job failed.");
     expect(JSON.stringify(renderJobResult(failed))).not.toContain("SECRET");
   });
+
+  it("includes an explicitly supplied non-empty output on result only", () => {
+    const output = "# Plan\n\nBody";
+    const completed = job({ status: "completed", phase: undefined });
+    const result = renderJobResult(completed, undefined, output);
+    expect(result.output).toBe(output);
+    expect(renderJobStatus(completed)).not.toHaveProperty("output");
+    expect(renderJobResult(completed)).not.toHaveProperty("output");
+    expect(renderJobResult(completed, undefined, "")).not.toHaveProperty("output");
+    expect(renderJobResult(completed, undefined, "   ")).not.toHaveProperty("output");
+  });
 });

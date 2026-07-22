@@ -188,6 +188,66 @@ describe("run outcome classification", () => {
     });
   });
 
+  it("fails with result_missing when final text is required and empty", () => {
+    expect(classifyRunOutcome(evidence({
+      finalText: "",
+      requireFinalText: true
+    }))).toEqual({
+      status: "failed",
+      summary: "MiMoCode did not return a final result.",
+      sessionId: "ses-1",
+      verification: [{ command: "npm test", exitCode: 0, passed: true }],
+      executionCallback: completedCallback,
+      error: "MiMoCode did not return a final result.",
+      errorCode: "result_missing"
+    });
+  });
+
+  it("fails with result_missing for whitespace-only final text when required", () => {
+    expect(classifyRunOutcome(evidence({
+      finalText: "   \n\t  ",
+      requireFinalText: true
+    }))).toMatchObject({
+      status: "failed",
+      errorCode: "result_missing",
+      summary: "MiMoCode did not return a final result.",
+      error: "MiMoCode did not return a final result."
+    });
+  });
+
+  it("completes when required final text is non-empty", () => {
+    expect(classifyRunOutcome(evidence({
+      finalText: "# Plan\n\nDo the work.",
+      requireFinalText: true
+    }))).toMatchObject({ status: "completed" });
+  });
+
+  it("preserves completion for empty final text when requireFinalText is omitted or false", () => {
+    expect(classifyRunOutcome(evidence({ finalText: "" }))).toMatchObject({ status: "completed" });
+    expect(classifyRunOutcome(evidence({
+      finalText: "",
+      requireFinalText: false
+    }))).toMatchObject({ status: "completed" });
+  });
+
+  it.each([
+    [{ terminationReason: "user_cancelled" as const }, "cancelled"],
+    [{ terminationReason: "process_timeout" as const }, "timeout"],
+    [{
+      executionCallback: {
+        invocationId: "inv-1",
+        outcome: "missing" as const
+      }
+    }, "callback_missing"],
+    [{ verification: [{ command: "npm test", exitCode: 1, passed: false }] }, "verification_failed"]
+  ])("keeps higher-precedence failures over result_missing: %j", (patch, errorCode) => {
+    expect(classifyRunOutcome(evidence({
+      finalText: "",
+      requireFinalText: true,
+      ...patch
+    })).errorCode).toBe(errorCode);
+  });
+
   it.each([
     ["completed", "Implementation complete.\n" + "PROMPT_ECHO_SECRET ".repeat(200)],
     ["needs_input", "Please provide PROMPT_ECHO_SECRET before continuing."],

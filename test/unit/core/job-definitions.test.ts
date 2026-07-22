@@ -476,6 +476,49 @@ describe("job finalization", () => {
     }
   );
 
+  it.each([
+    ["direct plan", "plan", { task: "plan it" }, true],
+    ["compose plan", "compose", { workflow: "plan" as const, task: "plan it" }, true],
+    ["direct implement", "implement", { task: "build it", allowWrite: true as const }, false],
+    ["compose review", "compose", { workflow: "review" as const, task: "review it" }, false]
+  ] as const)("requires final text only for planning entry points: %s", async (_label, kind, requestPatch, requires) => {
+    const cwd = tempDir();
+    const request = { cwd, ...requestPatch } as JobRequestByKind[typeof kind];
+    const empty = await getJobDefinition(kind).finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob(kind, request),
+      request,
+      run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
+      events: [],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      verification: [],
+      deps: { runVerification: async () => [], writeComposeReport: () => undefined }
+    });
+    const filled = await getJobDefinition(kind).finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob(kind, request),
+      request,
+      run: { stdout: '{"type":"message","text":"# Plan"}\n', stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "# Plan", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      verification: [],
+      deps: { runVerification: async () => [], writeComposeReport: () => undefined }
+    });
+
+    if (requires) {
+      expect(empty).toMatchObject({
+        status: "failed",
+        errorCode: "result_missing",
+        summary: "MiMoCode did not return a final result.",
+        error: "MiMoCode did not return a final result."
+      });
+      expect(JSON.stringify(empty)).not.toMatch(/output|# Plan/);
+    } else {
+      expect(empty).toMatchObject({ status: "completed" });
+    }
+    expect(filled).toMatchObject({ status: "completed" });
+  });
+
   it.each(["verification", "report"] as const)("propagates Compose %s writer failures", async (failure) => {
     const cwd = tempDir();
     const request: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "compose" };

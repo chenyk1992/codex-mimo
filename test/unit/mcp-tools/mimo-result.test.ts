@@ -96,4 +96,31 @@ describe("mimo_result", () => {
     updateJob(cwd, finished.id, { status: "failed", summary: "First failed" });
     expect((await mimoResult({ cwd })).jobId).toBe(finished.id);
   });
+
+  it("returns nested part.text final output from the events artifact", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "compose", task: "Plan", request: {} });
+    const output = "# Plan\n\nComplete carousel implementation.";
+    fs.writeFileSync(
+      job.eventsFile,
+      `${JSON.stringify({ type: "text", part: { text: output } })}\n`,
+      "utf8"
+    );
+    updateJob(cwd, job.id, { status: "completed", summary: "Done." });
+
+    const result = await mimoResult({ cwd, jobId: job.id });
+    expect(result.output).toBe(output);
+  });
+
+  it("omits output for a legacy terminal job with a missing events file", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "plan", task: "Plan", request: {} });
+    updateJob(cwd, job.id, { status: "completed", summary: "Done." });
+    fs.rmSync(job.eventsFile, { force: true });
+
+    const result = await mimoResult({ cwd, jobId: job.id });
+    expect(result.status).toBe("completed");
+    expect(result.jobId).toBe(job.id);
+    expect(result).not.toHaveProperty("output");
+  });
 });
