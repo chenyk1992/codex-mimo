@@ -1,13 +1,24 @@
 import { createJobStore, type CreateJobInput } from "./job-store.js";
+import { InputValidationError } from "./input-validation.js";
 import {
   spawnJobSupervisor,
   spawnNotificationWorker
 } from "./job-process.js";
 import { transitionJob } from "./job-transition.js";
 import type { JobKind, JobReceipt, JobRecord } from "./jobs.js";
+import {
+  probeCodexCommand,
+  type CodexCommandErrorCode
+} from "../notify/codex-command.js";
 import { resolveNotificationTarget } from "../notify/target.js";
 import { startNotificationDispatch } from "../notify/dispatch-process.js";
 import type { NotificationInput, NotificationTarget } from "../notify/types.js";
+
+const PREFLIGHT_ERROR_CODES = new Set<CodexCommandErrorCode>([
+  "codex_cli_not_found",
+  "codex_cli_not_executable",
+  "codex_app_server_unavailable"
+]);
 
 export interface LaunchJobInput {
   kind: JobKind;
@@ -25,6 +36,7 @@ export interface LaunchJobDependencies {
     input: NotificationInput | undefined,
     env: NodeJS.ProcessEnv
   ) => NotificationTarget | undefined;
+  probeCodex?: typeof probeCodexCommand;
   createJob?: (cwd: string, input: CreateJobInput) => JobRecord;
   spawnJobSupervisor?: typeof spawnJobSupervisor;
   spawnNotificationWorker?: typeof spawnNotificationWorker;
@@ -39,12 +51,26 @@ export async function launchJob(
   if (input.notify !== undefined && input.notificationTarget !== undefined) {
     throw new Error("A job launch cannot both resolve and reuse a notification target.");
   }
+  const env = dependencies.env ?? process.env;
   const target = input.notificationTarget === undefined
     ? (dependencies.resolveTarget ?? resolveNotificationTarget)(
         input.notify,
-        dependencies.env ?? process.env
+        env
       )
     : cloneTarget(input.notificationTarget);
+
+  if (target?.type === "codex") {
+    const probe = await (dependencies.probeCodex ?? probeCodexCommand)({ env });
+    if (!probe.ok) {
+      const errorCode = PREFLIGHT_ERROR_CODES.has(probe.errorCode as CodexCommandErrorCode)
+        ? probe.errorCode!
+        : "codex_app_server_unavailable";
+      throw new InputValidationError(
+        `Codex notification preflight failed: ${errorCode}. Run mimo_healthcheck and configure CODEX_MIMO_CODEX_BIN.`
+      );
+    }
+  }
+
   const createJob = dependencies.createJob ?? ((cwd, createInput) =>
     createJobStore(cwd).create(createInput));
   const job = createJob(input.cwd, {

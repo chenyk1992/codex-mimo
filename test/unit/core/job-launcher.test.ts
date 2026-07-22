@@ -2,9 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { InputValidationError } from "../../../src/core/input-validation.js";
 import { launchJob, toJobReceipt } from "../../../src/core/job-launcher.js";
 import { createJobStore, readJob } from "../../../src/core/job-store.js";
 import { readDeliveries } from "../../../src/notify/outbox.js";
+import type { CodexCommandProbe } from "../../../src/notify/codex-command.js";
 
 const workspaces: string[] = [];
 
@@ -14,14 +16,19 @@ function workspace(): string {
   return cwd;
 }
 
+function okProbe(): CodexCommandProbe {
+  return { ok: true, source: "path" };
+}
+
 afterEach(() => {
   for (const cwd of workspaces.splice(0)) fs.rmSync(cwd, { recursive: true, force: true });
 });
 
 describe("launchJob", () => {
-  it("freezes the resolved target before persisting the queued job", async () => {
+  it("probes Codex after resolve and before persist/spawn", async () => {
     const cwd = workspace();
     const order: string[] = [];
+    const env = { CODEX_THREAD_ID: "thread-1", CODEX_MIMO_CODEX_BIN: "C:\\safe\\codex.exe" };
     const receipt = await launchJob({
       kind: "plan",
       cwd,
@@ -29,26 +36,130 @@ describe("launchJob", () => {
       request: { cwd, task: "Plan it" },
       notify: { type: "codex", threadId: "thread-1" }
     }, {
-      env: { CODEX_THREAD_ID: "thread-1" },
-      resolveTarget(input, env) {
+      env,
+      resolveTarget(input, resolvedEnv) {
         order.push("resolve");
         expect(fs.existsSync(path.join(cwd, ".codex-mimo", "jobs"))).toBe(false);
         expect(input).toEqual({ type: "codex", threadId: "thread-1" });
-        expect(env.CODEX_THREAD_ID).toBe("thread-1");
+        expect(resolvedEnv.CODEX_THREAD_ID).toBe("thread-1");
         return { type: "codex", threadId: "thread-1" };
+      },
+      async probeCodex(options) {
+        order.push("probe");
+        expect(fs.existsSync(path.join(cwd, ".codex-mimo", "jobs"))).toBe(false);
+        expect(options?.env).toBe(env);
+        return okProbe();
       },
       createJob(cwdArg, input) {
         order.push("persist");
         return createJobStore(cwdArg).create(input);
       },
-      spawnJobSupervisor: vi.fn().mockReturnValue(123)
+      spawnJobSupervisor: vi.fn(() => {
+        order.push("spawn");
+        return 123;
+      })
     });
 
-    expect(order).toEqual(["resolve", "persist"]);
+    expect(order).toEqual(["resolve", "probe", "persist", "spawn"]);
+    expect(receipt).toEqual({
+      jobId: expect.any(String),
+      kind: "plan",
+      status: "queued",
+      actions: {
+        status: "mimo_status",
+        events: "mimo_events",
+        result: "mimo_result",
+        cancel: "mimo_cancel"
+      }
+    });
     expect(readJob(cwd, receipt.jobId)?.notificationTarget).toEqual({
       type: "codex",
       threadId: "thread-1"
     });
+  });
+
+  it.each([
+    "codex_cli_not_found",
+    "codex_cli_not_executable",
+    "codex_app_server_unavailable"
+  ] as const)("rejects Codex preflight failure %s without creating a job", async (errorCode) => {
+    const cwd = workspace();
+    const createJob = vi.fn();
+    const spawnJobSupervisor = vi.fn();
+    const probeCodex = vi.fn().mockResolvedValue({
+      ok: false,
+      source: "path",
+      errorCode,
+      version: "should-not-leak"
+    });
+
+    await expect(launchJob({
+      kind: "plan",
+      cwd,
+      task: "Plan it",
+      request: { cwd, task: "Plan it" },
+      notify: { type: "codex", threadId: "thread-1" }
+    }, {
+      env: { CODEX_MIMO_CODEX_BIN: "C:\\private\\codex.exe" },
+      probeCodex,
+      createJob,
+      spawnJobSupervisor
+    })).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(InputValidationError);
+      expect((error as Error).message).toBe(
+        `Codex notification preflight failed: ${errorCode}. Run mimo_healthcheck and configure CODEX_MIMO_CODEX_BIN.`
+      );
+      expect((error as Error).message).not.toContain("private");
+      expect((error as Error).message).not.toContain("should-not-leak");
+      return true;
+    });
+
+    expect(probeCodex).toHaveBeenCalledOnce();
+    expect(createJob).not.toHaveBeenCalled();
+    expect(spawnJobSupervisor).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(cwd, ".codex-mimo", "jobs"))).toBe(false);
+  });
+
+  it("does not probe Codex for webhook notifications", async () => {
+    const cwd = workspace();
+    const probeCodex = vi.fn();
+    const receipt = await launchJob({
+      kind: "plan",
+      cwd,
+      task: "Plan it",
+      request: { cwd, task: "Plan it" },
+      notify: { type: "webhook", url: "https://example.test/hook", secretEnv: "HOOK_SECRET" }
+    }, {
+      env: {},
+      probeCodex,
+      spawnJobSupervisor: vi.fn().mockReturnValue(123)
+    });
+
+    expect(probeCodex).not.toHaveBeenCalled();
+    expect(receipt.status).toBe("queued");
+    expect(readJob(cwd, receipt.jobId)?.notificationTarget).toEqual({
+      type: "webhook",
+      url: "https://example.test/hook",
+      secretEnv: "HOOK_SECRET"
+    });
+  });
+
+  it("does not probe Codex when notify is omitted", async () => {
+    const cwd = workspace();
+    const probeCodex = vi.fn();
+    const receipt = await launchJob({
+      kind: "review",
+      cwd,
+      task: "Review HEAD",
+      request: { cwd, base: "HEAD" }
+    }, {
+      env: { CODEX_THREAD_ID: "ambient-thread" },
+      probeCodex,
+      spawnJobSupervisor: vi.fn().mockReturnValue(123)
+    });
+
+    expect(probeCodex).not.toHaveBeenCalled();
+    expect(readJob(cwd, receipt.jobId)?.notificationTarget).toBeUndefined();
   });
 
   it("stores a frozen Codex target for an explicit Codex launch with threadId", async () => {
@@ -62,6 +173,7 @@ describe("launchJob", () => {
       notify: { type: "codex", threadId: "task-123" }
     }, {
       env: { CODEX_THREAD_ID: "task-123" },
+      probeCodex: async () => okProbe(),
       spawnJobSupervisor
     });
 
@@ -76,6 +188,7 @@ describe("launchJob", () => {
     const cwd = workspace();
     const createJob = vi.fn();
     const spawnJobSupervisor = vi.fn();
+    const probeCodex = vi.fn();
 
     await expect(launchJob({
       kind: "plan",
@@ -85,25 +198,15 @@ describe("launchJob", () => {
       notify: { type: "codex" } as never
     }, {
       env: {},
+      probeCodex,
       createJob,
       spawnJobSupervisor
     })).rejects.toThrow("Codex notification requires explicit threadId");
 
+    expect(probeCodex).not.toHaveBeenCalled();
     expect(createJob).not.toHaveBeenCalled();
     expect(spawnJobSupervisor).not.toHaveBeenCalled();
     expect(fs.existsSync(path.join(cwd, ".codex-mimo", "jobs"))).toBe(false);
-  });
-
-  it("persists no target when notify is omitted regardless of CODEX_THREAD_ID", async () => {
-    const cwd = workspace();
-    const receipt = await launchJob({
-      kind: "review",
-      cwd,
-      task: "Review HEAD",
-      request: { cwd, base: "HEAD" }
-    }, { env: { CODEX_THREAD_ID: "ambient-thread" }, spawnJobSupervisor: vi.fn().mockReturnValue(123) });
-
-    expect(readJob(cwd, receipt.jobId)?.notificationTarget).toBeUndefined();
   });
 
   it.each([
@@ -121,6 +224,7 @@ describe("launchJob", () => {
       notify
     }, {
       env: {},
+      probeCodex: async () => okProbe(),
       spawnJobSupervisor: () => { throw launchError; },
       spawnNotificationWorker
     })).rejects.toBe(launchError);
