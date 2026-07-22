@@ -42,3 +42,26 @@ this layer.
 - `npm.cmd run build` — passed.
 - `npm.cmd test` — 1,013 passed; 6 opt-in smoke tests skipped.
 - `git diff --check` — passed.
+
+## Review remediation
+
+The Task 2 review identified two compatibility issues. `PreparedCodexConnection`
+now retains the exact `ThreadResumeResult` as a non-enumerable `thread` property
+alongside its non-enumerable client. A later delivery layer can therefore use
+the already-probed idle/busy state without issuing another `thread/resume`.
+
+Implicit fallback is now an explicit allowlist: only CLI-not-found,
+CLI-not-executable, App Server unavailable, and App Server protocol-incompatible
+results may try another candidate. A busy response remains a successful
+preparation result and does not probe the next candidate.
+
+### Remediation TDD and verification
+
+1. Added assertions for retained idle/busy thread state and its non-enumerable
+   property. The focused suite failed because the state was previously absent.
+2. Implemented private state retention and the fallback allowlist. The busy
+   regression includes two candidates and proves only the first is versioned and
+   resumed.
+3. `npm.cmd test -- codex-connection.test.ts` — 6 passed.
+4. `npm.cmd test -- codex-connection.test.ts codex-command.test.ts codex-app-server.test.ts` — 83 passed.
+5. `npm.cmd run lint` and `npm.cmd run build` — passed.

@@ -12,13 +12,15 @@ import {
   CodexAppServerError,
   createCodexAppServerClient,
   type CodexAppServerClient,
-  type CodexAppServerClientOptions
+  type CodexAppServerClientOptions,
+  type ThreadResumeResult
 } from "./codex-app-server.js";
 import type { NotificationErrorCode } from "./types.js";
 
 export interface PreparedCodexConnection {
   probe: CodexConnectionProbe;
   client?: CodexAppServerClient;
+  thread?: ThreadResumeResult;
 }
 
 /** Safe target-aware readiness information suitable for public reporting. */
@@ -68,14 +70,16 @@ export async function prepareCodexConnection(
     const version = await readVersion(candidate, execute, env);
     if (!version.ok) {
       failure = version.probe;
-      if (candidate.source === "configured") return { probe: failure };
+      if (candidate.source === "configured" || !allowsImplicitFallback(failure.errorCode)) {
+        return { probe: failure };
+      }
       continue;
     }
 
     const prepared = await prepareCandidate(candidate, version.version, options, env);
     if (prepared.client) return prepared;
     failure = prepared.probe;
-    if (candidate.source === "configured" || stopsCandidateFallback(failure.errorCode!)) {
+    if (candidate.source === "configured" || !allowsImplicitFallback(failure.errorCode)) {
       return { probe: failure };
     }
   }
@@ -132,7 +136,8 @@ async function prepareCandidate(
       client = undefined;
       return preparedConnection(
         { ok: true, source: candidate.source, version },
-        prepared
+        prepared,
+        thread
       );
     }
     return { probe: { ok: false, source: candidate.source, errorCode: "codex_thread_missing" } };
@@ -155,8 +160,11 @@ function safeConnectionErrorCode(error: unknown): NotificationErrorCode {
     : codexCommandErrorCode(error);
 }
 
-function stopsCandidateFallback(code: NotificationErrorCode): boolean {
-  return code === "codex_thread_missing" || code === "codex_thread_forbidden";
+function allowsImplicitFallback(code: NotificationErrorCode | undefined): boolean {
+  return code === "codex_cli_not_found" ||
+    code === "codex_cli_not_executable" ||
+    code === "codex_app_server_unavailable" ||
+    code === "codex_app_server_incompatible";
 }
 
 async function closeRejectedClient(client: CodexAppServerClient): Promise<void> {
@@ -169,9 +177,11 @@ async function closeRejectedClient(client: CodexAppServerClient): Promise<void> 
 
 function preparedConnection(
   probe: CodexConnectionProbe,
-  client: CodexAppServerClient
+  client: CodexAppServerClient,
+  thread: ThreadResumeResult
 ): PreparedCodexConnection {
   const prepared: PreparedCodexConnection = { probe };
   Object.defineProperty(prepared, "client", { value: client });
+  Object.defineProperty(prepared, "thread", { value: thread });
   return prepared;
 }

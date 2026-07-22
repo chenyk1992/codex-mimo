@@ -32,6 +32,8 @@ describe("Codex connection preparation", () => {
 
     expect(result.probe).toEqual({ ok: true, source: "path", version: "codex 1.2" });
     expect(result.client).toBe(preparedClient);
+    expect(result.thread).toEqual({ exists: true, busy: false });
+    expect(Object.getOwnPropertyDescriptor(result, "thread")?.enumerable).toBe(false);
     expect(execute).toHaveBeenCalledWith(
       "C:\\private\\codex.exe",
       ["--version"],
@@ -50,17 +52,25 @@ describe("Codex connection preparation", () => {
     const preparedClient = client({
       resumeThread: vi.fn(async () => ({ exists: true, busy: true }))
     });
+    const execute = vi.fn().mockResolvedValue({ exitCode: 0, stdout: "codex 1" });
 
     const result = await prepareCodexConnection({
       threadId: "task-1",
-      candidates: [{ command: "codex-a", source: "path" }],
-      execute: vi.fn().mockResolvedValue({ exitCode: 0, stdout: "codex 1" }),
+      candidates: [
+        { command: "codex-a", source: "path" },
+        { command: "codex-b", source: "desktop-local" }
+      ],
+      execute,
       createClient: () => preparedClient
     });
 
     expect(result.probe).toEqual({ ok: true, source: "path", version: "codex 1" });
     expect(result.client).toBe(preparedClient);
+    expect(result.thread).toEqual({ exists: true, busy: true });
+    expect(Object.getOwnPropertyDescriptor(result, "thread")?.enumerable).toBe(false);
     expect(preparedClient.close).not.toHaveBeenCalled();
+    expect(preparedClient.resumeThread).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it("closes a missing target and stops before later implicit candidates", async () => {
