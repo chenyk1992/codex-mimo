@@ -439,7 +439,8 @@ function notificationStatus(
     targetType: summary.type,
     status: summary.status,
     attempts: summary.attempts,
-    ...(summary.lastError === undefined ? {} : { lastError: summary.lastError })
+    ...(summary.lastError === undefined ? {} : { lastError: summary.lastError }),
+    ...(summary.errorCode === undefined ? {} : { errorCode: summary.errorCode })
   };
 }
 

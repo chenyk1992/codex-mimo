@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createJobStore, updateJob } from "../../../src/core/job-store.js";
 import { mimoResult } from "../../../src/codex/tools.js";
-import { enqueueDelivery, completeDelivery, claimDueDelivery } from "../../../src/notify/outbox.js";
+import { enqueueDelivery, completeDelivery, claimDueDelivery, failDelivery } from "../../../src/notify/outbox.js";
 
 const tempDirs: string[] = [];
 function tempWorkspace(): string {
@@ -60,6 +60,34 @@ describe("mimo_result", () => {
     });
   });
 
+
+  it("forwards allowlisted notification errorCode on failed delivery", async () => {
+    const cwd = tempWorkspace();
+    const target = { type: "codex" as const, threadId: "thread-1" };
+    const job = createJobStore(cwd).create({
+      kind: "review", task: "Review", request: {}, notificationTarget: target
+    });
+    updateJob(cwd, job.id, { status: "completed", summary: "Done." });
+    await enqueueDelivery(job.notificationOutboxFile, {
+      jobId: job.id, signalCursor: 1, target, createdAt: "2026-07-16T00:00:00.000Z"
+    });
+    const claimed = await claimDueDelivery(job.notificationOutboxFile, new Date("2026-07-16T00:00:01.000Z"), 30_000);
+    await failDelivery(
+      job.notificationOutboxFile,
+      claimed!.id,
+      claimed!.attempts,
+      "cli missing",
+      "codex_cli_not_found"
+    );
+
+    expect((await mimoResult({ cwd, jobId: job.id })).notification).toEqual({
+      targetType: "codex",
+      status: "failed",
+      attempts: 1,
+      lastError: "Notification delivery requires attention.",
+      errorCode: "codex_cli_not_found"
+    });
+  });
   it("selects the most recent readable result when jobId is omitted", async () => {
     const cwd = tempWorkspace();
     const store = createJobStore(cwd);

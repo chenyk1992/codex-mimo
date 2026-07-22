@@ -51,7 +51,7 @@ describe("mimo_status", () => {
       jobId: job.id, signalCursor: 1, target, createdAt: "2026-07-16T00:00:00.000Z"
     });
     const claimed = await claimDueDelivery(job.notificationOutboxFile, new Date("2026-07-16T00:00:01.000Z"), 30_000);
-    await retryDelivery(job.notificationOutboxFile, claimed!.id, claimed!.attempts, new Date("2026-07-16T00:01:00.000Z"), "busy");
+    await retryDelivery(job.notificationOutboxFile, claimed!.id, claimed!.attempts, new Date("2026-07-16T00:01:00.000Z"), "busy", "codex_thread_busy");
 
     const result = await mimoStatus({ cwd, jobId: job.id });
     expect(result.executionCallback).toMatchObject({
@@ -63,7 +63,8 @@ describe("mimo_status", () => {
       targetType: "webhook",
       status: "pending",
       attempts: 1,
-      lastError: "Notification delivery requires attention."
+      lastError: "Notification delivery requires attention.",
+      errorCode: "codex_thread_busy"
     });
     expect(JSON.stringify(result)).not.toContain("DO NOT LEAK");
   });
