@@ -30,7 +30,7 @@ import {
   type CodexAppServerClientOptions
 } from "../../src/notify/codex-app-server.js";
 import { CODEX_COMMAND_ENV } from "../../src/notify/codex-command.js";
-import { mimoImplement } from "../../src/codex/tools.js";
+import { mimoImplement, mimoResult } from "../../src/codex/tools.js";
 
 const workspaces: string[] = [];
 const children = new Set<ChildProcess>();
@@ -91,6 +91,7 @@ function workerDependencies(input: {
   mode?: "complete" | "hang";
   callback?: boolean;
   finalText?: string;
+  nestedText?: boolean;
   callbackWaitMs?: number;
   secretProbeName?: string;
   secretProbeFile?: string;
@@ -116,6 +117,7 @@ function workerDependencies(input: {
         FAKE_MIMO_MODE: mode,
         FAKE_MIMO_CALLBACK: callback ? "1" : "0",
         FAKE_MIMO_FINAL_TEXT: finalText,
+        ...(input.nestedText ? { FAKE_MIMO_NESTED_TEXT: "1" } : {}),
         ...(input.secretProbeName ? { FAKE_MIMO_SECRET_PROBE_NAME: input.secretProbeName } : {}),
         ...(input.secretProbeFile ? { FAKE_MIMO_SECRET_PROBE_FILE: input.secretProbeFile } : {})
       },
@@ -263,6 +265,71 @@ describe("unified background jobs", () => {
     const result = await runFake(cwd, seed(cwd, "plan"), { finalText });
 
     expect(result.status).toBe(status);
+  });
+
+  it("returns compose plan final output only through mimo_result and keeps reports/notifications structural", async () => {
+    const cwd = workspace();
+    const planMarkdown = "# Complete plan\n\nTask 1...";
+    const target = { type: "codex" as const, threadId: "thread-plan-output" };
+    const job = seed(cwd, "compose", target);
+    const completed = await runFake(cwd, job, { finalText: planMarkdown, nestedText: true });
+
+    expect(completed).toMatchObject({ kind: "compose", status: "completed" });
+    expect(completed.reportPaths).toBeDefined();
+
+    const result = await mimoResult({ cwd, jobId: completed.id });
+    expect(result.output).toBe(planMarkdown);
+    expect(result.summary).toBe("MiMoCode completed the job.");
+
+    const reportJson = fs.readFileSync(completed.reportPaths!.json, "utf8");
+    const reportMarkdown = fs.readFileSync(completed.reportPaths!.markdown, "utf8");
+    expect(reportJson).not.toContain(planMarkdown);
+    expect(reportMarkdown).not.toContain(planMarkdown);
+    expect(JSON.stringify(completed)).not.toContain(planMarkdown);
+
+    const marker = path.join(cwd, "codex-plan-output.jsonl");
+    const createClient = () => createCodexAppServerClient({
+      spawnProcess: (_command, _args, options) => track(spawn(process.execPath, [fakeCodexAppServer], {
+        ...options,
+        cwd,
+        env: { ...options.env, FAKE_CODEX_MARKER: marker },
+        stdio: ["pipe", "pipe", "pipe"]
+      })) as ChildProcessWithoutNullStreams
+    });
+    await dispatchNextDelivery(cwd, { createCodexClient: createClient });
+    const start = readJsonLines(marker).find((call) => call.method === "turn/start")!;
+    const params = start.params as { threadId: string; input: Array<{ text: string }> };
+    expect(params.threadId).toBe("thread-plan-output");
+    expect(params.input[0].text).toContain("Call mimo_result");
+    expect(params.input[0].text).toContain(`jobId ${JSON.stringify(completed.id)}`);
+    expect(params.input[0].text).toContain(`cwd ${JSON.stringify(cwd)}`);
+    expect(params.input[0].text).not.toContain(planMarkdown);
+  });
+
+  it("fails compose plan with result_missing when final text is empty and omits raw payload from public surfaces", async () => {
+    const cwd = workspace();
+    const failed = await runFake(cwd, seed(cwd, "compose"), { finalText: "" });
+
+    expect(failed).toMatchObject({
+      kind: "compose",
+      status: "failed",
+      errorCode: "result_missing"
+    });
+    expect(failed.summary).toBe("MiMoCode job failed.");
+    expect(failed.error).not.toMatch(/"part"\s*:\s*\{/);
+    expect(failed.reportPaths).toBeDefined();
+
+    const result = await mimoResult({ cwd, jobId: failed.id });
+    expect(result.output).toBeUndefined();
+    expect(result.errorCode).toBe("result_missing");
+
+    const persisted = allFiles(path.join(cwd, ".codex-mimo"))
+      .filter((file) => !file.endsWith(".events.jsonl"))
+      .map((file) => fs.readFileSync(file, "utf8"))
+      .join("\n");
+    expect(persisted).not.toMatch(/"part"\s*:\s*\{/);
+    expect(fs.readFileSync(failed.reportPaths!.json, "utf8")).toContain("result_missing");
+    expect(fs.readFileSync(failed.reportPaths!.markdown, "utf8")).not.toMatch(/# Complete plan|Task 1\.\.\./);
   });
 
   it("automatically replaces a crashed job-worker, terminates its owned MiMo tree, and does not rerun it", async () => {

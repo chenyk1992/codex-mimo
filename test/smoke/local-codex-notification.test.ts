@@ -12,6 +12,7 @@ import { probeCodexCommand } from "../../src/notify/codex-command.js";
 const enabled = process.env.RUN_LOCAL_CODEX_NOTIFY_SMOKE === "1";
 const describeSmoke = enabled ? describe : describe.skip;
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const OUTPUT_MARKER = "CODEX_MIMO_NOTIFY_SMOKE_OUTPUT_v1";
 
 interface McpServerConfig {
   type: "stdio";
@@ -38,7 +39,7 @@ interface ResultMarker {
   kind: "implement";
   status: "completed";
   resultType: "final";
-  summary: string;
+  output: string;
 }
 
 interface AppServerAuditRecord {
@@ -113,7 +114,7 @@ describeSmoke("local Codex notification", () => {
         status: "completed",
         resultType: "final"
       });
-      expect(marker.summary.trim()).not.toBe("");
+      expect(marker.output).toContain(OUTPUT_MARKER);
 
       const callbackRecords = readToolAudit(auditFile);
       expect(callbackRecords.filter((record) => record.toolName === "mimo_result")).toHaveLength(1);
@@ -193,13 +194,15 @@ function initializeSmokeRepository(workspace: string, markerFile: string): void 
     "# Codex notification smoke",
     "",
     "Do not modify repository files. Complete the requested inspection successfully.",
+    `Your final response must include the exact marker ${JSON.stringify(OUTPUT_MARKER)}.`,
     "Your final response must instruct the resumed Codex task to do all of the following:",
     "",
     "1. Use the notification's exact cwd and jobId to call `mimo_result` once.",
     `2. Write UTF-8 JSON to ${markerInstruction}.`,
-    "3. Copy the exact `jobId`, `kind`, `status`, `resultType`, and `summary` fields from that result.",
+    "3. Copy the exact `jobId`, `kind`, `status`, `resultType`, and `output` fields from that result.",
     "4. Add the literal field `\"source\": \"mimo_result\"`.",
     "5. Do not call `mimo_wait` or infer any result field.",
+    "6. Do not copy `summary`; the callback must validate `output`, not the generic completion summary.",
     ""
   ].join("\n"), "utf8");
   fs.writeFileSync(path.join(workspace, "README.md"), "Codex notification smoke workspace.\n", "utf8");

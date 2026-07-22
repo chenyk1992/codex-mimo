@@ -15,12 +15,20 @@ if (process.env.FAKE_MIMO_SECRET_PROBE_FILE && process.env.FAKE_MIMO_SECRET_PROB
   );
 }
 
-process.stdout.write(`${JSON.stringify({
-  type: "text",
-  timestamp: new Date().toISOString(),
-  sessionID: "session-fake",
-  text: finalText
-})}\n`);
+const textEvent = process.env.FAKE_MIMO_NESTED_TEXT === "1"
+  ? {
+      type: "text",
+      timestamp: new Date().toISOString(),
+      sessionID: "session-fake",
+      part: { type: "text", text: finalText }
+    }
+  : {
+      type: "text",
+      timestamp: new Date().toISOString(),
+      sessionID: "session-fake",
+      text: finalText
+    };
+process.stdout.write(`${JSON.stringify(textEvent)}\n`);
 
 if (process.env.FAKE_MIMO_MODE === "hang") {
   const descendant = process.env.FAKE_MIMO_TREE === "1"
