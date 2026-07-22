@@ -16,5 +16,7 @@ describe("plugin MCP configuration", () => {
     expect(server.command).toBe("node");
     expect(server.args).toEqual(["dist/codex/mcp-server.js"]);
     expect(server.cwd).toBe(".");
+    expect(server.env).toEqual({});
+    expect(server.env_vars).toEqual(["CODEX_THREAD_ID"]);
   });
 });

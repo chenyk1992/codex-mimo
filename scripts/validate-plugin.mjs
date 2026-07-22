@@ -255,6 +255,14 @@ function validateMcpConfig(root, errors) {
     return;
   }
 
+  const envVars = server.env_vars;
+  if (!Array.isArray(envVars) || envVars.length !== 1 || envVars[0] !== "CODEX_THREAD_ID") {
+    errors.push(`${DEFAULT_SERVER_NAME} MCP server must forward CODEX_THREAD_ID through env_vars`);
+  }
+  if (isObject(server.env) && "CODEX_THREAD_ID" in server.env) {
+    errors.push(`${DEFAULT_SERVER_NAME} MCP server must not set CODEX_THREAD_ID statically`);
+  }
+
   assertFile(root, DEFAULT_SERVER_ENTRY, errors);
 }
 

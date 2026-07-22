@@ -5,7 +5,8 @@
       "command": "node",
       "args": ["dist/codex/mcp-server.js"],
       "cwd": ".",
-      "env": {}
+      "env": {},
+      "env_vars": ["CODEX_THREAD_ID"]
     }
   }
 }

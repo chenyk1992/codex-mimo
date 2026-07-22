@@ -83,6 +83,9 @@ function createPluginFixture(
     oldWorkField?: string;
     skillBody?: string;
     mutateTools?: (tools: FixtureTool[]) => void;
+    mutateMcp?: (mcp: {
+      mcpServers: Record<string, Record<string, unknown>>;
+    }) => void;
   } = {}
 ): string {
   const root = mkdtempSync(path.join(tmpdir(), "codex-mimo-plugin-"));
@@ -116,24 +119,20 @@ function createPluginFixture(
     )
   );
 
-  writeFileSync(
-    path.join(root, ".mcp.json"),
-    JSON.stringify(
-      {
-        mcpServers: {
-          "codex-mimocode": {
-            type: "stdio",
-            command: "node",
-            args: ["dist/codex/mcp-server.js"],
-            cwd: ".",
-            env: {}
-          }
-        }
-      },
-      null,
-      2
-    )
-  );
+  const mcp = {
+    mcpServers: {
+      "codex-mimocode": {
+        type: "stdio",
+        command: "node",
+        args: ["dist/codex/mcp-server.js"],
+        cwd: ".",
+        env: {} as Record<string, string>,
+        env_vars: ["CODEX_THREAD_ID"] as string[] | undefined
+      }
+    }
+  };
+  options.mutateMcp?.(mcp);
+  writeFileSync(path.join(root, ".mcp.json"), JSON.stringify(mcp, null, 2));
 
   writeFileSync(
     path.join(root, "skills", "mimocode", "SKILL.md"),
@@ -282,5 +281,31 @@ describe("lightweight plugin validator", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("must not instruct Codex to poll or loop on mimo_wait");
+  });
+
+  it("rejects packaged MCP config that omits CODEX_THREAD_ID env_vars forwarding", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      mutateMcp: (mcp) => {
+        delete mcp.mcpServers["codex-mimocode"].env_vars;
+      }
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("must forward CODEX_THREAD_ID");
+  });
+
+  it("rejects packaged MCP config that sets CODEX_THREAD_ID statically", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      mutateMcp: (mcp) => {
+        mcp.mcpServers["codex-mimocode"].env = { CODEX_THREAD_ID: "stale-thread" };
+      }
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("must not set CODEX_THREAD_ID statically");
   });
 });
