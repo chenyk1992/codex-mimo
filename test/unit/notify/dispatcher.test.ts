@@ -678,6 +678,75 @@ describe("notification dispatcher", () => {
     });
   });
 
+  it("fails a timed-out Codex callback without scheduling a second turn", async () => {
+    const cwd = makeCwd();
+    const { job } = await makeDelivery(cwd, { type: "codex", threadId: "thread-1" });
+
+    await dispatchNextDelivery(cwd, {
+      now: () => new Date(createdAt),
+      deliver: async () => ({
+        outcome: "retry",
+        error: "Codex callback turn timed out",
+        errorCode: "codex_turn_timeout"
+      })
+    });
+
+    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+      status: "failed", attempts: 1, lastErrorCode: "codex_turn_timeout"
+    });
+    expect(readDeliveries(job.notificationOutboxFile)[0].nextAttemptAt).toBeUndefined();
+  });
+
+  it.each([
+    ["codex_turn_interrupted", "Codex callback turn was interrupted"],
+    ["codex_turn_failed", "Codex callback turn failed"]
+  ] as const)("allows one retry then fails Codex callback %s", async (errorCode, error) => {
+    const cwd = makeCwd();
+    const { job } = await makeDelivery(cwd, { type: "codex", threadId: "thread-1" });
+
+    await dispatchNextDelivery(cwd, {
+      now: () => new Date(createdAt),
+      deliver: async () => ({ outcome: "retry", error, errorCode })
+    });
+    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+      status: "pending", attempts: 1, lastErrorCode: errorCode
+    });
+
+    await dispatchNextDelivery(cwd, {
+      now: () => new Date("2026-07-16T00:00:10.000Z"),
+      deliver: async () => ({ outcome: "retry", error, errorCode })
+    });
+    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+      status: "failed", attempts: 2, lastErrorCode: errorCode
+    });
+    expect(readDeliveries(job.notificationOutboxFile)[0].nextAttemptAt).toBeUndefined();
+  });
+
+  it("does not apply Codex callback terminal retry cap to webhook deliveries", async () => {
+    const cwd = makeCwd();
+    const { job } = await makeDelivery(cwd, {
+      type: "webhook",
+      url: "https://example.com/hook",
+      secretEnv: "WEBHOOK_SECRET"
+    });
+
+    await dispatchNextDelivery(cwd, {
+      now: () => new Date(createdAt),
+      deliver: async () => ({
+        outcome: "retry",
+        error: "Webhook request timed out",
+        errorCode: "codex_turn_timeout"
+      })
+    });
+
+    expect(readDeliveries(job.notificationOutboxFile)[0]).toMatchObject({
+      status: "pending",
+      attempts: 1,
+      lastErrorCode: "codex_turn_timeout",
+      nextAttemptAt: "2026-07-16T00:00:10.000Z"
+    });
+  });
+
   it("fails permanently after one attempt when delivery-time Codex preparation rejects the target", async () => {
     const cwd = makeCwd();
     const { job } = await makeDelivery(cwd);

@@ -68,6 +68,16 @@ export function retryDelayMs(attempts: number): number {
   return 300_000;
 }
 
+function isCodexCallbackRetryExhausted(
+  delivery: NotificationDelivery,
+  result: DeliveryAttemptResult
+): boolean {
+  if (delivery.target.type !== "codex" || result.outcome !== "retry") return false;
+  if (result.errorCode === "codex_turn_timeout") return true;
+  return (result.errorCode === "codex_turn_interrupted" || result.errorCode === "codex_turn_failed") &&
+    delivery.attempts >= 2;
+}
+
 export async function dispatchNextDelivery(
   cwd: string,
   dependencies: DispatcherDependencies = {}
@@ -118,6 +128,7 @@ export async function dispatchNextDelivery(
     );
   }
   if (result.outcome === "permanent" ||
+      isCodexCallbackRetryExhausted(claimed, result) ||
       settledAt.getTime() - Date.parse(claimed.createdAt) >= MAX_RETRY_AGE_MS) {
     return settleDelivery(outboxFile, claimed, () =>
       failDelivery(
