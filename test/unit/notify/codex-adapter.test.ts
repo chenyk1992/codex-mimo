@@ -60,13 +60,16 @@ const signal: JobSignal = {
 function fakeClient(result: ThreadResumeResult = { exists: true, busy: false }): CodexAppServerClient & {
   initialize: ReturnType<typeof vi.fn>;
   resumeThread: ReturnType<typeof vi.fn>;
-  startTurn: ReturnType<typeof vi.fn>;
+  startTurnAndWait: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
 } {
   return {
     initialize: vi.fn(async () => undefined),
     resumeThread: vi.fn(async () => result),
-    startTurn: vi.fn(async () => undefined),
+    startTurnAndWait: vi.fn(async () => ({
+      turnId: "turn-1",
+      status: "completed" as const
+    })),
     close: vi.fn(async () => undefined)
   };
 }
@@ -112,7 +115,10 @@ describe("Codex notification adapter", () => {
     const client: CodexAppServerClient = {
       initialize: async () => { throw new Error("adapter must not initialize"); },
       resumeThread: async () => { throw new Error("adapter must not resume"); },
-      startTurn: async (threadId, prompt) => { calls.push(`turn:${threadId}:${prompt}`); },
+      startTurnAndWait: async (threadId, prompt) => {
+        calls.push(`turn:${threadId}:${prompt}`);
+        return { turnId: "turn-1", status: "completed" };
+      },
       close: async () => { calls.push("close"); }
     };
 
@@ -145,7 +151,7 @@ describe("Codex notification adapter", () => {
     });
     expect(client.initialize).not.toHaveBeenCalled();
     expect(client.resumeThread).not.toHaveBeenCalled();
-    expect(client.startTurn).not.toHaveBeenCalled();
+    expect(client.startTurnAndWait).not.toHaveBeenCalled();
     expect(client.close).toHaveBeenCalledOnce();
   });
 
@@ -162,7 +168,7 @@ describe("Codex notification adapter", () => {
       error: "Codex thread does not exist",
       errorCode: "codex_thread_missing"
     });
-    expect(client.startTurn).not.toHaveBeenCalled();
+    expect(client.startTurnAndWait).not.toHaveBeenCalled();
     expect(client.close).toHaveBeenCalledOnce();
   });
 
@@ -180,7 +186,7 @@ describe("Codex notification adapter", () => {
     expect(client.close).toHaveBeenCalledOnce();
   });
 
-  it.each(["startTurn"] as const)(
+  it.each(["startTurnAndWait"] as const)(
     "retries a transport failure from %s",
     async (method) => {
       const client = fakeClient();
@@ -202,6 +208,63 @@ describe("Codex notification adapter", () => {
     }
   );
 
+  it.each([
+    ["interrupted", "codex_turn_interrupted", "Codex callback turn was interrupted"],
+    ["failed", "codex_turn_failed", "Codex callback turn failed"]
+  ] as const)("retries callback status %s", async (status, errorCode, error) => {
+    const client = fakeClient();
+    client.startTurnAndWait.mockResolvedValueOnce({ turnId: "turn-1", status });
+
+    await expect(deliverCodexNotification(
+      delivery,
+      job,
+      signal,
+      preparedConnection(client)
+    )).resolves.toEqual({ outcome: "retry", error, errorCode });
+    expect(client.close).toHaveBeenCalledOnce();
+  });
+
+  it("retries a callback turn timeout", async () => {
+    const client = fakeClient();
+    client.startTurnAndWait.mockRejectedValueOnce(
+      new CodexAppServerError("codex_turn_timeout", "Codex callback turn timed out")
+    );
+
+    expect(await deliverCodexNotification(
+      delivery,
+      job,
+      signal,
+      preparedConnection(client)
+    )).toEqual({
+      outcome: "retry",
+      error: "Codex callback turn timed out",
+      errorCode: "codex_turn_timeout"
+    });
+    expect(client.close).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the client open until callback completion settles", async () => {
+    let resolveCompletion!: (value: { turnId: string; status: "completed" }) => void;
+    const completion = new Promise<{ turnId: string; status: "completed" }>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    const client = fakeClient();
+    client.startTurnAndWait.mockReturnValueOnce(completion);
+
+    const deliveryPromise = deliverCodexNotification(
+      delivery,
+      job,
+      signal,
+      preparedConnection(client)
+    );
+    await Promise.resolve();
+    expect(client.close).not.toHaveBeenCalled();
+
+    resolveCompletion({ turnId: "turn-1", status: "completed" });
+    await expect(deliveryPromise).resolves.toEqual({ outcome: "delivered" });
+    expect(client.close).toHaveBeenCalledOnce();
+  });
+
   it("keeps the primary permanent result when close also fails", async () => {
     const client = fakeClient();
     client.resumeThread.mockRejectedValueOnce(
@@ -221,7 +284,7 @@ describe("Codex notification adapter", () => {
     });
   });
 
-  it("keeps an accepted turn delivered when best-effort close fails", async () => {
+  it("keeps a completed turn delivered when best-effort close fails", async () => {
     const client = fakeClient();
     client.close.mockRejectedValueOnce(new Error("close private detail"));
 
@@ -233,12 +296,12 @@ describe("Codex notification adapter", () => {
     )).toEqual({
       outcome: "delivered"
     });
-    expect(client.startTurn).toHaveBeenCalledOnce();
+    expect(client.startTurnAndWait).toHaveBeenCalledOnce();
   });
 
-  it("keeps a pre-acceptance transport failure when close also fails", async () => {
+  it("keeps a pre-completion transport failure when close also fails", async () => {
     const client = fakeClient();
-    client.startTurn.mockRejectedValueOnce(
+    client.startTurnAndWait.mockRejectedValueOnce(
       new CodexAppServerError("codex_app_server_unavailable", "private transport detail")
     );
     client.close.mockRejectedValueOnce(new Error("close private detail"));

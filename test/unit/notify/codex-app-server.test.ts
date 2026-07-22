@@ -226,12 +226,12 @@ describe("Codex App Server client", () => {
     vi.stubEnv("CODEX_MIMO_APP_SERVER_AUDIT_FILE", auditFile);
     const client = await initializeClient(process);
 
-    const started = client.startTurn(
+    const started = client.startTurnAndWait(
       "thread-private",
       "private prompt input reason job task payload secret"
     );
     const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
-    respond(process, { id, result: turnStartResult() });
+    respond(process, { id, result: turnStartResult("turn-1", "completed") });
     await started;
     await client.close();
 
@@ -275,10 +275,10 @@ describe("Codex App Server client", () => {
     });
     await resume;
 
-    const start = client.startTurn("thread-injected", "continue");
+    const start = client.startTurnAndWait("thread-injected", "continue");
     const [{ id: startId }] = messagesFrom(process) as Array<{ id: number }>;
-    respond(process, { id: startId, result: turnStartResult() });
-    await start;
+    respond(process, { id: startId, result: turnStartResult("turn-1", "completed") });
+    await expect(start).resolves.toEqual({ turnId: "turn-1", status: "completed" });
     await client.close();
 
     const records = readRpcAudit(auditFile);
@@ -324,7 +324,7 @@ describe("Codex App Server client", () => {
 
       const request = method === "thread/resume"
         ? client.resumeThread("thread-1")
-        : client.startTurn("thread-1", "continue");
+        : client.startTurnAndWait("thread-1", "continue");
       const rejected = expect(request).rejects.toMatchObject({ code: "codex_app_server_unavailable" });
       await vi.advanceTimersByTimeAsync(100);
 
@@ -398,7 +398,7 @@ describe("Codex App Server client", () => {
     const client = await initializeClient(process);
 
     const resume = client.resumeThread("thread-1");
-    const start = client.startTurn("thread-1", "continue");
+    const start = client.startTurnAndWait("thread-1", "continue");
     expect(messagesFrom(process)).toEqual([
       { method: "thread/resume", id: 2, params: { threadId: "thread-1" } },
       {
@@ -411,10 +411,10 @@ describe("Codex App Server client", () => {
       }
     ]);
 
-    respond(process, { id: 3, result: turnStartResult() });
+    respond(process, { id: 3, result: turnStartResult("turn-1", "completed") });
     respond(process, { id: 2, result: threadResumeResult("thread-1", { type: "idle" }) });
 
-    await expect(start).resolves.toBeUndefined();
+    await expect(start).resolves.toEqual({ turnId: "turn-1", status: "completed" });
     await expect(resume).resolves.toEqual({ exists: true, busy: false });
     await client.close();
   });
@@ -452,7 +452,7 @@ describe("Codex App Server client", () => {
   it("turns malformed JSONL into a terminal protocol failure for every pending request", async () => {
     const client = await initializeClient(process);
     const resume = client.resumeThread("thread-1");
-    const start = client.startTurn("thread-1", "continue");
+    const start = client.startTurnAndWait("thread-1", "continue");
     messagesFrom(process);
     void resume.catch(() => undefined);
     void start.catch(() => undefined);
@@ -509,7 +509,7 @@ describe("Codex App Server client", () => {
 
   it("rejects a turn/start result missing the required turn fields", async () => {
     const client = await initializeClient(process);
-    const start = client.startTurn("thread-1", "continue");
+    const start = client.startTurnAndWait("thread-1", "continue");
     const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
 
     respond(process, { id, result: { turn: { id: "turn-1" } } });
@@ -740,7 +740,7 @@ describe("Codex App Server client", () => {
   it("rejects every pending request when the process exits", async () => {
     const client = await initializeClient(process);
     const resume = client.resumeThread("thread-1");
-    const start = client.startTurn("thread-1", "continue");
+    const start = client.startTurnAndWait("thread-1", "continue");
     messagesFrom(process);
 
     process.exit(17);

@@ -67,11 +67,25 @@ export async function deliverCodexNotification(
         errorCode: "codex_thread_busy"
       };
     }
-    await client.startTurn(
+    const completion = await client.startTurnAndWait(
       delivery.target.threadId,
       buildCodexNotificationPrompt(delivery, job, signal),
       attemptSignal
     );
+    if (completion.status === "interrupted") {
+      return {
+        outcome: "retry",
+        error: "Codex callback turn was interrupted",
+        errorCode: "codex_turn_interrupted"
+      };
+    }
+    if (completion.status === "failed") {
+      return {
+        outcome: "retry",
+        error: "Codex callback turn failed",
+        errorCode: "codex_turn_failed"
+      };
+    }
     return { outcome: "delivered" };
   } catch (error) {
     return classifyCodexError(error);

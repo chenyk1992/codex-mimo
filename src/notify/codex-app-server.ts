@@ -24,7 +24,6 @@ export interface CodexTurnCompletion {
 export interface CodexAppServerClient {
   initialize(signal?: AbortSignal): Promise<void>;
   resumeThread(threadId: string, signal?: AbortSignal): Promise<ThreadResumeResult>;
-  startTurn(threadId: string, prompt: string, signal?: AbortSignal): Promise<void>;
   startTurnAndWait(
     threadId: string,
     prompt: string,
@@ -191,14 +190,6 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
       "codex_app_server_incompatible",
       "Codex thread is unavailable"
     );
-  }
-
-  async startTurn(threadId: string, prompt: string, signal?: AbortSignal): Promise<void> {
-    this.requireInitialized();
-    await this.request("turn/start", {
-      threadId,
-      input: [{ type: "text", text: prompt }]
-    }, signal);
   }
 
   async startTurnAndWait(
