@@ -10,8 +10,23 @@ import {
 } from "../../../src/notify/codex-command.js";
 
 const temporaryRoots: string[] = [];
+const fsFailures = vi.hoisted(() => ({ statPath: undefined as string | undefined }));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    statSync: (file: import("node:fs").PathLike, options?: import("node:fs").StatSyncOptions) => {
+      if (path.normalize(String(file)) === fsFailures.statPath) {
+        throw Object.assign(new Error("simulated inaccessible version folder"), { code: "EACCES" });
+      }
+      return actual.statSync(file, options as never);
+    }
+  };
+});
 
 afterEach(() => {
+  fsFailures.statPath = undefined;
   while (temporaryRoots.length > 0) {
     rmSync(temporaryRoots.pop()!, { recursive: true, force: true });
   }
@@ -150,6 +165,22 @@ describe("Codex command probe", () => {
       desktop.root
     ]);
     expect(JSON.stringify(result)).not.toContain(desktop.bin);
+  });
+
+  it("continues past an unreadable Desktop version folder", async () => {
+    const desktop = createDesktopLocalCodex();
+    fsFailures.statPath = path.normalize(path.dirname(desktop.versions.newer));
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "codex Desktop root\n" });
+
+    const result = await probeCodexCommand({ env: desktop.env, platform: "win32", execute });
+
+    expect(result).toEqual({ ok: true, source: "desktop-local", version: "codex Desktop root" });
+    expect(execute.mock.calls.map(([command]) => command)).toEqual([
+      desktop.versions.older,
+      desktop.root
+    ]);
   });
 
   it("de-duplicates normalized PATH and Desktop-local candidates", async () => {

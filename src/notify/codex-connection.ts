@@ -5,7 +5,7 @@ import {
   codexCommandErrorCode,
   discoverCodexCandidates,
   resolveCodexCommand,
-  type CodexCommandExecutionResult,
+  type CodexCommandExecutor,
   type CodexCommandSelection
 } from "./codex-command.js";
 import {
@@ -37,11 +37,7 @@ export interface PrepareCodexConnectionOptions {
   signal?: AbortSignal;
   requestTimeoutMs?: number;
   candidates?: CodexCommandSelection[];
-  execute?: (
-    command: string,
-    args: string[],
-    options: { env: NodeJS.ProcessEnv; reject: false; timeout: number }
-  ) => PromiseLike<CodexCommandExecutionResult>;
+  execute?: CodexCommandExecutor;
   createClient?: (options?: CodexAppServerClientOptions) => CodexAppServerClient;
 }
 
@@ -72,7 +68,8 @@ export async function prepareCodexConnection(
       candidate,
       execute,
       env,
-      options.requestTimeoutMs ?? 10_000
+      options.requestTimeoutMs ?? 10_000,
+      options.signal
     );
     if (!version.ok) {
       failure = version.probe;
@@ -94,15 +91,17 @@ export async function prepareCodexConnection(
 
 async function readVersion(
   candidate: CodexCommandSelection,
-  execute: NonNullable<PrepareCodexConnectionOptions["execute"]>,
+  execute: CodexCommandExecutor,
   env: NodeJS.ProcessEnv,
-  timeoutMs: number
+  timeoutMs: number,
+  signal: AbortSignal | undefined
 ): Promise<{ ok: true; version: string } | { ok: false; probe: CodexConnectionProbe }> {
   try {
     const result = await execute(candidate.command, ["--version"], {
       env: withUtf8ProcessEnv(env),
       reject: false,
-      timeout: timeoutMs
+      timeout: timeoutMs,
+      ...(signal ? { cancelSignal: signal } : {})
     });
     if (result.exitCode === 0) {
       return { ok: true, version: typeof result.stdout === "string" ? result.stdout.trim() : "" };

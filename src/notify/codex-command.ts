@@ -108,11 +108,15 @@ function desktopLocalCandidates(
   const versions: { command: string; modified: number }[] = [];
   try {
     for (const entry of readdirSync(bin, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const folder = path.join(bin, entry.name);
-      const command = path.join(folder, "codex.exe");
-      if (!existsSync(command)) continue;
-      versions.push({ command: path.normalize(command), modified: statSync(folder).mtimeMs });
+      try {
+        if (!entry.isDirectory()) continue;
+        const folder = path.join(bin, entry.name);
+        const command = path.join(folder, "codex.exe");
+        if (!existsSync(command)) continue;
+        versions.push({ command: path.normalize(command), modified: statSync(folder).mtimeMs });
+      } catch {
+        // One inaccessible version folder must not hide later versions or the stable root.
+      }
     }
   } catch {}
 
@@ -190,15 +194,24 @@ export interface CodexCommandExecutionResult {
   cause?: unknown;
 }
 
+export interface CodexCommandExecutionOptions {
+  env: NodeJS.ProcessEnv;
+  reject: false;
+  timeout: number;
+  cancelSignal?: AbortSignal;
+}
+
+export type CodexCommandExecutor = (
+  command: string,
+  args: string[],
+  options: CodexCommandExecutionOptions
+) => PromiseLike<CodexCommandExecutionResult>;
+
 export interface CodexCommandProbeOptions {
   env?: NodeJS.ProcessEnv;
   /** Test-only platform override; production probes use the current platform. */
   platform?: NodeJS.Platform;
-  execute?: (
-    command: string,
-    args: string[],
-    options: { env: NodeJS.ProcessEnv; reject: false; timeout: number }
-  ) => PromiseLike<CodexCommandExecutionResult>;
+  execute?: CodexCommandExecutor;
 }
 
 export function classifyCodexCommandFailure(

@@ -225,7 +225,8 @@ Real-machine smokes are separately gated:
 
 ```powershell
 $env:RUN_LOCAL_MIMO_HOOK_SMOKE='1'; npm run test:smoke:mimo-hooks
+$env:CODEX_MIMO_INSTALLED_PLUGIN_ROOT='C:\Users\<you>\.codex\plugins\cache\<source>\codex-mimocode\<version>'
 $env:RUN_LOCAL_CODEX_NOTIFY_SMOKE='1'; npm run test:smoke:codex-notify
 ```
 
-The Codex notification smoke also requires a real Codex App Server and an idle, dedicated Codex task with its injected `CODEX_THREAD_ID`. Do not run it from a task handling other work: the smoke deliberately resumes that task and asks its callback turn to fetch `mimo_result` and write an external observation marker.
+The Codex notification smoke also requires a real Codex App Server and an idle, dedicated Codex task with its injected `CODEX_THREAD_ID`. `CODEX_MIMO_INSTALLED_PLUGIN_ROOT` must be the absolute installed package root, not this source checkout; the smoke rejects a missing package or a plugin manifest version that differs from the checkout. It removes Codex-bearing PATH directories after clearing `CODEX_MIMO_CODEX_BIN`, so the run deterministically exercises Desktop-local discovery. Do not run it from a task handling other work: the smoke deliberately resumes that task and asks its callback turn to fetch `mimo_result` and write an external observation marker.

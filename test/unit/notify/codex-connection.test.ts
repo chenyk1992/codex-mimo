@@ -71,6 +71,25 @@ describe("Codex connection preparation", () => {
     }));
   });
 
+  it("passes the delivery attempt signal to version execution", async () => {
+    const controller = new AbortController();
+    const execute = vi.fn().mockResolvedValue({ exitCode: 0, stdout: "codex 1.2\n" });
+
+    await prepareCodexConnection({
+      threadId: "task-1",
+      signal: controller.signal,
+      candidates: [{ command: "codex", source: "path" }],
+      execute,
+      createClient: () => client()
+    });
+
+    expect(execute).toHaveBeenCalledWith(
+      "codex",
+      ["--version"],
+      expect.objectContaining({ cancelSignal: controller.signal })
+    );
+  });
+
   it("accepts a busy target as ready", async () => {
     const preparedClient = client({
       resumeThread: vi.fn(async () => ({ exists: true, busy: true }))

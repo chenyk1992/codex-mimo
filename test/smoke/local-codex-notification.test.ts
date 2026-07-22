@@ -8,10 +8,14 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { describe, expect, it } from "vitest";
 import { readJob } from "../../src/core/job-store.js";
 import { probeCodexCommand } from "../../src/notify/codex-command.js";
+import {
+  resolveInstalledPluginRoot,
+  withoutCodexPathCandidates
+} from "./local-codex-notification-support.js";
 
 const enabled = process.platform === "win32" && process.env.RUN_LOCAL_CODEX_NOTIFY_SMOKE === "1";
 const describeSmoke = enabled ? describe : describe.skip;
-const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const checkoutRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const OUTPUT_MARKER = "CODEX_MIMO_NOTIFY_SMOKE_OUTPUT_v1";
 
 interface McpServerConfig {
@@ -64,7 +68,8 @@ describeSmoke("local Codex notification", () => {
     let receipt: JobReceipt | undefined;
 
     try {
-      const smokeEnv = withoutCodexCommandOverride(process.env);
+      const pluginRoot = resolveInstalledPluginRoot(checkoutRoot, process.env);
+      const smokeEnv = withoutCodexPathCandidates(process.env);
       expect(smokeEnv.CODEX_MIMO_CODEX_BIN).toBeUndefined();
       const probe = await probeCodexCommand({ env: smokeEnv });
       if (!probe.ok) {
@@ -73,7 +78,7 @@ describeSmoke("local Codex notification", () => {
       expect(probe.source).toBe("desktop-local");
 
       initializeSmokeRepository(workspace, markerFile);
-      const server = readPackagedMcpServer();
+      const server = readPackagedMcpServer(pluginRoot);
       transport = new StdioClientTransport({
         command: server.command,
         args: server.args,
@@ -142,7 +147,7 @@ describeSmoke("local Codex notification", () => {
   }, 360_000);
 });
 
-function readPackagedMcpServer(): McpServerConfig {
+function readPackagedMcpServer(pluginRoot: string): McpServerConfig {
   const configFile = path.join(pluginRoot, ".mcp.json");
   const parsed = JSON.parse(fs.readFileSync(configFile, "utf8")) as {
     mcpServers?: Record<string, unknown>;
@@ -190,11 +195,6 @@ function stringEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
   return Object.fromEntries(
     Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined)
   );
-}
-
-function withoutCodexCommandOverride(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const { CODEX_MIMO_CODEX_BIN: _ignored, ...withoutOverride } = env;
-  return withoutOverride;
 }
 
 function initializeSmokeRepository(workspace: string, markerFile: string): void {
