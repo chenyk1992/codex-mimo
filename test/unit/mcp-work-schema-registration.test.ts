@@ -59,4 +59,15 @@ describe("MCP work schema registration", () => {
     }
     expect(mocks.registerTool.mock.calls.map((call) => call[0])).toEqual([...MIMO_TOOL_NAMES]);
   });
+
+  it("describes mimo_compose plan read-only contract and job-result delivery", async () => {
+    const { createMcpServer } = await import("../../src/codex/mcp-server.js");
+    mocks.registerTool.mockClear();
+    createMcpServer();
+    const compose = mocks.registerTool.mock.calls.find((call) => call[0] === "mimo_compose");
+    const description = compose?.[1]?.description ?? "";
+    expect(description.toLowerCase()).toMatch(/plan/);
+    expect(description.toLowerCase()).toMatch(/read-only|read only/);
+    expect(description.toLowerCase()).toMatch(/job result|mimo_result/);
+  });
 });

@@ -30,6 +30,14 @@ describe("compose workflows", () => {
     expect(getComposeWorkflow(workflow).writesAllowed).toBe(expected);
   });
 
+  it("keeps plan read-only with task-only input", () => {
+    expect(getComposeWorkflow("plan")).toMatchObject({
+      writesAllowed: false,
+      requiresTask: true,
+      requiresFile: false
+    });
+  });
+
   it("builds an execute-plan prompt that references the plan file", () => {
     const prompt = buildComposePrompt({
       workflow: getComposeWorkflow("execute-plan"),

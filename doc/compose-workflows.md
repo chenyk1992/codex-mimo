@@ -46,7 +46,13 @@ The work call returns a queued receipt. Codex then relies on the parent-task not
 
 ## Verification
 
-Explicit `verification` commands take precedence over workflow defaults. When neither exists, detection uses:
+Explicit `verification` commands take precedence over workflow defaults. Values are executable command strings run without a shell — not natural-language acceptance criteria. Put scope or state prose (for example `计划不修改业务源码`) in `task`, not in `verification`.
+
+```json
+{ "workflow": "dev", "task": "Implement the feature", "verification": ["npm test", "npm run build"] }
+```
+
+When neither explicit commands nor workflow defaults exist, detection uses:
 
 | Project marker | Command |
 | --- | --- |
@@ -56,6 +62,14 @@ Explicit `verification` commands take precedence over workflow defaults. When ne
 | `package.json` | `npm test` |
 
 Commands are split into executable and arguments and run without a shell. A failed required command produces job status `failed` with `verification_failed` while retaining the execution callback evidence.
+
+## Plan workflow
+
+The `plan` workflow is read-only (`writesAllowed: false`). It returns the plan in the job result via `mimo_result` — callers read it there, not from a saved file. The prompt instructs MiMoCode to return the plan in the final response only and not to save plan files. Asking `plan` to write a plan file intentionally ends as `read_only_violation`.
+
+```json
+{ "workflow": "plan", "task": "Plan the feature; return the plan only" }
+```
 
 ## Reports
 

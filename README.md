@@ -81,7 +81,7 @@ The default Codex flow does not call `mimo_wait`. Codex returns the receipt, the
 
 ## Notification Targets
 
-Each job freezes at most one target when it is created. Resolution order is explicit `notify`, the current process's `CODEX_THREAD_ID`, then no notification.
+Each job freezes at most one target when it is created from explicit `notify` input only. The launcher never reads `CODEX_THREAD_ID` from a long-lived MCP process environment.
 
 Distinguish three independent signals:
 
@@ -91,13 +91,34 @@ Distinguish three independent signals:
 
 A queued work receipt alone does not prove a Codex notification target exists unless the explicit Codex notification launch succeeded.
 
-For Codex Desktop, send `notify: { type: "codex" }` on every work-tool launch so the packaged MCP `env_vars` forwarding can bind the task-scoped `CODEX_THREAD_ID`. If launch fails with `Codex notification requires threadId`, stop and do not retry by omitting `notify`. Windows users must not set `CODEX_THREAD_ID` globally: a stale global value can route a new job to an old task. An explicit Codex target remains available when the current task ID is known:
+For Codex Desktop, pass the current task ID explicitly on every work-tool launch:
 
 ```json
 { "notify": { "type": "codex", "threadId": "thread-id" } }
 ```
 
+Read `CODEX_THREAD_ID` from the task command environment and supply it as `notify.threadId`; never store it globally. If launch fails with `Codex notification requires threadId` or a schema `threadId` required error, stop and do not retry by omitting `notify`.
+
+### Codex Desktop launch sequence
+
+1. Install or identify a standalone Codex CLI that can run `codex --version` from Node/PowerShell.
+2. Set `CODEX_MIMO_CODEX_BIN` before Codex Desktop starts, then restart Desktop so the plugin MCP and detached workers inherit it.
+3. Read the current task-scoped `CODEX_THREAD_ID` from the task command environment and pass it explicitly as `notify.threadId`; never store it globally.
+4. Run `mimo_healthcheck` or `codex-mimo doctor` and require `codexNotification.ok: true` before expecting callbacks.
+5. Launch one work job, stop polling, and let the callback turn call `mimo_result`.
+
 CLI users may omit `notify` intentionally or supply `--notify codex --thread-id <id>`. Cursor companion launches may omit Codex notify. Webhook and Codex notification settings remain mutually exclusive.
+
+### Codex notification error codes
+
+| Error code | Meaning | Action |
+| --- | --- | --- |
+| `codex_cli_not_found` | No standalone CLI resolved | Set `CODEX_MIMO_CODEX_BIN` to a valid executable. |
+| `codex_cli_not_executable` | Resolved path is blocked, including the WindowsApps Desktop binary | Use a standalone CLI outside the protected Desktop package. |
+| `codex_app_server_incompatible` | CLI protocol does not match the client | Upgrade the standalone CLI and rerun doctor. |
+| `codex_app_server_unavailable` | Temporary process/transport failure | Retry after doctor succeeds. |
+| `codex_thread_busy` | Original task is still active | Let durable backoff retry. |
+| `codex_thread_missing` / `codex_thread_forbidden` | Target cannot be resumed | Verify the explicit task ID and permissions. |
 
 Codex delivery is at-least-once across process crashes. In normal operation, one delivery performs one `thread/resume` and one `turn/start`. If the notification process crashes after App Server accepts `turn/start` but before the outbox is settled, the same persisted event ID can be retried and start a duplicate callback turn. The callback prompt includes that event ID and identifies the notification as a possible retry; repeated `mimo_result` reads remain read-only.
 
@@ -137,6 +158,16 @@ CLI exit codes are: `0` success; `2` command, input, or schema error; and `1` ru
 ## Compose Workflows
 
 Registered workflows are `brainstorm`, `plan`, `dev`, `fix`, `fix-ci`, `execute-plan`, `review`, `parallel`, `worktree`, `merge`, and `new-skill`. Compose uses the same worker and job lifecycle as every other kind; only its prompt, workflow rules, verification, and report finalization differ. See [Compose workflows](doc/compose-workflows.md).
+
+`verification` holds executable commands run without a shell — not natural-language acceptance criteria. Put scope or state prose in `task`. The `plan` workflow is read-only and returns its plan through `mimo_result`; asking it to write a plan file ends as `read_only_violation`.
+
+```json
+{ "workflow": "plan", "task": "Plan the feature; return the plan only" }
+```
+
+```json
+{ "workflow": "dev", "task": "Implement the feature", "verification": ["npm test", "npm run build"] }
+```
 
 ## Runtime Files and Recovery
 

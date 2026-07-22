@@ -48,7 +48,9 @@ describe("work tool schemas", () => {
   });
 
   it("defines a strict notification discriminated union", () => {
-    expect(NotifySchema.parse({ type: "codex" })).toEqual({ type: "codex" });
+    expect(() => NotifySchema.parse({ type: "codex" })).toThrow();
+    expect(NotifySchema.parse({ type: "codex", threadId: "task-123" }))
+      .toEqual({ type: "codex", threadId: "task-123" });
     expect(NotifySchema.parse({ type: "webhook", url: "https://example.test/hook", secretEnv: "HOOK_SECRET" }))
       .toEqual({ type: "webhook", url: "https://example.test/hook", secretEnv: "HOOK_SECRET" });
     expect(() => NotifySchema.parse({ type: "codex", url: "https://example.test" })).toThrow();
@@ -99,6 +101,18 @@ describe("work tool schemas", () => {
     expect(() => JobWaitInput.parse({ cwd: "E:/project", pollMs: 1 })).toThrow();
     expect(JobEventsInput.parse({ cwd: "E:/project" }).minLevel).toBe("warn");
     expect(JobWaitInput.parse({ cwd: "E:/project" }).minLevel).toBe("info");
+  });
+
+  it("describes verification as executable no-shell commands, not acceptance criteria", () => {
+    const verification = ComposeInputShape.verification;
+    const fieldDescription = verification.description ?? "";
+    const itemDescription = verification._def.innerType.element.description ?? "";
+    const combined = `${fieldDescription} ${itemDescription}`.toLowerCase();
+
+    expect(combined).toContain("executable");
+    expect(combined).toContain("command");
+    expect(combined).toMatch(/not .*acceptance criteria/);
+    expect(combined).toMatch(/(?:no|without a) shell/);
   });
 });
 

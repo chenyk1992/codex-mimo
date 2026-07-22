@@ -68,6 +68,16 @@ Work tools:
 - `mimo_resume`: create a child job from a `needs_input` or `blocked` parent. Required: `cwd`, parent `jobId`, `task`.
 - `mimo_compose`: run a registered workflow. Required for every request: `cwd`, `workflow`. `brainstorm`, `plan`, `dev`, `fix`, `parallel`, `worktree`, `merge`, and `new-skill` also require `task`; `fix-ci` and `execute-plan` require `file`; `review` requires neither. `fix-ci` may additionally include `task`. Optional fields where valid are `since`, `verification`, and `reportDir`.
 
+`verification` is an array of executable commands (no shell). Put acceptance prose in `task`, not in `verification`. The `plan` workflow is read-only: it returns the plan in the job result via `mimo_result` and must not write plan files — asking it to save a file ends as `read_only_violation`.
+
+```json
+{ "workflow": "plan", "task": "Plan the feature; return the plan only" }
+```
+
+```json
+{ "workflow": "dev", "task": "Implement the feature", "verification": ["npm test", "npm run build"] }
+```
+
 All work tools accept optional `model`, `timeoutMs`, `idleTimeoutMs`, and one notification target:
 
 - `idleTimeoutMs`: optional idle stop-loss in milliseconds (default 30 minutes; `0` disables). Absolute `timeoutMs` is unchanged; whichever budget fires first wins.
@@ -113,7 +123,7 @@ Every work tool returns only this stable receipt shape:
 ## Compose Selection
 
 - `brainstorm`: clarify requirements.
-- `plan`: produce a plan from clear requirements.
+- `plan`: produce a plan from clear requirements; read-only — returns the plan in the job result, do not ask it to write plan files.
 - `dev`: implement a feature with TDD, verification, and review.
 - `fix`: diagnose and repair a bug.
 - `fix-ci`: repair CI from an attached log.
@@ -134,7 +144,8 @@ For stall diagnosis only, an occasional `mimo_status` may read `idleMs` and `las
 
 ## Acceptance and Context Budget
 
-- Keep delegated slices small and provide decisive verification commands.
+- Keep delegated slices small and provide decisive verification commands (executable strings, not natural-language acceptance criteria).
+- Put state or scope prose such as `计划不修改业务源码` in `task`, not in `verification`.
 - Read `mimo_result` first; inspect linked reports, diffs, or events only when needed.
 - Never paste raw JSONL, complete prompts, or long logs into the Codex task by default.
 - After write jobs, inspect the diff and run the narrowest meaningful tests, lint, or typecheck before reporting completion.

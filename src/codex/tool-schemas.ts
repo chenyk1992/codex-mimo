@@ -6,7 +6,7 @@ import {
 
 const CodexNotifySchema = z.object({
   type: z.literal("codex"),
-  threadId: z.string().min(1).optional()
+  threadId: z.string().trim().min(1).describe("Originating Codex task ID")
 }).strict();
 
 const WebhookNotifySchema = z.object({
@@ -60,7 +60,13 @@ export const ComposeInputShape = {
   task: z.string().min(1).optional(),
   file: z.string().min(1).optional(),
   since: z.string().min(1).optional(),
-  verification: z.array(z.string().min(1)).optional(),
+  verification: z.array(
+    z.string().trim().min(1).describe(
+      "One executable command with arguments; commands run without a shell"
+    )
+  ).optional().describe(
+    "Executable verification commands, not natural-language acceptance criteria"
+  ),
   reportDir: z.string().min(1).optional()
 };
 
