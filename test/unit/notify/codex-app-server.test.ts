@@ -104,6 +104,18 @@ function turnStartResult(
   return { turn: { id, status, items: [] } };
 }
 
+function serverToolRequest(id: string | number): Record<string, unknown> {
+  return {
+    id,
+    method: "item/tool/call",
+    params: {
+      threadId: "thread-1", turnId: "turn-1", callId: "call-private",
+      namespace: "codex_mimocode", tool: "mimo_result",
+      arguments: { cwd: "C:\\private", jobId: "private-job" }
+    }
+  };
+}
+
 function messagesFrom(process: FakeAppServerProcess): unknown[] {
   return process.stdin.readableLength === 0
     ? []
@@ -546,6 +558,35 @@ describe("Codex App Server client", () => {
       }
     });
   }
+
+  it.each(["tool-call-1", 77])("rejects unsupported server request %p and still settles", async (id) => {
+    const auditFile = path.join(auditRoot, `rpc-${String(id)}.jsonl`);
+    vi.stubEnv("CODEX_MIMO_APP_SERVER_AUDIT_FILE", auditFile);
+
+    const client = await initializeClient(process);
+    const pending = client.startTurnAndWait("thread-1", "callback prompt");
+    respond(process, { id: 2, result: turnStartResult("turn-1") });
+    messagesFrom(process);
+    respond(process, serverToolRequest(id));
+
+    expect(messagesFrom(process)).toEqual([{
+      id,
+      error: { code: -32601, message: "Codex callback client does not execute App Server tools" }
+    }]);
+
+    respond(process, {
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } }
+    });
+    await expect(pending).resolves.toEqual({ turnId: "turn-1", status: "completed" });
+
+    if (fs.existsSync(auditFile)) {
+      const audit = fs.readFileSync(auditFile, "utf8");
+      expect(audit).not.toContain("private-job");
+      expect(audit).not.toContain("C:\\private");
+      expect(audit).not.toContain("call-private");
+    }
+  });
 
   it("waits for the matching turn/completed notification", async () => {
     const client = await initializeClient(process);

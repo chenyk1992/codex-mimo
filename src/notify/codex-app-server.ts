@@ -53,6 +53,12 @@ interface RpcResponse {
   error?: RpcError;
 }
 
+interface RpcServerRequest {
+  id: string | number;
+  method: string;
+  params: unknown;
+}
+
 interface PendingRequest {
   method: string;
   resolve: (value: unknown) => void;
@@ -360,6 +366,10 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
       this.handleNotification(parsed);
       return;
     }
+    if (isServerRequest(parsed)) {
+      this.respondUnsupportedServerRequest(parsed);
+      return;
+    }
     const response = parsed as unknown as RpcResponse;
     if (!Number.isInteger(response.id)) {
       this.failProtocol();
@@ -423,6 +433,16 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     }
     if (waiter.threadId !== completion.threadId) return;
     waiter.resolve({ turnId: completion.turnId, status: completion.status });
+  }
+
+  private respondUnsupportedServerRequest(request: RpcServerRequest): void {
+    this.write({
+      id: request.id,
+      error: {
+        code: -32601,
+        message: "Codex callback client does not execute App Server tools"
+      }
+    });
   }
 
   private failProtocol(): void {
@@ -735,6 +755,14 @@ function isRpcError(value: unknown): value is RpcError {
 
 function isNotification(value: Record<string, unknown>): boolean {
   return typeof value.method === "string" &&
+    hasOwn(value, "params") &&
+    !hasOwn(value, "result") &&
+    !hasOwn(value, "error");
+}
+
+function isServerRequest(value: Record<string, unknown>): value is RpcServerRequest {
+  return (typeof value.id === "string" || Number.isInteger(value.id)) &&
+    typeof value.method === "string" &&
     hasOwn(value, "params") &&
     !hasOwn(value, "result") &&
     !hasOwn(value, "error");
