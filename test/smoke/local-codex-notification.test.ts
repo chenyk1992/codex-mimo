@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { describe, expect, it } from "vitest";
+import { readJob } from "../../src/core/job-store.js";
 
 const enabled = process.env.RUN_LOCAL_CODEX_NOTIFY_SMOKE === "1";
 const describeSmoke = enabled ? describe : describe.skip;
@@ -17,6 +18,7 @@ interface McpServerConfig {
   args: string[];
   cwd?: string;
   env?: Record<string, string>;
+  env_vars?: string[];
 }
 
 interface JobReceipt {
@@ -62,6 +64,8 @@ describeSmoke("local Codex notification", () => {
     try {
       initializeSmokeRepository(workspace, markerFile);
       const server = readPackagedMcpServer();
+      const forwarded = forwardedEnvironment(process.env, server.env_vars);
+      expect(forwarded.CODEX_THREAD_ID).toBe(threadId);
       transport = new StdioClientTransport({
         command: server.command,
         args: server.args,
@@ -69,7 +73,7 @@ describeSmoke("local Codex notification", () => {
         env: {
           ...stringEnvironment(process.env),
           ...server.env,
-          CODEX_THREAD_ID: threadId,
+          ...forwardedEnvironment(process.env, server.env_vars),
           MIMOCODE_HOME: mimoHome,
           CODEX_MIMO_TOOL_AUDIT_FILE: auditFile,
           CODEX_MIMO_APP_SERVER_AUDIT_FILE: appServerAuditFile
@@ -85,9 +89,14 @@ describeSmoke("local Codex notification", () => {
         cwd: workspace,
         task: "Follow the AGENTS.md notification smoke instructions exactly without changing files.",
         allowWrite: true,
-        timeoutMs: 300_000
+        timeoutMs: 300_000,
+        notify: { type: "codex" }
       });
       expect(receipt).toMatchObject({ kind: "implement", status: "queued" });
+      expect(readJob(workspace, receipt.jobId)?.notificationTarget).toEqual({
+        type: "codex",
+        threadId
+      });
 
       // This filesystem marker is written by the independently resumed Codex task.
       // Its fields must be copied from that task's mimo_result response, so this
@@ -148,7 +157,19 @@ function isMcpServerConfig(value: unknown): value is McpServerConfig {
     typeof server.command === "string" &&
     Array.isArray(server.args) && server.args.every((arg) => typeof arg === "string") &&
     (server.cwd === undefined || typeof server.cwd === "string") &&
-    (server.env === undefined || isStringRecord(server.env));
+    (server.env === undefined || isStringRecord(server.env)) &&
+    (server.env_vars === undefined ||
+      (Array.isArray(server.env_vars) && server.env_vars.every((arg) => typeof arg === "string")));
+}
+
+function forwardedEnvironment(
+  env: NodeJS.ProcessEnv,
+  names: readonly string[] | undefined
+): Record<string, string> {
+  return Object.fromEntries((names ?? []).flatMap((name) => {
+    const value = env[name];
+    return typeof value === "string" && value.trim() ? [[name, value]] : [];
+  }));
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {

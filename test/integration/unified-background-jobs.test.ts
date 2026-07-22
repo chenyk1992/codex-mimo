@@ -17,7 +17,7 @@ import { z } from "zod";
 import type { JobRequestByKind } from "../../src/core/job-definitions.js";
 import { launchJob } from "../../src/core/job-launcher.js";
 import { runJobWorker, type JobWorkerDependencies } from "../../src/core/job-worker.js";
-import { createJobStore, readJob } from "../../src/core/job-store.js";
+import { createJobStore, listJobs, readJob } from "../../src/core/job-store.js";
 import { transitionJob } from "../../src/core/job-transition.js";
 import type { JobKind, JobRecord } from "../../src/core/jobs.js";
 import { createHookCallbackController } from "../../src/mimo/hook-callback.js";
@@ -26,6 +26,7 @@ import { readDeliveries } from "../../src/notify/outbox.js";
 import { dispatchNextDelivery } from "../../src/notify/dispatcher.js";
 import { runNotificationWorker } from "../../src/notify/worker.js";
 import { createCodexAppServerClient } from "../../src/notify/codex-app-server.js";
+import { mimoImplement } from "../../src/codex/tools.js";
 
 const workspaces: string[] = [];
 const children = new Set<ChildProcess>();
@@ -522,5 +523,32 @@ describe("unified background jobs", () => {
     expect(params.input[0].text).toContain("Call mimo_result");
     expect(params.input[0].text).toContain(`jobId "${receipt.jobId}"`);
     expect(params.input[0].text).toContain(`cwd "${cwd.replace(/\\/g, "\\\\")}"`);
+  });
+
+  it("rejects explicit Codex notify without a thread ID and creates no job records", async () => {
+    const cwd = workspace();
+
+    await expect(mimoImplement({
+      cwd,
+      task: "Build it",
+      allowWrite: true,
+      notify: { type: "codex" }
+    }, { env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123) }))
+      .rejects.toThrow("Codex notification requires threadId");
+
+    expect(listJobs(cwd)).toEqual([]);
+    expect(fs.existsSync(path.join(cwd, ".codex-mimo", "jobs"))).toBe(false);
+  });
+
+  it("allows implement without notify and persists no notification target", async () => {
+    const cwd = workspace();
+    const receipt = await mimoImplement({
+      cwd,
+      task: "Build it",
+      allowWrite: true
+    }, { env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123) });
+
+    expect(receipt.status).toBe("queued");
+    expect(readJob(cwd, receipt.jobId)?.notificationTarget).toBeUndefined();
   });
 });
