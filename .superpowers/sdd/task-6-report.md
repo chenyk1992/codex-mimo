@@ -19,7 +19,9 @@
   CLI probe and server launch;
 - requires the probe to select the `desktop-local` source;
 - retains its queued-receipt, exactly-one `mimo_result`, no-`mimo_wait`, and
-  exactly-one `turn/start` assertions.
+  exactly-one `turn/start` assertions; and
+- requires exactly two `initialize` and two target-matched `thread/resume`
+  records, representing launch preflight and final delivery.
 
 `test/integration/unified-background-jobs.test.ts` now creates a temporary
 `LOCALAPPDATA\\OpenAI\\Codex\\bin\\current\\codex.exe` layout with no override or
@@ -40,3 +42,10 @@ initialize/resume for preflight and one for delivery).
 
 The installed-plugin cache refresh and the real Desktop smoke are intentionally
 left to the controller's host acceptance step.
+
+## Review correction
+
+The smoke audit initially asserted one `initialize`/`thread/resume` pair. That
+was corrected to require two pairs: one for the launch-time target preflight and
+one for final notification delivery. It continues to require exactly one
+`turn/start`, ensuring preflight does not create an extra callback turn.

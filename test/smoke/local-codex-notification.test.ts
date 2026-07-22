@@ -124,8 +124,9 @@ describeSmoke("local Codex notification", () => {
       expect(callbackRecords.filter((record) => record.toolName === "mimo_wait")).toHaveLength(0);
 
       const appServerRecords = readAppServerAudit(appServerAuditFile);
-      expect(appServerRecords.filter((record) => record.method === "initialize")).toHaveLength(1);
+      expect(appServerRecords.filter((record) => record.method === "initialize")).toHaveLength(2);
       expect(appServerRecords.filter((record) => record.method === "thread/resume")).toEqual([
+        expect.objectContaining({ threadId }),
         expect.objectContaining({ threadId })
       ]);
       expect(appServerRecords.filter((record) => record.method === "turn/start")).toEqual([
