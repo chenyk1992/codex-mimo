@@ -62,6 +62,19 @@ Every Codex Desktop work launch must send `notify: { type: "codex", threadId: ".
 
 If preflight failed with `codex_cli_not_found`, `codex_cli_not_executable`, or `codex_app_server_unavailable`, run `mimo_healthcheck` and configure `CODEX_MIMO_CODEX_BIN`. Preflight failure does not automatically relaunch without notify; only an explicit user choice may switch to a no-notify or Cursor companion launch.
 
+Preflight validates CLI launchability before job persistence. Resolved Execa spawn failures (including protected WindowsApps Desktop binaries) classify to safe preflight codes. A successful preflight does not merge later App Server callback delivery into job execution; the durable outbox handles delivery independently after the job is created.
+
+Diagnostic example when MiMo is healthy but Codex notification is not:
+
+```text
+MiMo ok + codexNotification.source=path + codex_cli_not_executable
+→ PATH resolved a non-runnable Codex command (commonly protected WindowsApps)
+→ set CODEX_MIMO_CODEX_BIN to a standalone CLI
+→ restart Codex Desktop
+→ require mimo_healthcheck.codexNotification.ok=true
+→ retry with the same explicit notify.threadId
+```
+
 Codex delivery is at-least-once across process crashes. In normal operation, one delivery performs one `thread/resume` and one `turn/start`. If the process crashes after App Server accepts `turn/start` but before durable outbox settlement, the same persisted event ID can be retried and start a duplicate callback turn. The compact prompt exposes the event ID and warns that the notification may be a retry. Busy or temporarily unavailable tasks retry; missing, forbidden, or non-executable CLI launch failures are permanent after one attempt.
 
 ### Codex notification error codes
