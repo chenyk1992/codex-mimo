@@ -1,10 +1,18 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  execa: vi.fn()
+  execa: vi.fn(),
+  probeCodexCommand: vi.fn()
 }));
 
 vi.mock("execa", () => ({ execa: mocks.execa }));
+vi.mock("../../../src/notify/codex-command.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../src/notify/codex-command.js")>();
+  return {
+    ...actual,
+    probeCodexCommand: mocks.probeCodexCommand
+  };
+});
 
 import { mimoHealthcheck } from "../../../src/codex/tools.js";
 
@@ -12,12 +20,23 @@ describe("mimo_healthcheck", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
     mocks.execa.mockReset();
+    mocks.probeCodexCommand.mockReset();
+    mocks.probeCodexCommand.mockResolvedValue({
+      ok: true,
+      source: "path",
+      version: "codex 1.0.0"
+    });
   });
 
   it("returns version on success", async () => {
     mocks.execa.mockResolvedValue({ stdout: "mimo 0.5.0\n", stderr: "" });
     const result = await mimoHealthcheck({ cwd: "/tmp/proj" });
-    expect(result).toEqual({ ok: true, version: "mimo 0.5.0", cwd: "/tmp/proj" });
+    expect(result).toEqual({
+      ok: true,
+      version: "mimo 0.5.0",
+      cwd: "/tmp/proj",
+      codexNotification: { ok: true, source: "path", version: "codex 1.0.0" }
+    });
     expect(mocks.execa).toHaveBeenCalledWith("mimo", ["--version"], expect.objectContaining({
       cwd: "/tmp/proj",
       env: expect.any(Object)
@@ -40,7 +59,31 @@ describe("mimo_healthcheck", () => {
   it("returns error when mimo is not installed", async () => {
     mocks.execa.mockRejectedValue(new Error("ENOENT"));
     const result = await mimoHealthcheck({ cwd: "/tmp/proj" });
-    expect(result).toEqual({ ok: false, error: "mimo not found or not working", cwd: "/tmp/proj" });
+    expect(result).toEqual({
+      ok: false,
+      error: "mimo not found or not working",
+      cwd: "/tmp/proj",
+      codexNotification: { ok: true, source: "path", version: "codex 1.0.0" }
+    });
+  });
+
+  it("keeps top-level ok based on MiMo while reporting codex notification readiness", async () => {
+    mocks.execa.mockResolvedValue({ stdout: "mimo 0.5.0\n", stderr: "" });
+    const result = await mimoHealthcheck({}, {
+      probeCodex: async () => ({
+        ok: false,
+        source: "path",
+        errorCode: "codex_cli_not_executable"
+      })
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      codexNotification: {
+        ok: false,
+        source: "path",
+        errorCode: "codex_cli_not_executable"
+      }
+    });
   });
 
   it("defaults cwd to process.cwd()", async () => {

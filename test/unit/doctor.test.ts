@@ -102,7 +102,8 @@ describe("codex-mimo doctor", () => {
       { cwd: "/project", pluginRoot },
       {
         checkMimoVersion: vi.fn().mockResolvedValue({ ok: true, version: "mimo 0.5.0" }),
-        probeMcpTools: vi.fn().mockResolvedValue([...MIMO_TOOL_NAMES])
+        probeMcpTools: vi.fn().mockResolvedValue([...MIMO_TOOL_NAMES]),
+        probeCodex: vi.fn().mockResolvedValue({ ok: true, source: "path", version: "codex 1.0.0" })
       }
     );
 
@@ -111,5 +112,52 @@ describe("codex-mimo doctor", () => {
     });
     expect(JSON.stringify(result)).not.toContain("secret-token");
     expect(JSON.stringify(result)).not.toContain("C:/private/path");
+  });
+
+  it("reports codex notification readiness without affecting overall doctor health", async () => {
+    const pluginRoot = createPluginRoot();
+    const result = await runDoctor(
+      { cwd: "/project", pluginRoot },
+      {
+        checkMimoVersion: vi.fn().mockResolvedValue({ ok: true, version: "mimo 0.5.0" }),
+        probeMcpTools: vi.fn().mockResolvedValue([...MIMO_TOOL_NAMES]),
+        probeCodex: vi.fn().mockResolvedValue({
+          ok: false,
+          source: "path",
+          errorCode: "codex_cli_not_executable"
+        })
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.codexNotification).toEqual({
+      ok: false,
+      source: "path",
+      errorCode: "codex_cli_not_executable"
+    });
+    expect(formatDoctorReport(result)).toContain("Codex notification CLI: failed (codex_cli_not_executable)");
+    const codexLine = formatDoctorReport(result).split("\n").find((line) =>
+      line.startsWith("Codex notification CLI:")
+    );
+    expect(codexLine).toBeDefined();
+    expect(codexLine).not.toMatch(/C:\\|\/Users\/|\/home\//);
+  });
+
+  it("prints codex notification success with version", async () => {
+    const pluginRoot = createPluginRoot();
+    const result = await runDoctor(
+      { cwd: "/project", pluginRoot },
+      {
+        checkMimoVersion: vi.fn().mockResolvedValue({ ok: true, version: "mimo 0.5.0" }),
+        probeMcpTools: vi.fn().mockResolvedValue([...MIMO_TOOL_NAMES]),
+        probeCodex: vi.fn().mockResolvedValue({
+          ok: true,
+          source: "configured",
+          version: "codex 2.0.0"
+        })
+      }
+    );
+
+    expect(formatDoctorReport(result)).toContain("Codex notification CLI: ok (codex 2.0.0)");
   });
 });

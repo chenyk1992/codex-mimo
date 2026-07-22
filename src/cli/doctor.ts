@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { MIMO_TOOL_NAMES } from "../codex/tool-names.js";
 import { buildMimoProbeEnvironment, resolveMimoProcessSelection } from "../mimo/run-json.js";
 import { DOCTOR_HINT } from "./hints.js";
+import { probeCodexCommand, type CodexCommandProbe } from "../notify/codex-command.js";
 
 const MCP_SERVER_NAME = "codex-mimocode";
 const DEFAULT_MCP_TIMEOUT_MS = 10_000;
@@ -25,6 +26,7 @@ export interface DoctorReport {
   pluginFiles: DoctorFileCheck;
   mcpConfig: DoctorMcpConfigCheck;
   mcpProbe: DoctorMcpProbeCheck;
+  codexNotification: CodexCommandProbe;
   hostVisibilityNote: string;
 }
 
@@ -73,6 +75,7 @@ interface McpServerConfig {
 interface DoctorDeps {
   checkMimoVersion?: (cwd: string) => Promise<DoctorCheck>;
   probeMcpTools?: (pluginRoot: string, server: McpServerConfig, timeoutMs: number) => Promise<string[]>;
+  probeCodex?: typeof probeCodexCommand;
 }
 
 interface RawMcpConfigCheck {
@@ -87,11 +90,13 @@ export async function runDoctor(input: DoctorInput = {}, deps: DoctorDeps = {}):
   const timeoutMs = input.timeoutMs ?? DEFAULT_MCP_TIMEOUT_MS;
   const checkMimoVersion = deps.checkMimoVersion ?? defaultCheckMimoVersion;
   const probeMcpTools = deps.probeMcpTools ?? defaultProbeMcpTools;
+  const probeCodex = deps.probeCodex ?? probeCodexCommand;
 
   const mimoBinary = await checkMimoVersion(cwd);
   const pluginFiles = checkPluginFiles(pluginRoot);
   const rawMcpConfig = readMcpConfig(pluginRoot);
   const mcpProbe = await probeToolsIfPossible(pluginRoot, rawMcpConfig, timeoutMs, probeMcpTools);
+  const codexNotification = await probeCodex();
 
   return {
     ok: mimoBinary.ok && pluginFiles.ok && rawMcpConfig.ok && mcpProbe.ok,
@@ -101,6 +106,7 @@ export async function runDoctor(input: DoctorInput = {}, deps: DoctorDeps = {}):
     pluginFiles,
     mcpConfig: rawMcpConfig.report,
     mcpProbe,
+    codexNotification,
     hostVisibilityNote: "doctor probes the plugin MCP server; it cannot prove the current Codex thread has injected these tools."
   };
 }
@@ -113,7 +119,8 @@ export function formatDoctorReport(report: DoctorReport): string {
     `MiMo binary: ${report.mimoBinary.ok ? `ok (${report.mimoBinary.version ?? "version unknown"})` : `failed (${report.mimoBinary.error ?? "unknown error"})`}`,
     `Plugin files: ${report.pluginFiles.ok ? "ok" : `failed (missing ${report.pluginFiles.missing.join(", ")})`}`,
     `MCP config: ${report.mcpConfig.ok ? "ok" : `failed (${report.mcpConfig.error ?? "unknown error"})`}`,
-    `MCP tools: ${report.mcpProbe.ok ? "ok" : "failed"}`
+    `MCP tools: ${report.mcpProbe.ok ? "ok" : "failed"}`,
+    formatCodexNotificationLine(report.codexNotification)
   ];
 
   if (report.mcpProbe.tools.length > 0) {
@@ -283,6 +290,15 @@ function isMcpServerConfig(value: unknown): value is McpServerConfig {
 function isStringRecord(value: unknown): value is Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   return Object.values(value).every((item) => typeof item === "string");
+}
+
+function formatCodexNotificationLine(probe: CodexCommandProbe): string {
+  if (probe.ok) {
+    return probe.version
+      ? `Codex notification CLI: ok (${probe.version})`
+      : "Codex notification CLI: ok";
+  }
+  return `Codex notification CLI: failed (${probe.errorCode ?? "codex_app_server_unavailable"})`;
 }
 
 function sanitizeMcpServerConfig(server: McpServerConfig): DoctorMcpServerConfig {

@@ -43,12 +43,22 @@ import {
 import type { NotificationDelivery } from "../notify/types.js";
 import { startNotificationDispatch } from "../notify/dispatch-process.js";
 import { publicProgressSummary } from "../core/public-summary.js";
+import { probeCodexCommand } from "../notify/codex-command.js";
 
 const WAIT_CHECK_INTERVAL_MS = 1_000;
 
-export async function mimoHealthcheck(input: unknown) {
+export interface MimoHealthcheckDependencies {
+  probeCodex?: typeof probeCodexCommand;
+}
+
+export async function mimoHealthcheck(
+  input: unknown,
+  deps: MimoHealthcheckDependencies = {}
+) {
   const parsed = HealthcheckInput.parse(input);
   const cwd = parsed.cwd ?? process.cwd();
+  const probeCodex = deps.probeCodex ?? probeCodexCommand;
+  const codexNotification = await probeCodex();
   try {
     const env = buildMimoProbeEnvironment(cwd);
     const selection = resolveMimoProcessSelection(env);
@@ -56,9 +66,9 @@ export async function mimoHealthcheck(input: unknown) {
       cwd,
       env
     });
-    return { ok: true, version: result.stdout.trim(), cwd };
+    return { ok: true, version: result.stdout.trim(), cwd, codexNotification };
   } catch {
-    return { ok: false, error: "mimo not found or not working", cwd };
+    return { ok: false, error: "mimo not found or not working", cwd, codexNotification };
   }
 }
 

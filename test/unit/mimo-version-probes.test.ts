@@ -12,6 +12,7 @@ vi.mock("execa", () => ({ execa: mocks.execa }));
 import { runDoctor } from "../../src/cli/doctor.js";
 import { createJobStore, resolveJobPaths } from "../../src/core/job-store.js";
 import { mimoHealthcheck } from "../../src/codex/tools.js";
+import { CODEX_COMMAND_ENV, probeCodexCommand } from "../../src/notify/codex-command.js";
 import { enqueueDelivery } from "../../src/notify/outbox.js";
 
 const temporaryRoots: string[] = [];
@@ -73,7 +74,8 @@ function createPluginRoot(): string {
 }
 
 function expectProbeEnvironmentToOmit(secretEnv: string, secretValue: string): void {
-  const options = mocks.execa.mock.calls[0]?.[2] as { env?: NodeJS.ProcessEnv } | undefined;
+  const mimoCall = mocks.execa.mock.calls.find((call) => call[0] === "mimo");
+  const options = mimoCall?.[2] as { env?: NodeJS.ProcessEnv } | undefined;
   expect(options?.env).toBeDefined();
   expect(options?.env?.SAFE_VERSION_PROBE_VALUE).toBe("retained");
   expect(Object.entries(options?.env ?? {}).filter(([name]) =>
@@ -96,10 +98,13 @@ describe("MiMo version probes", () => {
     vi.stubEnv(secretEnv, secretValue);
     mocks.execa.mockResolvedValue({ stdout: "mimo 0.5.0\n" });
 
-    await mimoHealthcheck({ cwd });
+    await mimoHealthcheck({ cwd }, {
+      probeCodex: async () => ({ ok: true, source: "path" })
+    });
 
-    expect(mocks.execa.mock.calls[0]?.[0]).toBe("mimo");
-    expect(JSON.stringify(mocks.execa.mock.calls[0])).not.toContain(secretValue);
+    expect(mocks.execa.mock.calls.find((call) => call[0] === "mimo")?.[0]).toBe("mimo");
+    const mimoCall = mocks.execa.mock.calls.find((call) => call[0] === "mimo");
+    expect(JSON.stringify(mimoCall)).not.toContain(secretValue);
   });
 
   it("does not select or persist a persisted MIMO_COMMAND secret for the doctor probe", async () => {
@@ -114,10 +119,13 @@ describe("MiMo version probes", () => {
 
     const report = await runDoctor(
       { cwd, pluginRoot },
-      { probeMcpTools: vi.fn().mockResolvedValue([]) }
+      {
+        probeMcpTools: vi.fn().mockResolvedValue([]),
+        probeCodex: async () => ({ ok: false, source: "path", errorCode: "codex_cli_not_found" })
+      }
     );
 
-    expect(mocks.execa.mock.calls[0]?.[0]).toBe("mimo");
+    expect(mocks.execa.mock.calls.find((call) => call[0] === "mimo")?.[0]).toBe("mimo");
     expect(JSON.stringify(report)).not.toContain(secretValue);
   });
 
@@ -129,7 +137,9 @@ describe("MiMo version probes", () => {
     vi.stubEnv("SAFE_VERSION_PROBE_VALUE", "retained");
     mocks.execa.mockResolvedValue({ stdout: "mimo 0.5.0\n" });
 
-    await mimoHealthcheck({ cwd });
+    await mimoHealthcheck({ cwd }, {
+      probeCodex: async () => ({ ok: true, source: "path" })
+    });
 
     expectProbeEnvironmentToOmit(secretEnv, secretValue);
   });
@@ -145,7 +155,10 @@ describe("MiMo version probes", () => {
 
     await runDoctor(
       { cwd, pluginRoot },
-      { probeMcpTools: vi.fn().mockResolvedValue([]) }
+      {
+        probeMcpTools: vi.fn().mockResolvedValue([]),
+        probeCodex: async () => ({ ok: true, source: "path", version: "codex 1.0.0" })
+      }
     );
 
     expectProbeEnvironmentToOmit(secretEnv, secretValue);
@@ -159,8 +172,26 @@ describe("MiMo version probes", () => {
     vi.stubEnv("SAFE_VERSION_PROBE_VALUE", "retained");
     mocks.execa.mockResolvedValue({ stdout: "mimo 0.5.0\n" });
 
-    await mimoHealthcheck({ cwd });
+    await mimoHealthcheck({ cwd }, {
+      probeCodex: async () => ({ ok: true, source: "path" })
+    });
 
     expectProbeEnvironmentToOmit(secretEnv, secretValue);
+  });
+
+  it("does not expose configured CODEX_MIMO_CODEX_BIN paths in codex probe results", async () => {
+    const configuredPath = "C:/private/codex-install/codex.exe";
+    const execute = vi.fn().mockRejectedValue(Object.assign(new Error(configuredPath), { code: "EPERM" }));
+    const result = await probeCodexCommand({
+      env: { [CODEX_COMMAND_ENV]: configuredPath },
+      execute
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      source: "configured",
+      errorCode: "codex_cli_not_executable"
+    });
+    expect(JSON.stringify(result)).not.toContain(configuredPath);
   });
 });

@@ -98,7 +98,8 @@ export function createMcpServer(overrides: Partial<McpToolHandlers> = {}): McpSe
     description: "Resume a paused job through its parent job ID", inputSchema: ResumeInput
   }, handle("mimo_resume", handlers.mimoResume));
   server.registerTool("mimo_compose", {
-    description: "Run a Compose workflow in a background job", inputSchema: ComposeInput
+    description: "Run a Compose workflow in a background job. The plan workflow is read-only and returns its plan in the job result via mimo_result; verification holds executable no-shell commands, not acceptance-criteria prose.",
+    inputSchema: ComposeInput
   }, handle("mimo_compose", handlers.mimoCompose));
   server.registerTool("mimo_status", {
     description: "Show compact status for an active or recent job", inputSchema: JobStatusInput
