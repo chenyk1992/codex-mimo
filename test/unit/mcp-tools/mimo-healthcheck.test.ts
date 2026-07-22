@@ -67,7 +67,7 @@ describe("mimo_healthcheck", () => {
     });
   });
 
-  it("keeps top-level ok based on MiMo while reporting codex notification readiness", async () => {
+  it("surfaces corrected non-executable readiness independently of MiMo health", async () => {
     mocks.execa.mockResolvedValue({ stdout: "mimo 0.5.0\n", stderr: "" });
     const result = await mimoHealthcheck({}, {
       probeCodex: async () => ({

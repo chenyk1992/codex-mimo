@@ -20,6 +20,17 @@ const PREFLIGHT_ERROR_CODES = new Set<CodexCommandErrorCode>([
   "codex_app_server_unavailable"
 ]);
 
+function preflightRecovery(errorCode: CodexCommandErrorCode): string {
+  switch (errorCode) {
+    case "codex_cli_not_found":
+      return "Set CODEX_MIMO_CODEX_BIN to a runnable standalone Codex CLI, restart Codex Desktop, then run mimo_healthcheck.";
+    case "codex_cli_not_executable":
+      return "Set CODEX_MIMO_CODEX_BIN to a standalone Codex CLI outside protected WindowsApps packages, restart Codex Desktop, then run mimo_healthcheck.";
+    case "codex_app_server_unavailable":
+      return "The selected Codex CLI did not pass its launchability check. Run mimo_healthcheck and verify CODEX_MIMO_CODEX_BIN before retrying.";
+  }
+}
+
 export interface LaunchJobInput {
   kind: JobKind;
   cwd: string;
@@ -66,7 +77,7 @@ export async function launchJob(
         ? probe.errorCode!
         : "codex_app_server_unavailable";
       throw new InputValidationError(
-        `Codex notification preflight failed: ${errorCode}. Run mimo_healthcheck and configure CODEX_MIMO_CODEX_BIN.`
+        `Codex notification preflight failed: ${errorCode}. ${preflightRecovery(errorCode)}`
       );
     }
   }

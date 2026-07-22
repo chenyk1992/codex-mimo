@@ -79,16 +79,25 @@ describe("launchJob", () => {
   });
 
   it.each([
-    "codex_cli_not_found",
-    "codex_cli_not_executable",
-    "codex_app_server_unavailable"
-  ] as const)("rejects Codex preflight failure %s without creating a job", async (errorCode) => {
+    [
+      "codex_cli_not_found",
+      "Set CODEX_MIMO_CODEX_BIN to a runnable standalone Codex CLI, restart Codex Desktop, then run mimo_healthcheck."
+    ],
+    [
+      "codex_cli_not_executable",
+      "Set CODEX_MIMO_CODEX_BIN to a standalone Codex CLI outside protected WindowsApps packages, restart Codex Desktop, then run mimo_healthcheck."
+    ],
+    [
+      "codex_app_server_unavailable",
+      "The selected Codex CLI did not pass its launchability check. Run mimo_healthcheck and verify CODEX_MIMO_CODEX_BIN before retrying."
+    ]
+  ] as const)("rejects %s before persistence with safe recovery", async (errorCode, recovery) => {
     const cwd = workspace();
     const createJob = vi.fn();
     const spawnJobSupervisor = vi.fn();
     const probeCodex = vi.fn().mockResolvedValue({
       ok: false,
-      source: "path",
+      source: "configured",
       errorCode,
       version: "should-not-leak"
     });
@@ -107,8 +116,9 @@ describe("launchJob", () => {
     })).rejects.toSatisfy((error: unknown) => {
       expect(error).toBeInstanceOf(InputValidationError);
       expect((error as Error).message).toBe(
-        `Codex notification preflight failed: ${errorCode}. Run mimo_healthcheck and configure CODEX_MIMO_CODEX_BIN.`
+        `Codex notification preflight failed: ${errorCode}. ${recovery}`
       );
+      expect((error as Error).message).not.toContain("C:\\private\\codex.exe");
       expect((error as Error).message).not.toContain("private");
       expect((error as Error).message).not.toContain("should-not-leak");
       return true;

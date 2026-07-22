@@ -181,7 +181,12 @@ describe("MiMo version probes", () => {
 
   it("does not expose configured CODEX_MIMO_CODEX_BIN paths in codex probe results", async () => {
     const configuredPath = "C:/private/codex-install/codex.exe";
-    const execute = vi.fn().mockRejectedValue(Object.assign(new Error(configuredPath), { code: "EPERM" }));
+    const execute = vi.fn().mockResolvedValue({
+      failed: true,
+      exitCode: undefined,
+      stdout: "",
+      cause: Object.assign(new Error(configuredPath), { code: "EPERM" })
+    });
     const result = await probeCodexCommand({
       env: { [CODEX_COMMAND_ENV]: configuredPath },
       execute
