@@ -41,7 +41,8 @@ describe("mimo_compose", () => {
       workflow: "dev",
       task: "Build it",
       verification: ["npm test"],
-      timeoutMs: 1_800_000
+      timeoutMs: 1_800_000,
+      idleTimeoutMs: 1_800_000
     });
     expect(spawnJobSupervisor).toHaveBeenCalledWith(cwd);
   });

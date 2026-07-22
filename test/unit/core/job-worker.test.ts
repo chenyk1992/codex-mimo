@@ -1270,7 +1270,8 @@ describe("runJobWorker", () => {
 
   it.each([
     ["process_timeout", "timeout"],
-    ["user_cancelled", "cancelled"]
+    ["user_cancelled", "cancelled"],
+    ["idle_timeout", "timeout"]
   ] as const)("maps %s to %s", async (terminationReason, status) => {
     const cwd = tempWorkspace();
     const job = seedActualImplementJob(cwd);
@@ -1281,7 +1282,46 @@ describe("runJobWorker", () => {
 
     await runJobWorker(cwd, job.id, deps);
 
-    expect(readJob(cwd, job.id)).toMatchObject({ status, pid: null });
+    const expected = terminationReason === "idle_timeout"
+      ? { status, pid: null, errorCode: "idle_timeout" }
+      : { status, pid: null };
+    expect(readJob(cwd, job.id)).toMatchObject(expected);
+  });
+
+  it("passes idleTimeoutMs from the request into the streaming runner", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "Idle budget",
+      request: { cwd, task: "Idle budget", allowWrite: true, idleTimeoutMs: 0 }
+    });
+    const deps = workerDeps();
+
+    await runJobWorker(cwd, job.id, deps);
+
+    const options = vi.mocked(deps.runMimoStreaming).mock.calls[0]?.[2];
+    expect(options?.idleTimeoutMs).toBe(0);
+  });
+
+  it("persists live observation fields while streaming stdout", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "implement");
+    const deps = workerDeps({
+      runMimoStreaming: async (_cwd, _args, options) => {
+        await options.onStart?.(456);
+        await options.onLine?.('{"type":"tool_use","sessionID":"ses_obs","part":{"type":"tool","tool":"bash","state":{"input":{"command":"npm test"}}}}');
+        await options.onLine?.('{"type":"text","text":"Done.","sessionID":"ses_obs"}');
+        return { ...completedRun, pid: 456 };
+      }
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+    await vi.waitFor(() => {
+      expect(readJob(cwd, job.id)).toMatchObject({
+        lastTool: "bash"
+      });
+    });
+    expect(readJob(cwd, job.id)?.lastEventAt).toEqual(expect.any(String));
   });
 
   it.each(["needs_input", "blocked", "failed"] as const)(

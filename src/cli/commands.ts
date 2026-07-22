@@ -65,7 +65,7 @@ const REMOVED_FLAGS = new Set([
 ]);
 const BOOLEAN_FLAGS = new Set(["--allow-write", "--all", "--json"]);
 const VALUE_FLAGS = new Set([
-  "--cwd", "--model", "--timeout-ms", "--notify", "--thread-id", "--url", "--secret-env",
+  "--cwd", "--model", "--timeout-ms", "--idle-timeout-ms", "--notify", "--thread-id", "--url", "--secret-env",
   "--base", "--file", "--job-id", "--workflow", "--since", "--verify", "--report-dir",
   "--since-cursor", "--limit", "--min-level"
 ]);
@@ -258,11 +258,13 @@ async function runInternal(
 function parseJobOptions(cwd: string, parsed: ParsedArguments) {
   const model = parsed.takeValue("--model");
   const timeoutMs = parsed.takeOptionalInteger("--timeout-ms", true);
+  const idleTimeoutMs = parsed.takeOptionalInteger("--idle-timeout-ms", false);
   const notify = parseNotification(parsed);
   return {
     cwd,
     ...(model ? { model } : {}),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(idleTimeoutMs === undefined ? {} : { idleTimeoutMs }),
     ...(notify ? { notify } : {})
   };
 }

@@ -7,7 +7,7 @@ import type {
 
 export interface RunEvidence {
   exitCode: number;
-  terminationReason?: "process_timeout" | "host_abort" | "user_cancelled";
+  terminationReason?: "process_timeout" | "idle_timeout" | "host_abort" | "user_cancelled";
   executionCallback?: ExecutionCallbackSummary;
   verification: JobVerification[];
   finalText: string;
@@ -71,6 +71,14 @@ export function classifyRunOutcome(evidence: RunEvidence): JobOutcome {
 
   if (evidence.terminationReason === "user_cancelled") {
     return failureOutcome("cancelled", "MiMoCode job was cancelled.", "cancelled", common);
+  }
+  if (evidence.terminationReason === "idle_timeout") {
+    return failureOutcome(
+      "timeout",
+      "MiMoCode job idle-timed out.",
+      "idle_timeout",
+      common
+    );
   }
   if (
     evidence.terminationReason === "process_timeout" ||

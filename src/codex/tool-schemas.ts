@@ -21,6 +21,7 @@ export const JobOptionsSchema = z.object({
   cwd: z.string().min(1),
   model: z.string().min(1).optional(),
   timeoutMs: z.number().int().positive().default(1_800_000),
+  idleTimeoutMs: z.number().int().min(0).default(1_800_000),
   notify: NotifySchema.optional()
 }).strict();
 

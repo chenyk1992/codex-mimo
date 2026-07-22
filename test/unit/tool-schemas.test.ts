@@ -26,8 +26,25 @@ const forbidden = [
 describe("work tool schemas", () => {
   it("accepts only the common job options", () => {
     expect(Object.keys(JobOptionsSchema.shape).sort()).toEqual([
-      "cwd", "model", "notify", "timeoutMs"
+      "cwd", "idleTimeoutMs", "model", "notify", "timeoutMs"
     ]);
+  });
+
+  it("defaults idleTimeoutMs to 30 minutes when omitted", () => {
+    expect(JobOptionsSchema.parse({ cwd: "E:/project" }).idleTimeoutMs).toBe(1_800_000);
+    expect(PlanInput.parse({ cwd: "E:/project", task: "Plan" }).idleTimeoutMs).toBe(1_800_000);
+    expect(ImplementInput.parse({ cwd: "E:/project", task: "Build", allowWrite: true }).idleTimeoutMs)
+      .toBe(1_800_000);
+  });
+
+  it("accepts idleTimeoutMs of 0 to disable idle stop-loss", () => {
+    expect(JobOptionsSchema.parse({ cwd: "E:/project", idleTimeoutMs: 0 }).idleTimeoutMs).toBe(0);
+    expect(PlanInput.parse({ cwd: "E:/project", task: "Plan", idleTimeoutMs: 0 }).idleTimeoutMs).toBe(0);
+  });
+
+  it("rejects negative idleTimeoutMs", () => {
+    expect(() => JobOptionsSchema.parse({ cwd: "E:/project", idleTimeoutMs: -1 })).toThrow();
+    expect(() => PlanInput.parse({ cwd: "E:/project", task: "Plan", idleTimeoutMs: -1 })).toThrow();
   });
 
   it("defines a strict notification discriminated union", () => {
@@ -53,13 +70,13 @@ describe("work tool schemas", () => {
   });
 
   it("keeps exactly approved per-tool fields plus common options", () => {
-    expect(Object.keys(PlanInput.shape).sort()).toEqual(["cwd", "model", "notify", "task", "timeoutMs"]);
-    expect(Object.keys(ImplementInput.shape).sort()).toEqual(["allowWrite", "cwd", "model", "notify", "task", "timeoutMs"]);
-    expect(Object.keys(ReviewInput.shape).sort()).toEqual(["base", "cwd", "model", "notify", "timeoutMs"]);
-    expect(Object.keys(FixCiInput.shape).sort()).toEqual(["cwd", "file", "model", "notify", "task", "timeoutMs"]);
-    expect(Object.keys(ResumeInput.shape).sort()).toEqual(["cwd", "jobId", "model", "notify", "task", "timeoutMs"]);
+    expect(Object.keys(PlanInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "model", "notify", "task", "timeoutMs"]);
+    expect(Object.keys(ImplementInput.shape).sort()).toEqual(["allowWrite", "cwd", "idleTimeoutMs", "model", "notify", "task", "timeoutMs"]);
+    expect(Object.keys(ReviewInput.shape).sort()).toEqual(["base", "cwd", "idleTimeoutMs", "model", "notify", "timeoutMs"]);
+    expect(Object.keys(FixCiInput.shape).sort()).toEqual(["cwd", "file", "idleTimeoutMs", "model", "notify", "task", "timeoutMs"]);
+    expect(Object.keys(ResumeInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "jobId", "model", "notify", "task", "timeoutMs"]);
     expect(Object.keys(ComposeInputShape).sort()).toEqual([
-      "cwd", "file", "model", "notify", "reportDir", "since", "task", "timeoutMs", "verification", "workflow"
+      "cwd", "file", "idleTimeoutMs", "model", "notify", "reportDir", "since", "task", "timeoutMs", "verification", "workflow"
     ]);
   });
 

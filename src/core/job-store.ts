@@ -102,6 +102,7 @@ export function createJobStore(cwd: string, options: JobStoreOptions = {}): {
         updatedAt: timestamp,
         changedFiles: [],
         verification: [],
+        idleTimeoutMs: readIdleTimeoutFromRequest(input.request),
         notificationTarget: input.notificationTarget,
         logFile: paths.logFile,
         eventsFile: paths.eventsFile,
@@ -339,6 +340,9 @@ function isJobRecord(value: unknown, expectedJobId: string): value is JobRecord 
     typeof value.eventsFile === "string" &&
     typeof value.signalsFile === "string" &&
     typeof value.notificationOutboxFile === "string" &&
+    isOptionalTimestamp(value.lastEventAt) &&
+    isOptionalString(value.lastTool) &&
+    isOptionalNonNegativeInteger(value.idleTimeoutMs) &&
     (value.pendingTransition === undefined ||
       (isJobStatus(value.status) && isPendingJobTransition(value.pendingTransition, value.status)))
   );
@@ -648,6 +652,22 @@ function isCancellationRequestState(status: JobRecord["status"], value: unknown)
 
 function isPositiveInteger(value: unknown): boolean {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function isOptionalNonNegativeInteger(value: unknown): boolean {
+  return value === undefined ||
+    (typeof value === "number" && Number.isInteger(value) && value >= 0);
+}
+
+function readIdleTimeoutFromRequest(request: unknown): number {
+  if (typeof request !== "object" || request === null || Array.isArray(request)) {
+    return 1_800_000;
+  }
+  const value = (request as Record<string, unknown>).idleTimeoutMs;
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0 && Number.isInteger(value)) {
+    return value;
+  }
+  return 1_800_000;
 }
 
 function pruneState(cwd: string, state: JobState, maxJobs: number): JobState {

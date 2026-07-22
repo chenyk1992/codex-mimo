@@ -51,7 +51,8 @@ const DEFAULT_TIMEOUT_MS = 1_800_000;
 const CommonRequestSchema = z.object({
   cwd: z.string().min(1),
   model: z.string().min(1).optional(),
-  timeoutMs: z.number().int().positive().default(DEFAULT_TIMEOUT_MS)
+  timeoutMs: z.number().int().positive().default(DEFAULT_TIMEOUT_MS),
+  idleTimeoutMs: z.number().int().min(0).default(DEFAULT_TIMEOUT_MS)
 }).strict();
 
 const PlanRequestSchema = CommonRequestSchema.extend({

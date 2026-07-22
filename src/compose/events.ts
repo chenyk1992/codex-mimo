@@ -121,6 +121,27 @@ export function summarizeEvents(events: NormalizedMimoEvent[]): EventSummary {
   };
 }
 
+export function extractSessionIdFromRawLine(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  try {
+    return extractSessionId(JSON.parse(trimmed));
+  } catch {
+    return null;
+  }
+}
+
+export function extractToolNameFromRawLine(line: string): string | undefined {
+  const trimmed = line.trim();
+  if (!trimmed) return undefined;
+  try {
+    const normalized = normalizeMimoEvent(JSON.parse(trimmed));
+    return normalized.type === "tool" ? normalized.toolName : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function extractSessionIdFromEvents(events: NormalizedMimoEvent[]): string | null {
   for (const event of events) {
     const sessionId = extractSessionId(event.raw);

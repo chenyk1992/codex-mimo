@@ -21,7 +21,9 @@ import { recoverStaleQueuedJobs } from "../core/job-recovery.js";
 import {
   spawnNotificationWorker,
   terminateOwnedJobProcess,
-  type OwnedProcessTermination
+  verifyProcessIdentity,
+  type OwnedProcessTermination,
+  type ProcessIdentityVerification
 } from "../core/job-process.js";
 import type { JobNotificationStatus, JobRecord } from "../core/jobs.js";
 import { renderJobResult, renderJobStatus } from "../core/job-render.js";
@@ -133,14 +135,40 @@ export async function mimoResume(input: unknown, deps: LaunchJobDependencies = {
   }, deps);
 }
 
-export async function mimoStatus(input: unknown) {
+export async function mimoStatus(input: unknown, deps: MimoStatusDependencies = {}) {
   const parsed = JobStatusInput.parse(input);
   const job = parsed.jobId ? readJob(parsed.cwd, parsed.jobId) : listJobs(parsed.cwd)[0];
   if (!job) throw new Error("No jobs recorded for this workspace.");
+  const processAlive = probeProcessAlive(job, deps);
   return renderJobStatus(job, {
     progress: readRecentJobLogLines(job.logFile, 5),
-    notification: notificationStatus(job)
+    notification: notificationStatus(job),
+    ...(processAlive !== undefined ? { processAlive } : {})
   });
+}
+
+export interface MimoStatusDependencies {
+  verifyProcess?: (
+    pid: number,
+    expectedIdentity: string | null | undefined
+  ) => ProcessIdentityVerification;
+}
+
+function probeProcessAlive(
+  job: JobRecord,
+  deps: MimoStatusDependencies
+): boolean | "unknown" | undefined {
+  if (job.status !== "running") return undefined;
+  if (typeof job.pid !== "number" || job.pid <= 0) return undefined;
+  const verify = deps.verifyProcess ?? verifyProcessIdentity;
+  try {
+    const result = verify(job.pid, job.processIdentity);
+    if (result.status === "match") return true;
+    if (result.status === "not_running" || result.status === "identity_mismatch") return false;
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 export async function mimoEvents(input: unknown) {

@@ -61,6 +61,52 @@ describe("job store", () => {
     expect(listJobs(cwd).map((entry) => entry.id)).toEqual([job.id]);
   });
 
+  it("seeds idleTimeoutMs from the request when available", () => {
+    const cwd = tempWorkspace();
+
+    const defaulted = createJobStore(cwd).create({
+      kind: "plan",
+      task: "Default idle budget",
+      request: { cwd, task: "Default idle budget" }
+    });
+    const disabled = createJobStore(cwd).create({
+      kind: "plan",
+      task: "Disable idle budget",
+      request: { cwd, task: "Disable idle budget", idleTimeoutMs: 0 }
+    });
+    const custom = createJobStore(cwd).create({
+      kind: "plan",
+      task: "Custom idle budget",
+      request: { cwd, task: "Custom idle budget", idleTimeoutMs: 60_000 }
+    });
+
+    expect(defaulted.idleTimeoutMs).toBe(1_800_000);
+    expect(disabled.idleTimeoutMs).toBe(0);
+    expect(custom.idleTimeoutMs).toBe(60_000);
+    expect(readJob(cwd, defaulted.id)?.idleTimeoutMs).toBe(1_800_000);
+  });
+
+  it("reads persisted live observation fields", () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "Observe stalls",
+      request: { cwd, task: "Observe stalls", allowWrite: true, idleTimeoutMs: 1_800_000 }
+    });
+    fs.writeFileSync(resolveJobPaths(cwd, job.id).jobFile, JSON.stringify({
+      ...job,
+      lastEventAt: "2026-07-21T10:00:00.000Z",
+      lastTool: "bash",
+      idleTimeoutMs: 1_800_000
+    }), "utf8");
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      lastEventAt: "2026-07-21T10:00:00.000Z",
+      lastTool: "bash",
+      idleTimeoutMs: 1_800_000
+    });
+  });
+
   it("updates a job without losing immutable fields", () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({

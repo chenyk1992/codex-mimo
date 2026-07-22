@@ -55,7 +55,9 @@ Work tools:
 - `mimo_resume`: create a child job from a `needs_input` or `blocked` parent. Required: `cwd`, parent `jobId`, `task`.
 - `mimo_compose`: run a registered workflow. Required for every request: `cwd`, `workflow`. `brainstorm`, `plan`, `dev`, `fix`, `parallel`, `worktree`, `merge`, and `new-skill` also require `task`; `fix-ci` and `execute-plan` require `file`; `review` requires neither. `fix-ci` may additionally include `task`. Optional fields where valid are `since`, `verification`, and `reportDir`.
 
-All work tools accept optional `model`, `timeoutMs`, and one notification target:
+All work tools accept optional `model`, `timeoutMs`, `idleTimeoutMs`, and one notification target:
+
+- `idleTimeoutMs`: optional idle stop-loss in milliseconds (default 30 minutes; `0` disables). Absolute `timeoutMs` is unchanged; whichever budget fires first wins.
 
 ```json
 { "notify": { "type": "codex", "threadId": "optional-explicit-thread" } }
@@ -104,10 +106,18 @@ Every work tool returns only this stable receipt shape:
 - `fix-ci`: repair CI from an attached log.
 - `execute-plan`: execute an approved plan file.
 - `review`: review the current diff.
-- `parallel`: parallel exploration.
+- `parallel`: parallel exploration — may need a raised `idleTimeoutMs` when subagents run long without JSONL.
 - `worktree`: explicit isolated-worktree work.
 - `merge`: explicit integration work.
 - `new-skill`: author or update a Compose skill.
+
+## Idle stop-loss and stall diagnosis
+
+When MiMo stdout goes silent longer than `idleTimeoutMs`, the job worker terminates the process tree and finalizes as `timeout` with `errorCode: idle_timeout`. Treat this like any other attention terminal: wait for the callback turn (or user follow-up), then call `mimo_result` with the receipt's `jobId`.
+
+Codex auto-callback requires a notification target — injected `CODEX_THREAD_ID` or explicit `notify: { type: "codex", ... }`. Without notify, the terminal state is persisted on disk only; discover it via `mimo_jobs` or an explicit user request.
+
+For stall diagnosis only, an occasional `mimo_status` may read `idleMs` and `lastEventAt` while a job is `running`. Never poll or loop on control tools while a job is active.
 
 ## Acceptance and Context Budget
 

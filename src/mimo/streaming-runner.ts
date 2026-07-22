@@ -14,7 +14,11 @@ import {
   type MimoProcessSelection
 } from "./run-json.js";
 
-export type TerminationReason = "process_timeout" | "host_abort" | "user_cancelled";
+export type TerminationReason =
+  | "process_timeout"
+  | "idle_timeout"
+  | "host_abort"
+  | "user_cancelled";
 
 export interface StreamingRunResult {
   stdout: string;
@@ -56,6 +60,8 @@ export interface StreamingRunOptions {
   onStart?: (pid: number | null) => Promise<void> | void;
   timeoutMs?: number;
   timeoutWarningMs?: number;
+  idleTimeoutMs?: number;
+  idleCheckIntervalMs?: number;
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
   omitEnv?: readonly string[];
@@ -202,12 +208,16 @@ export async function runMimoCliStreaming(
   let processClosed = false;
   let timeout: NodeJS.Timeout | null = null;
   let warningTimeout: NodeJS.Timeout | null = null;
+  let idleCheck: NodeJS.Timeout | null = null;
+  let lastActivityAt = Date.now();
   let termination: Promise<void> | null = null;
   const clearTerminationTimers = () => {
     if (timeout) clearTimeout(timeout);
     if (warningTimeout) clearTimeout(warningTimeout);
+    if (idleCheck) clearInterval(idleCheck);
     timeout = null;
     warningTimeout = null;
+    idleCheck = null;
   };
 
   let stdoutReader: readline.Interface | undefined;
@@ -222,6 +232,7 @@ export async function runMimoCliStreaming(
     const reader = readline.createInterface({ input: child.stdout });
     stdoutReader = reader;
     const onLine = (line: string) => {
+      lastActivityAt = Date.now();
       stdoutParts.push(`${line}\n`);
       options.onLine?.(line);
     };
@@ -267,6 +278,17 @@ export async function runMimoCliStreaming(
       processClosed = true;
       clearTerminationTimers();
       child.off("error", onError);
+      if (!terminationReason) {
+        setImmediate(() => {
+          const stderr = child.stderr;
+          if (!stderr || stderr.readableEnded || stderr.destroyed) return;
+          try {
+            stderr.push(null);
+          } catch {
+            stderr.destroy();
+          }
+        });
+      }
       resolve(terminationReason ? 124 : code ?? 1);
     };
     cleanupExitListeners = () => {
@@ -287,6 +309,19 @@ export async function runMimoCliStreaming(
     if (termination) return termination;
     if (processClosed) return Promise.resolve();
     terminationReason = reason;
+    // Forced terminations (idle, process timeout, host abort) must end stdout/stderr
+    // so stdoutDone/stderrDone waiters can finish even when pipes never close on their own.
+    stdoutReader?.close();
+    try {
+      child.stdout?.push(null);
+    } catch {
+      child.stdout?.destroy();
+    }
+    try {
+      child.stderr?.push(null);
+    } catch {
+      child.stderr?.destroy();
+    }
     try {
       termination = Promise.resolve(terminateTree(child.pid ?? null, child));
     } catch (error) {
@@ -305,6 +340,23 @@ export async function runMimoCliStreaming(
         if (!processClosed) options.onTimeoutWarning!(child.pid ?? null);
       }, Math.max(0, options.timeoutMs - options.timeoutWarningMs))
     : null;
+
+  const idleTimeoutMs = options.idleTimeoutMs;
+  if (
+    typeof idleTimeoutMs === "number" &&
+    Number.isFinite(idleTimeoutMs) &&
+    idleTimeoutMs > 0
+  ) {
+    const checkIntervalMs = options.idleCheckIntervalMs ?? 5_000;
+    idleCheck = setInterval(() => {
+      if (processClosed) return;
+      if (Date.now() - lastActivityAt >= idleTimeoutMs) {
+        clearInterval(idleCheck!);
+        idleCheck = null;
+        void requestTermination("idle_timeout");
+      }
+    }, checkIntervalMs);
+  }
 
   let abortCleanup: (() => void) | undefined;
   if (options.signal) {

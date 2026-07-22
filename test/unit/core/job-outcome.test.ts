@@ -53,6 +53,29 @@ describe("run outcome classification", () => {
     expect(outcome).toMatchObject({ status: "timeout", errorCode: "timeout" });
   });
 
+  it("maps idle_timeout termination to a distinct timeout outcome", () => {
+    expect(classifyRunOutcome({
+      exitCode: 124,
+      terminationReason: "idle_timeout",
+      verification: [],
+      finalText: ""
+    })).toMatchObject({
+      status: "timeout",
+      errorCode: "idle_timeout",
+      summary: "MiMoCode job idle-timed out.",
+      error: "MiMoCode job idle-timed out."
+    });
+  });
+
+  it("keeps process_timeout on absolute timeout", () => {
+    expect(classifyRunOutcome({
+      exitCode: 124,
+      terminationReason: "process_timeout",
+      verification: [],
+      finalText: ""
+    }).errorCode).toBe("timeout");
+  });
+
   it("does not mistake a host abort exit code for a process timeout", () => {
     expect(classifyRunOutcome(evidence({
       terminationReason: "host_abort",

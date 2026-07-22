@@ -21,7 +21,13 @@ import { dispatchNextDelivery } from "../../../src/notify/dispatcher.js";
 import { claimDueDelivery, readDeliveries } from "../../../src/notify/outbox.js";
 import { publicProgressSummary } from "../../../src/core/public-summary.js";
 
-const { appendJobProgress, recoverPendingTransition, requestJobCancellation, transitionJob } = transitionApi;
+const {
+  appendJobProgress,
+  recoverPendingTransition,
+  requestJobCancellation,
+  transitionJob,
+  updateRunningJobObservation
+} = transitionApi;
 const tempDirs: string[] = [];
 
 afterEach(() => {
@@ -524,6 +530,41 @@ describe("job transitions", () => {
       changedFiles: ["src/a.ts"]
     });
     expect(recovered.deliveryCreated).toBe(true);
+  });
+
+  it("updates live observation fields while running", async () => {
+    const { cwd, jobId } = seedJob("running");
+    const timestamp = "2026-07-21T10:00:00.000Z";
+
+    const updated = await updateRunningJobObservation(cwd, jobId, {
+      lastEventAt: timestamp,
+      sessionId: "ses-live",
+      lastTool: "bash"
+    });
+
+    expect(updated).toMatchObject({
+      lastEventAt: timestamp,
+      sessionId: "ses-live",
+      lastTool: "bash"
+    });
+    expect(readJob(cwd, jobId)).toMatchObject({
+      lastEventAt: timestamp,
+      sessionId: "ses-live",
+      lastTool: "bash"
+    });
+  });
+
+  it("no-ops observation updates when the job is not running", async () => {
+    const { cwd, jobId } = seedJob("completed");
+
+    const updated = await updateRunningJobObservation(cwd, jobId, {
+      lastEventAt: "2026-07-21T10:00:00.000Z",
+      lastTool: "bash"
+    });
+
+    expect(updated.status).toBe("completed");
+    expect(updated).not.toHaveProperty("lastEventAt");
+    expect(updated).not.toHaveProperty("lastTool");
   });
 
   it("prevents a normal terminal outcome after cancellation intent wins", async () => {

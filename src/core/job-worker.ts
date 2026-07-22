@@ -8,11 +8,12 @@ import { listWebhookSecretEnvironmentNames, readJob } from "./job-store.js";
 import {
   recoverPendingTransition,
   transitionJob,
+  updateRunningJobObservation,
   updateRunningJobProcess,
   type JobTransition,
   type JobTransitionResult
 } from "./job-transition.js";
-import type { JobRecord, JobStatus } from "./jobs.js";
+import { nowIso, type JobRecord, type JobStatus } from "./jobs.js";
 import {
   captureGitCommitChanges,
   captureGitDiff,
@@ -40,6 +41,10 @@ import { startNotificationDispatch } from "../notify/dispatch-process.js";
 import { spawnNotificationWorker } from "./job-process.js";
 import type { NormalizedMimoEvent } from "../compose/events.js";
 import {
+  extractSessionIdFromRawLine,
+  extractToolNameFromRawLine
+} from "../compose/events.js";
+import {
   ProcessLockUnavailableError,
   resolveProcessLockEndpoint,
   withProcessLock
@@ -58,6 +63,7 @@ export interface JobWorkerDependencies {
   transitionJob?: typeof transitionJob;
   recoverPendingTransition?: typeof recoverPendingTransition;
   updateRunningJobProcess?: typeof updateRunningJobProcess;
+  updateRunningJobObservation?: typeof updateRunningJobObservation;
   appendRawAndNormalizedEvent?: typeof appendRawAndNormalizedEvent;
   spawnNotificationWorker?: typeof spawnNotificationWorker;
   captureProcessIdentity?: typeof captureProcessIdentity;
@@ -217,11 +223,14 @@ async function runOwnedJobWorker(
     try {
       run = await (deps.runMimoStreaming ?? runMimoCliStreaming)(cwd, mimoArgs, {
           timeoutMs: readTimeout(initial.request),
+          idleTimeoutMs: readIdleTimeout(initial.request),
           env: hook.env,
           omitEnv: listWebhookSecretEnvironmentNames(cwd),
           signal: executionGuard.signal,
           onStart: async (pid) => {
             const persistProcess = deps.updateRunningJobProcess ?? updateRunningJobProcess;
+            const persistObservation = deps.updateRunningJobObservation ?? updateRunningJobObservation;
+            await persistObservation(cwd, jobId, { lastEventAt: nowIso() });
             const provisional = await awaitWithAbort(
               persistProcess(cwd, jobId, pid, null),
               executionGuard!.signal
@@ -240,8 +249,18 @@ async function runOwnedJobWorker(
             );
             if (owned.status !== "running") executionGuard!.abort(owned.status);
           },
-          onLine: (line) => queueEventWrite(async () =>
-            (deps.appendRawAndNormalizedEvent ?? appendRawAndNormalizedEvent)(cwd, jobId, line))
+          onLine: (line) => {
+            queueEventWrite(async () =>
+              (deps.appendRawAndNormalizedEvent ?? appendRawAndNormalizedEvent)(cwd, jobId, line));
+            const persistObservation = deps.updateRunningJobObservation ?? updateRunningJobObservation;
+            const sessionId = extractSessionIdFromRawLine(line);
+            const toolName = extractToolNameFromRawLine(line);
+            void persistObservation(cwd, jobId, {
+              lastEventAt: nowIso(),
+              ...(sessionId ? { sessionId } : {}),
+              ...(toolName ? { lastTool: toolName } : {})
+            }).catch(() => undefined);
+          }
         });
       processTerminationConfirmed = true;
     } finally {
@@ -597,6 +616,17 @@ function readTimeout(request: unknown): number {
   return typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
     ? timeoutMs
     : 1_800_000;
+}
+
+function readIdleTimeout(request: unknown): number {
+  if (typeof request !== "object" || request === null || Array.isArray(request)) {
+    return 1_800_000;
+  }
+  const value = (request as Record<string, unknown>).idleTimeoutMs;
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0 && Number.isInteger(value)) {
+    return value;
+  }
+  return 1_800_000;
 }
 
 function jobDeadlineExpired(job: JobRecord, now = Date.now()): boolean {
