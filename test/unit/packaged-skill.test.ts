@@ -8,7 +8,7 @@ describe("packaged MiMoCode skill", () => {
     expect(skill).toContain("Expected MCP Tools (13)");
     expect(skill).toMatch(/call one work tool/i);
     expect(skill).toMatch(/return the queued receipt/i);
-    expect(skill).toMatch(/do not call `mimo_wait`/i);
+    expect(skill).toMatch(/do not call `mimo_status`, `mimo_events`, or `mimo_wait`/i);
     expect(skill).toMatch(/callback turn/i);
     expect(skill).toMatch(/when resumed[\s\S]{0,120}`mimo_result`/i);
     expect(skill).toMatch(/explicit user diagnostics/i);
