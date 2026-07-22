@@ -112,9 +112,15 @@ describe("unified CLI work commands", () => {
     });
   });
 
+  it("rejects Codex notification without --thread-id", async () => {
+    const result = await invoke(["plan", "Task", "--notify", "codex"]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toMatch(/thread-id/i);
+    expect(result.deps.mimoPlan).not.toHaveBeenCalled();
+  });
+
   it.each([
-    [["--notify", "codex"], { type: "codex" }],
-    [["--notify", "codex", "--thread-id", "thread-1"], { type: "codex", threadId: "thread-1" }],
+    [["--notify", "codex", "--thread-id", "task-123"], { type: "codex", threadId: "task-123" }],
     [["--notify", "webhook", "--url", "https://example.test/hook", "--secret-env", "HOOK_SECRET"],
       { type: "webhook", url: "https://example.test/hook", secretEnv: "HOOK_SECRET" }]
   ] as const)("supports notification variant %#", async (flags, notify) => {

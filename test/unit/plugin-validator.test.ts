@@ -23,12 +23,22 @@ interface FixtureTool {
 }
 
 const string = { type: "string", minLength: 1 };
+const codexThreadId = { ...string, description: "Originating Codex task ID" };
+const verificationItem = {
+  ...string,
+  description: "One executable command with arguments; commands run without a shell"
+};
+const verification = {
+  type: "array",
+  items: verificationItem,
+  description: "Executable verification commands, not natural-language acceptance criteria"
+};
 const notify = {
   anyOf: [
     {
       type: "object",
-      properties: { type: { type: "string", const: "codex" }, threadId: string },
-      required: ["type"],
+      properties: { type: { type: "string", const: "codex" }, threadId: codexThreadId },
+      required: ["type", "threadId"],
       additionalProperties: false
     },
     {
@@ -71,7 +81,7 @@ const WORK_SCHEMAS: Record<string, Record<string, unknown>> = {
     task: string,
     file: string,
     since: string,
-    verification: { type: "array", items: string },
+    verification,
     reportDir: string
   }, ["cwd", "workflow"])
 };
@@ -127,7 +137,7 @@ function createPluginFixture(
         args: ["dist/codex/mcp-server.js"],
         cwd: ".",
         env: {} as Record<string, string>,
-        env_vars: ["CODEX_THREAD_ID"] as string[] | undefined
+        env_vars: ["CODEX_MIMO_CODEX_BIN"] as string[] | undefined
       }
     }
   };
@@ -283,7 +293,7 @@ describe("lightweight plugin validator", () => {
     expect(result.stderr).toContain("must not instruct Codex to poll or loop on mimo_wait");
   });
 
-  it("rejects packaged MCP config that omits CODEX_THREAD_ID env_vars forwarding", () => {
+  it("rejects packaged MCP config that omits CODEX_MIMO_CODEX_BIN env_vars forwarding", () => {
     const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
       mutateMcp: (mcp) => {
         delete mcp.mcpServers["codex-mimocode"].env_vars;
@@ -293,7 +303,20 @@ describe("lightweight plugin validator", () => {
     const result = runValidator(root);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("must forward CODEX_THREAD_ID");
+    expect(result.stderr).toContain("must forward CODEX_MIMO_CODEX_BIN");
+  });
+
+  it("rejects packaged MCP config that forwards CODEX_THREAD_ID through env_vars", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      mutateMcp: (mcp) => {
+        mcp.mcpServers["codex-mimocode"].env_vars = ["CODEX_MIMO_CODEX_BIN", "CODEX_THREAD_ID"];
+      }
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("must not forward CODEX_THREAD_ID");
   });
 
   it("rejects packaged MCP config that sets CODEX_THREAD_ID statically", () => {
@@ -307,5 +330,18 @@ describe("lightweight plugin validator", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("must not set CODEX_THREAD_ID statically");
+  });
+
+  it("rejects packaged MCP config that sets CODEX_MIMO_CODEX_BIN statically", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      mutateMcp: (mcp) => {
+        mcp.mcpServers["codex-mimocode"].env = { CODEX_MIMO_CODEX_BIN: "C:\\Tools\\codex.cmd" };
+      }
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("must not set CODEX_MIMO_CODEX_BIN statically");
   });
 });

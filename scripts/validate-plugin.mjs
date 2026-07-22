@@ -23,15 +23,28 @@ const EXPECTED_TOOL_NAMES = [
   "mimo_jobs"
 ];
 const STRING_SCHEMA = { type: "string", minLength: 1 };
+const CODEX_THREAD_ID_SCHEMA = {
+  ...STRING_SCHEMA,
+  description: "Originating Codex task ID"
+};
+const VERIFICATION_ITEM_SCHEMA = {
+  ...STRING_SCHEMA,
+  description: "One executable command with arguments; commands run without a shell"
+};
+const VERIFICATION_SCHEMA = {
+  type: "array",
+  items: VERIFICATION_ITEM_SCHEMA,
+  description: "Executable verification commands, not natural-language acceptance criteria"
+};
 const NOTIFY_SCHEMA = {
   anyOf: [
     {
       type: "object",
       properties: {
         type: { type: "string", const: "codex" },
-        threadId: STRING_SCHEMA
+        threadId: CODEX_THREAD_ID_SCHEMA
       },
-      required: ["type"],
+      required: ["type", "threadId"],
       additionalProperties: false
     },
     {
@@ -90,7 +103,7 @@ const CANONICAL_WORK_TOOL_SCHEMAS = {
     task: STRING_SCHEMA,
     file: STRING_SCHEMA,
     since: STRING_SCHEMA,
-    verification: { type: "array", items: STRING_SCHEMA },
+    verification: VERIFICATION_SCHEMA,
     reportDir: STRING_SCHEMA
   }, ["cwd", "workflow"])
 };
@@ -256,11 +269,19 @@ function validateMcpConfig(root, errors) {
   }
 
   const envVars = server.env_vars;
-  if (!Array.isArray(envVars) || envVars.length !== 1 || envVars[0] !== "CODEX_THREAD_ID") {
-    errors.push(`${DEFAULT_SERVER_NAME} MCP server must forward CODEX_THREAD_ID through env_vars`);
+  if (!Array.isArray(envVars) || envVars.length !== 1 || envVars[0] !== "CODEX_MIMO_CODEX_BIN") {
+    errors.push(`${DEFAULT_SERVER_NAME} MCP server must forward CODEX_MIMO_CODEX_BIN through env_vars`);
   }
-  if (isObject(server.env) && "CODEX_THREAD_ID" in server.env) {
-    errors.push(`${DEFAULT_SERVER_NAME} MCP server must not set CODEX_THREAD_ID statically`);
+  if (Array.isArray(envVars) && envVars.includes("CODEX_THREAD_ID")) {
+    errors.push(`${DEFAULT_SERVER_NAME} MCP server must not forward CODEX_THREAD_ID through env_vars`);
+  }
+  if (isObject(server.env)) {
+    if ("CODEX_THREAD_ID" in server.env) {
+      errors.push(`${DEFAULT_SERVER_NAME} MCP server must not set CODEX_THREAD_ID statically`);
+    }
+    if ("CODEX_MIMO_CODEX_BIN" in server.env) {
+      errors.push(`${DEFAULT_SERVER_NAME} MCP server must not set CODEX_MIMO_CODEX_BIN statically`);
+    }
   }
 
   assertFile(root, DEFAULT_SERVER_ENTRY, errors);

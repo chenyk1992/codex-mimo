@@ -6,7 +6,7 @@
       "args": ["dist/codex/mcp-server.js"],
       "cwd": ".",
       "env": {},
-      "env_vars": ["CODEX_THREAD_ID"]
+      "env_vars": ["CODEX_MIMO_CODEX_BIN"]
     }
   }
 }

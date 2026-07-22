@@ -3,17 +3,14 @@ import { InputValidationError } from "../core/input-validation.js";
 
 export function resolveNotificationTarget(
   input: NotificationInput | undefined,
-  env: NodeJS.ProcessEnv
+  _env: NodeJS.ProcessEnv
 ): NotificationTarget | undefined {
-  if (!input) {
-    const threadId = env.CODEX_THREAD_ID?.trim();
-    return threadId ? { type: "codex", threadId } : undefined;
-  }
+  if (!input) return undefined;
 
   if (input.type === "codex") {
-    const threadId = input.threadId?.trim() || env.CODEX_THREAD_ID?.trim();
+    const threadId = input.threadId?.trim() ?? "";
     if (!threadId) {
-      throw new InputValidationError("Codex notification requires threadId");
+      throw new InputValidationError("Codex notification requires explicit threadId");
     }
     return { type: "codex", threadId };
   }

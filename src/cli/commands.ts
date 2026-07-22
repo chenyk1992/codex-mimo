@@ -281,7 +281,8 @@ function parseNotification(parsed: ParsedArguments): NotificationInput | undefin
   }
   if (kind === "codex") {
     if (url || secretEnv) throw new CliInputError("Codex notifications do not accept --url or --secret-env.");
-    return { type: "codex", ...(threadId ? { threadId } : {}) };
+    if (!threadId?.trim()) throw new CliInputError("Codex notifications require --thread-id.");
+    return { type: "codex", threadId: threadId.trim() };
   }
   if (kind === "webhook") {
     if (threadId) throw new CliInputError("Webhook notifications do not accept --thread-id.");
