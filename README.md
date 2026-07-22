@@ -77,7 +77,7 @@ Every work tool returns:
 }
 ```
 
-The default Codex flow does not call `mimo_wait`. Codex returns the receipt, then the notification adapter resumes the original task when the job emits `needs_input`, `blocked`, or a terminal result. The resumed turn calls `mimo_result` and reads `mimo_result.output`.
+The default Codex flow does not call `mimo_status`, `mimo_events`, or `mimo_wait` after launch. Codex returns the receipt; the notify worker waits on App Server `turn/completed` without model polling and starts one callback turn when the job emits `needs_input`, `blocked`, or a terminal result. That callback turn calls `mimo_result` once and reads `mimo_result.output`. Outbox `delivered` means the matching callback turn completed, not merely that App Server accepted `turn/start`.
 
 ## Result privacy boundary
 
@@ -140,8 +140,11 @@ CLI users may omit `notify` intentionally or supply `--notify codex --thread-id 
 | `codex_app_server_unavailable` | Temporary process/transport failure | Retry after doctor succeeds. |
 | `codex_thread_busy` | Original task is still active | Let durable backoff retry. |
 | `codex_thread_missing` / `codex_thread_forbidden` | Target cannot be resumed | Verify the explicit task ID and permissions. |
+| `codex_turn_interrupted` | Callback turn ended interrupted | Allow durable retry. |
+| `codex_turn_failed` | Callback turn failed | Allow durable retry; inspect only after repeated failure. |
+| `codex_turn_timeout` | Five-minute callback budget expired | Check task/tool blockage before retry exhaustion. |
 
-Codex delivery is at-least-once across process crashes. In normal operation, one delivery performs one `thread/resume` and one `turn/start`. If the notification process crashes after App Server accepts `turn/start` but before the outbox is settled, the same persisted event ID can be retried and start a duplicate callback turn. The callback prompt includes that event ID and identifies the notification as a possible retry; repeated `mimo_result` reads remain read-only.
+Codex delivery is at-least-once across process crashes. A full notified job normally performs two system-only `thread/resume` probes: launch preflight and delivery preparation. Each delivery attempt performs exactly one `turn/start`; the notify worker waits on `turn/completed` without calling `mimo_status`, `mimo_events`, or `mimo_wait`, and marks the outbox `delivered` only after the matching callback turn completes. If the notification process crashes after `turn/start` but before callback completion is settled, the same persisted event ID can be retried and start a duplicate callback turn. The callback prompt includes that event ID and identifies the notification as a possible retry; repeated `mimo_result` reads remain read-only.
 
 Webhook targets name an environment variable; secret values are never stored in job, event, log, report, or outbox files:
 

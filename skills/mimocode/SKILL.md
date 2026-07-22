@@ -53,13 +53,13 @@ For Codex Desktop launches:
 
 After a successful Codex notify launch:
 
-1. Return the queued receipt to the user. Do not call `mimo_wait` after launch.
-2. Rely on the callback turn created when the job needs attention or reaches a terminal state.
+1. Return the queued receipt to the user and **stop**. After launch, do not call `mimo_status`, `mimo_events`, or `mimo_wait`.
+2. The notify worker uses system-level App Server RPC once, waits on `turn/completed` without model polling, and starts one callback turn. That callback calls `mimo_result` once and continues the original request. Outbox `delivered` means the callback turn completed, not merely accepted.
 3. When resumed by the callback turn, call `mimo_result` with the `jobId` and consume `mimo_result.output` as the explicit final assistant output, then inspect relevant changes and verify independently.
 
 A queued receipt alone does not prove a Codex notification target exists unless the explicit Codex notification launch succeeded.
 
-Use `mimo_status`, `mimo_events`, or one `mimo_wait` only for explicit user diagnostics on any path. Normal progress does not require a caller tool turn.
+Use `mimo_status`, `mimo_events`, or one `mimo_wait` only for explicit user diagnostics on any path. Normal progress and Codex callback waiting do not require a caller tool turn.
 
 ## Expected MCP Tools (13)
 

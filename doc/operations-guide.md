@@ -75,7 +75,7 @@ MiMo ok + codexNotification.source=path + codex_cli_not_executable
 → retry with the same explicit notify.threadId
 ```
 
-Codex delivery is at-least-once across process crashes. In normal operation, one delivery performs one `thread/resume` and one `turn/start`. If the process crashes after App Server accepts `turn/start` but before durable outbox settlement, the same persisted event ID can be retried and start a duplicate callback turn. The compact prompt exposes the event ID and warns that the notification may be a retry. Busy or temporarily unavailable tasks retry; missing, forbidden, or non-executable CLI launch failures are permanent after one attempt.
+Codex delivery is at-least-once across process crashes. A full notified job normally performs two system-only `thread/resume` probes: launch preflight and delivery preparation. Each delivery attempt performs exactly one `turn/start`; the notify worker waits on `turn/completed` without calling `mimo_status`, `mimo_events`, or `mimo_wait`, and marks the outbox `delivered` only after the matching callback turn completes. If the process crashes after `turn/start` but before callback completion is settled, the same persisted event ID can be retried and start a duplicate callback turn. The compact prompt exposes the event ID and warns that the notification may be a retry. Busy or temporarily unavailable tasks retry; missing, forbidden, or non-executable CLI launch failures are permanent after one attempt.
 
 ### Codex notification error codes
 
@@ -87,6 +87,21 @@ Codex delivery is at-least-once across process crashes. In normal operation, one
 | `codex_app_server_unavailable` | Temporary process/transport failure | Retry after doctor succeeds. |
 | `codex_thread_busy` | Original task is still active | Let durable backoff retry. |
 | `codex_thread_missing` / `codex_thread_forbidden` | Target cannot be resumed | Verify the explicit task ID and permissions. |
+| `codex_turn_interrupted` | Callback turn ended interrupted | Allow durable retry. |
+| `codex_turn_failed` | Callback turn failed | Allow durable retry; inspect only after repeated failure. |
+| `codex_turn_timeout` | Five-minute callback budget expired | Check task/tool blockage before retry exhaustion. |
+
+### Codex callback turn diagnostics
+
+| Observation | Meaning | Action |
+| --- | --- | --- |
+| `delivering` after `turn/start` | Callback model turn is still running; Node lease heartbeat owns the wait. | Do not poll from Codex. |
+| `pending` + `codex_turn_interrupted` | Callback turn ended interrupted. | Allow durable retry. |
+| `pending` + `codex_turn_failed` | Callback turn failed. | Allow durable retry; inspect only after repeated failure. |
+| `pending` + `codex_turn_timeout` | Five-minute callback budget expired. | Check task/tool blockage before retry exhaustion. |
+| `delivered` | Matching callback turn completed. | No manual status check required. |
+
+A full notified job normally performs two system-only `thread/resume` probes: launch preflight and delivery preparation. Each delivery attempt performs exactly one `turn/start`; the notify worker waits on `turn/completed` without model polling and marks the outbox `delivered` only after the matching callback turn completes, not merely when App Server accepts `turn/start`.
 
 ## Webhook Contract
 
