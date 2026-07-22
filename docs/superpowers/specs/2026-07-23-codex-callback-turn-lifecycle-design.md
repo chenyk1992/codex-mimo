@@ -37,6 +37,18 @@ The App Server protocol defines `turn/start` as the beginning of a turn. A clien
 - Adding progress text from the callback turn to notification records.
 - Changing the stable queued work receipt shape.
 
+## Context and token impact
+
+The selected approach reduces Codex context and token consumption relative to the broken/manual-recovery path, but RPC is not itself a model-token bypass.
+
+- `initialize`, `thread/resume`, `turn/start`, lifecycle notifications, and `turn/completed` are local JSON-RPC control frames. Keeping that transport open does not add model prompt content.
+- The callback prompt remains a compact identity-and-action instruction, capped at 240 characters for normal job ids. It does not embed the original MiMo prompt, JSONL, logs, reports, diffs, or model output.
+- A successful automatic callback replaces the current recovery sequence in which the user starts another Codex turn, asks for status, and causes Codex to call both `mimo_status` and `mimo_result`. It also avoids polling turns while MiMo is running.
+- One Codex model turn is still required to call `mimo_result`, inspect the returned result, and write the user-facing answer. `mimo_result.output` becomes tool context in that turn and can be large for detailed plans or reviews.
+- Therefore acceptance is based on eliminating redundant turns and repeated context loading, not on claiming zero-token delivery or an exact percentage saving. Exact savings depend on thread history, result length, model caching, and whether the user would otherwise poll or manually recover.
+
+The implementation must preserve the compact callback prompt and must not add raw result text to the RPC notification payload. A future result-summarization or path-only mode would be a separate product decision because it could reduce fidelity of automatic writeback.
+
 ## Considered approaches
 
 ### Approach A — one connection through terminal turn lifecycle (selected)
