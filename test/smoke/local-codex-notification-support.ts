@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
+import { resolveMimoCommand } from "../../src/mimo/run-json.js";
 
 export const INSTALLED_PLUGIN_ROOT_ENV = "CODEX_MIMO_INSTALLED_PLUGIN_ROOT";
 
@@ -37,10 +38,40 @@ export function withoutCodexPathCandidates(env: NodeJS.ProcessEnv): NodeJS.Proce
     .join(path.delimiter);
   return {
     ...Object.fromEntries(Object.entries(env).filter(([name]) =>
-      name.toLowerCase() !== "path" && name !== "CODEX_MIMO_CODEX_BIN"
+      name.toLowerCase() !== "path" && name.toLowerCase() !== "codex_mimo_codex_bin"
     )),
     PATH: isolatedPath
   };
+}
+
+export function prepareCodexNotificationSmokeEnvironment(
+  env: NodeJS.ProcessEnv
+): NodeJS.ProcessEnv {
+  const mimoCommand = resolveAbsoluteMimoCommand(env);
+  const isolated = withoutCodexPathCandidates(env);
+  return {
+    ...Object.fromEntries(Object.entries(isolated).filter(([name]) => {
+      const normalized = name.toLowerCase();
+      return normalized !== "codex_mimo_command" && normalized !== "mimo_command";
+    })),
+    CODEX_MIMO_COMMAND: mimoCommand
+  };
+}
+
+function resolveAbsoluteMimoCommand(env: NodeJS.ProcessEnv): string {
+  const command = resolveMimoCommand(env);
+  if (path.isAbsolute(command)) return path.normalize(command);
+  if (command.includes("/") || command.includes("\\")) return path.resolve(command);
+
+  const pathValue = env.PATH ?? env.Path ?? "";
+  const commandNames = [command, ...extensions(env).map((extension) => `${command}${extension}`)];
+  for (const directory of pathValue.split(path.delimiter).filter(Boolean)) {
+    for (const name of commandNames) {
+      const candidate = path.resolve(directory, name);
+      if (existsSync(candidate)) return realpathSync(candidate);
+    }
+  }
+  throw new Error(`Unable to resolve MiMoCode command to an absolute path: ${command}`);
 }
 
 function realPluginRoot(root: string, label: string): { root: string; version: string } {

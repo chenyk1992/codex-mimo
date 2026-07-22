@@ -9,8 +9,8 @@ import { describe, expect, it } from "vitest";
 import { readJob } from "../../src/core/job-store.js";
 import { probeCodexCommand } from "../../src/notify/codex-command.js";
 import {
+  prepareCodexNotificationSmokeEnvironment,
   resolveInstalledPluginRoot,
-  withoutCodexPathCandidates
 } from "./local-codex-notification-support.js";
 
 const enabled = process.platform === "win32" && process.env.RUN_LOCAL_CODEX_NOTIFY_SMOKE === "1";
@@ -61,7 +61,6 @@ describeSmoke("local Codex notification", () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-codex-notify-smoke-"));
     const mimoHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-codex-notify-home-"));
     const markerFile = path.join(workspace, "codex-notification-result.json");
-    const auditFile = path.join(mimoHome, "mcp-tools.jsonl");
     const appServerAuditFile = path.join(mimoHome, "app-server-rpc.jsonl");
     let transport: StdioClientTransport | undefined;
     let client: Client | undefined;
@@ -69,8 +68,9 @@ describeSmoke("local Codex notification", () => {
 
     try {
       const pluginRoot = resolveInstalledPluginRoot(checkoutRoot, process.env);
-      const smokeEnv = withoutCodexPathCandidates(process.env);
+      const smokeEnv = prepareCodexNotificationSmokeEnvironment(process.env);
       expect(smokeEnv.CODEX_MIMO_CODEX_BIN).toBeUndefined();
+      expect(path.isAbsolute(smokeEnv.CODEX_MIMO_COMMAND!)).toBe(true);
       const probe = await probeCodexCommand({ env: smokeEnv });
       if (!probe.ok) {
         throw new Error(probe.errorCode ?? "codex_app_server_unavailable");
@@ -88,7 +88,6 @@ describeSmoke("local Codex notification", () => {
           ...server.env,
           ...forwardedEnvironment(smokeEnv, server.env_vars),
           MIMOCODE_HOME: mimoHome,
-          CODEX_MIMO_TOOL_AUDIT_FILE: auditFile,
           CODEX_MIMO_APP_SERVER_AUDIT_FILE: appServerAuditFile
         },
         stderr: "pipe"
@@ -111,9 +110,10 @@ describeSmoke("local Codex notification", () => {
         threadId
       });
 
-      // This filesystem marker is written by the independently resumed Codex task.
-      // Its fields must be copied from that task's mimo_result response, so this
-      // process neither polls the job nor reads the result itself.
+      // The independently resumed Desktop task runs through a different MCP process,
+      // so transient environment-based auditing here cannot observe its tool call.
+      // This marker is the cross-process contract: that task must call mimo_result
+      // exactly once and copy the returned fields without this process reading them.
       const marker = await waitForResultMarker(markerFile, 330_000);
       expect(marker).toMatchObject({
         source: "mimo_result",
@@ -123,10 +123,6 @@ describeSmoke("local Codex notification", () => {
         resultType: "final"
       });
       expect(marker.output).toContain(OUTPUT_MARKER);
-
-      const callbackRecords = readToolAudit(auditFile);
-      expect(callbackRecords.filter((record) => record.toolName === "mimo_result")).toHaveLength(1);
-      expect(callbackRecords.filter((record) => record.toolName === "mimo_wait")).toHaveLength(0);
 
       const appServerRecords = readAppServerAudit(appServerAuditFile);
       expect(appServerRecords.filter((record) => record.method === "initialize")).toHaveLength(2);
@@ -288,32 +284,6 @@ function removeTemporaryDirectory(directory: string): void {
     maxRetries: 50,
     retryDelay: 100
   });
-}
-
-function readToolAudit(file: string): Array<Record<string, unknown>> {
-  if (!fs.existsSync(file)) throw new Error(`Packaged MCP tool audit is missing: ${file}`);
-  const content = fs.readFileSync(file, "utf8");
-  if (!content.endsWith("\n")) throw new Error(`Packaged MCP tool audit is malformed: ${file}`);
-  return content.trim().split(/\r?\n/).map((line) => {
-    const record = JSON.parse(line) as unknown;
-    if (!isValidToolAuditRecord(record)) {
-      throw new Error(`Packaged MCP tool audit record is malformed: ${line}`);
-    }
-    return record;
-  });
-}
-
-function isValidToolAuditRecord(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  const allowed = new Set(["timestamp", "pid", "toolName"]);
-  const keys = Object.keys(record);
-  return keys.every((key) => allowed.has(key)) &&
-    keys.length === 3 &&
-    typeof record.timestamp === "string" &&
-    !Number.isNaN(Date.parse(record.timestamp)) &&
-    Number.isInteger(record.pid) && (record.pid as number) > 0 &&
-    typeof record.toolName === "string";
 }
 
 function readAppServerAudit(file: string): AppServerAuditRecord[] {

@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   INSTALLED_PLUGIN_ROOT_ENV,
+  prepareCodexNotificationSmokeEnvironment,
   resolveInstalledPluginRoot,
   withoutCodexPathCandidates
 } from "../smoke/local-codex-notification-support.js";
@@ -83,5 +84,35 @@ describe("local Codex notification smoke configuration", () => {
     });
     expect(result.Path).toBeUndefined();
     expect(result.CODEX_MIMO_CODEX_BIN).toBeUndefined();
+  });
+
+  it("removes CODEX_MIMO_CODEX_BIN case-insensitively", () => {
+    const result = withoutCodexPathCandidates({
+      PATH: "",
+      codex_mimo_codex_bin: "C:\\configured\\codex.exe"
+    });
+
+    expect(Object.keys(result).map((name) => name.toLowerCase())).not.toContain(
+      "codex_mimo_codex_bin"
+    );
+  });
+
+  it("freezes MiMo to an absolute override before removing a shared Codex PATH directory", () => {
+    const shared = mkdtempSync(path.join(os.tmpdir(), "codex-mimo-shared-path-"));
+    const clean = mkdtempSync(path.join(os.tmpdir(), "codex-mimo-clean-path-"));
+    temporaryRoots.push(shared, clean);
+    writeFileSync(path.join(shared, "codex.exe"), "");
+    writeFileSync(path.join(shared, "mimo.cmd"), "");
+
+    const result = prepareCodexNotificationSmokeEnvironment({
+      Path: [shared, clean].join(path.delimiter),
+      PATHEXT: ".EXE;.CMD"
+    });
+
+    expect(result.PATH).toBe(clean);
+    expect(path.isAbsolute(result.CODEX_MIMO_COMMAND!)).toBe(true);
+    expect(result.CODEX_MIMO_COMMAND?.toLowerCase()).toBe(
+      path.resolve(shared, "mimo.cmd").toLowerCase()
+    );
   });
 });
