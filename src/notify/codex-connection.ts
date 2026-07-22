@@ -68,7 +68,12 @@ export async function prepareCodexConnection(
     execa(command, args, executeOptions));
   let failure: CodexConnectionProbe | undefined;
   for (const candidate of candidates) {
-    const version = await readVersion(candidate, execute, env);
+    const version = await readVersion(
+      candidate,
+      execute,
+      env,
+      options.requestTimeoutMs ?? 10_000
+    );
     if (!version.ok) {
       failure = version.probe;
       if (candidate.source === "configured" || !allowsImplicitFallback(failure.errorCode)) {
@@ -90,13 +95,14 @@ export async function prepareCodexConnection(
 async function readVersion(
   candidate: CodexCommandSelection,
   execute: NonNullable<PrepareCodexConnectionOptions["execute"]>,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number
 ): Promise<{ ok: true; version: string } | { ok: false; probe: CodexConnectionProbe }> {
   try {
     const result = await execute(candidate.command, ["--version"], {
       env: withUtf8ProcessEnv(env),
       reject: false,
-      timeout: 10_000
+      timeout: timeoutMs
     });
     if (result.exitCode === 0) {
       return { ok: true, version: typeof result.stdout === "string" ? result.stdout.trim() : "" };

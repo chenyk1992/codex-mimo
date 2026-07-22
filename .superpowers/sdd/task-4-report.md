@@ -63,3 +63,18 @@ of the delivery-wide bound.
    — 51 passed.
 5. `npm test -- test/integration/unified-background-jobs.test.ts` — 23 passed.
 6. `npm run lint`, `npm run build`, and `git diff --check` — passed.
+
+## Follow-up remediation: candidate probe timeout
+
+The version probe initially retained its fixed 10-second executor timeout even
+after the delivery bound was forwarded to App Server creation. It now receives
+the same optional `requestTimeoutMs`, with 10 seconds retained only when no
+timeout is supplied.
+
+1. Added a connection regression with `requestTimeoutMs: 4321` that asserts
+   both the `codex --version` executor and the App Server client receive 4321.
+2. The test failed as expected because `--version` still received 10,000 ms.
+3. Threaded the resolved timeout into `readVersion`.
+4. `npm test -- test/unit/notify/codex-connection.test.ts test/unit/notify/dispatcher.test.ts test/unit/notify/codex-adapter.test.ts`
+   — 52 passed.
+5. `npm run lint`, `npm run build`, and `git diff --check` — passed.

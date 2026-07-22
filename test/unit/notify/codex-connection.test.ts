@@ -48,6 +48,29 @@ describe("Codex connection preparation", () => {
     expect(JSON.stringify(result)).not.toContain("private");
   });
 
+  it("uses the requested timeout for both version probing and App Server requests", async () => {
+    const preparedClient = client();
+    const execute = vi.fn().mockResolvedValue({ exitCode: 0, stdout: "codex 1.2\n" });
+    const createClient = vi.fn(() => preparedClient);
+
+    await prepareCodexConnection({
+      threadId: "task-1",
+      requestTimeoutMs: 4_321,
+      candidates: [{ command: "codex", source: "path" }],
+      execute,
+      createClient
+    });
+
+    expect(execute).toHaveBeenCalledWith(
+      "codex",
+      ["--version"],
+      expect.objectContaining({ reject: false, timeout: 4_321 })
+    );
+    expect(createClient).toHaveBeenCalledWith(expect.objectContaining({
+      requestTimeoutMs: 4_321
+    }));
+  });
+
   it("accepts a busy target as ready", async () => {
     const preparedClient = client({
       resumeThread: vi.fn(async () => ({ exists: true, busy: true }))
