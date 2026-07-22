@@ -27,13 +27,13 @@ describe("launchJob", () => {
       cwd,
       task: "Plan it",
       request: { cwd, task: "Plan it" },
-      notify: { type: "codex" }
+      notify: { type: "codex", threadId: "thread-1" }
     }, {
       env: { CODEX_THREAD_ID: "thread-1" },
       resolveTarget(input, env) {
         order.push("resolve");
         expect(fs.existsSync(path.join(cwd, ".codex-mimo", "jobs"))).toBe(false);
-        expect(input).toEqual({ type: "codex" });
+        expect(input).toEqual({ type: "codex", threadId: "thread-1" });
         expect(env.CODEX_THREAD_ID).toBe("thread-1");
         return { type: "codex", threadId: "thread-1" };
       },
@@ -51,7 +51,7 @@ describe("launchJob", () => {
     });
   });
 
-  it("stores a frozen Codex target for an explicit Codex launch with task-scoped thread ID", async () => {
+  it("stores a frozen Codex target for an explicit Codex launch with threadId", async () => {
     const cwd = workspace();
     const spawnJobSupervisor = vi.fn().mockReturnValue(123);
     const receipt = await launchJob({
@@ -59,7 +59,7 @@ describe("launchJob", () => {
       cwd,
       task: "Plan it",
       request: { cwd, task: "Plan it" },
-      notify: { type: "codex" }
+      notify: { type: "codex", threadId: "task-123" }
     }, {
       env: { CODEX_THREAD_ID: "task-123" },
       spawnJobSupervisor
@@ -82,26 +82,26 @@ describe("launchJob", () => {
       cwd,
       task: "Plan it",
       request: { cwd, task: "Plan it" },
-      notify: { type: "codex" }
+      notify: { type: "codex" } as never
     }, {
       env: {},
       createJob,
       spawnJobSupervisor
-    })).rejects.toThrow("Codex notification requires threadId");
+    })).rejects.toThrow("Codex notification requires explicit threadId");
 
     expect(createJob).not.toHaveBeenCalled();
     expect(spawnJobSupervisor).not.toHaveBeenCalled();
     expect(fs.existsSync(path.join(cwd, ".codex-mimo", "jobs"))).toBe(false);
   });
 
-  it("persists no target when neither explicit notify nor CODEX_THREAD_ID exists", async () => {
+  it("persists no target when notify is omitted regardless of CODEX_THREAD_ID", async () => {
     const cwd = workspace();
     const receipt = await launchJob({
       kind: "review",
       cwd,
       task: "Review HEAD",
       request: { cwd, base: "HEAD" }
-    }, { env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123) });
+    }, { env: { CODEX_THREAD_ID: "ambient-thread" }, spawnJobSupervisor: vi.fn().mockReturnValue(123) });
 
     expect(readJob(cwd, receipt.jobId)?.notificationTarget).toBeUndefined();
   });
