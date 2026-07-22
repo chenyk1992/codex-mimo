@@ -14,6 +14,22 @@ describe("compose workflows", () => {
     expect(workflow.writesAllowed).toBe(true);
   });
 
+  it.each([
+    ["brainstorm", false],
+    ["plan", false],
+    ["review", false],
+    ["dev", true],
+    ["fix", true],
+    ["fix-ci", true],
+    ["execute-plan", true],
+    ["parallel", true],
+    ["worktree", true],
+    ["merge", true],
+    ["new-skill", true]
+  ] as const)("declares %s writesAllowed=%s", (workflow, expected) => {
+    expect(getComposeWorkflow(workflow).writesAllowed).toBe(expected);
+  });
+
   it("builds an execute-plan prompt that references the plan file", () => {
     const prompt = buildComposePrompt({
       workflow: getComposeWorkflow("execute-plan"),

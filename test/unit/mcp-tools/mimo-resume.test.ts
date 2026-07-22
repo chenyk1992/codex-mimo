@@ -115,7 +115,35 @@ describe("mimo_resume", () => {
     });
 
     expect(readJob(cwd, receipt.jobId)?.request).toMatchObject({ executionPolicy: expected });
+    expect(readJob(cwd, receipt.jobId)?.request).toMatchObject({
+      executionPolicy: { writesAllowed: expected.writesAllowed }
+    });
   });
+
+  it.each([
+    ["plan", { task: "Plan", cwd: "" }, false],
+    ["compose", { workflow: "dev", task: "Build", cwd: "" }, true]
+  ] as const)(
+    "preserves resumed %s parent writesAllowed=%s without caller override",
+    async (kind, template, writesAllowed) => {
+      const cwd = tempWorkspace();
+      const source = createJobStore(cwd).create({
+        kind,
+        task: "Parent task",
+        request: { ...template, cwd }
+      });
+      updateJob(cwd, source.id, { status: "blocked", sessionId: "ses_parent" });
+
+      const receipt = await mimoResume({ cwd, jobId: source.id, task: "Continue" }, {
+        env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
+      });
+
+      const child = readJob(cwd, receipt.jobId);
+      expect(child?.request).toEqual(expect.objectContaining({
+        executionPolicy: expect.objectContaining({ writesAllowed })
+      }));
+    }
+  );
 
   it("preserves the original policy across recursive resumes", async () => {
     const cwd = tempWorkspace();

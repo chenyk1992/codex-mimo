@@ -10,6 +10,7 @@ import {
   type JobRequestByKind
 } from "../../../src/core/job-definitions.js";
 import type { ExecutionCallbackSummary, JobKind, JobRecord } from "../../../src/core/jobs.js";
+import { isRuntimeArtifactPath } from "../../../src/core/runtime-paths.js";
 import { captureGitDiff } from "../../../src/git/diff.js";
 
 const tempDirs: string[] = [];
@@ -322,6 +323,66 @@ describe("job finalization", () => {
     expect("callback" in report).toBe(false);
     expect(outcome).toMatchObject({ status: "completed", changedFiles: ["src/app.ts"] });
     expect(outcome.reportPaths).toMatchObject({ json: expect.any(String), markdown: expect.any(String) });
+  });
+
+  it("completes a read-only Compose finalize when worker-filtered context drops the cron lock", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = { cwd, workflow: "plan", task: "plan it" };
+    const rawChanged = [".mimocode/.cron-lock"];
+    const changedFiles = rawChanged.filter((file) => !isRuntimeArtifactPath(file));
+
+    const outcome = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("compose", request),
+      request,
+      run: { stdout: '{"type":"message","text":"planned"}\n', stderr: "", exitCode: 0, pid: 10 },
+      events: [{ type: "message", text: "planned", raw: { type: "message", text: "planned" } }],
+      executionCallback: { invocationId: "inv-1", outcome: "completed", sessionId: "ses-1" },
+      gitStatusBefore: { short: "", dirty: false, fingerprints: {} },
+      gitStatusAfter: {
+        short: changedFiles.map((file) => ` M ${file}`).join("\n"),
+        dirty: changedFiles.length > 0,
+        fingerprints: Object.fromEntries(
+          changedFiles.map((file) => [file, { status: " M", contentHash: "after" }])
+        )
+      },
+      diff: { changedFiles, diffStat: "", diff: "" },
+      commitChanges: { commits: [], changedFiles: [] },
+      verification: [],
+      deps: { runVerification: async () => [], writeComposeReport: () => undefined }
+    });
+
+    expect(outcome).toMatchObject({ status: "completed", changedFiles: [] });
+  });
+
+  it("reports only business files for writable Compose after worker filters the cron lock", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "build it" };
+    const rawChanged = [".mimocode/.cron-lock", "src/app.ts"];
+    const changedFiles = rawChanged.filter((file) => !isRuntimeArtifactPath(file));
+
+    const outcome = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("compose", request),
+      request,
+      run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 10 },
+      events: [{ type: "message", text: "done", raw: { type: "message", text: "done" } }],
+      executionCallback: { invocationId: "inv-1", outcome: "completed", sessionId: "ses-1" },
+      gitStatusBefore: { short: "", dirty: false, fingerprints: {} },
+      gitStatusAfter: {
+        short: changedFiles.map((file) => ` M ${file}`).join("\n"),
+        dirty: changedFiles.length > 0,
+        fingerprints: Object.fromEntries(
+          changedFiles.map((file) => [file, { status: " M", contentHash: "after" }])
+        )
+      },
+      diff: { changedFiles, diffStat: "1 file changed", diff: "diff" },
+      commitChanges: { commits: [], changedFiles: [] },
+      verification: [],
+      deps: { runVerification: async () => [], writeComposeReport: () => undefined }
+    });
+
+    expect(outcome).toMatchObject({ status: "completed", changedFiles: ["src/app.ts"] });
   });
 
   it.each([
