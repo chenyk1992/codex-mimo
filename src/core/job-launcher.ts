@@ -7,20 +7,27 @@ import {
 import { transitionJob } from "./job-transition.js";
 import type { JobKind, JobReceipt, JobRecord } from "./jobs.js";
 import {
-  probeCodexCommand,
-  type CodexCommandErrorCode
-} from "../notify/codex-command.js";
+  prepareCodexConnection,
+  type PreparedCodexConnection
+} from "../notify/codex-connection.js";
 import { resolveNotificationTarget } from "../notify/target.js";
 import { startNotificationDispatch } from "../notify/dispatch-process.js";
-import type { NotificationInput, NotificationTarget } from "../notify/types.js";
+import type {
+  NotificationErrorCode,
+  NotificationInput,
+  NotificationTarget
+} from "../notify/types.js";
 
-const PREFLIGHT_ERROR_CODES = new Set<CodexCommandErrorCode>([
+const PREFLIGHT_ERROR_CODES = new Set<NotificationErrorCode>([
   "codex_cli_not_found",
   "codex_cli_not_executable",
-  "codex_app_server_unavailable"
+  "codex_app_server_unavailable",
+  "codex_app_server_incompatible",
+  "codex_thread_missing",
+  "codex_thread_forbidden"
 ]);
 
-function preflightRecovery(errorCode: CodexCommandErrorCode): string {
+function preflightRecovery(errorCode: NotificationErrorCode): string {
   switch (errorCode) {
     case "codex_cli_not_found":
       return "Set CODEX_MIMO_CODEX_BIN to a runnable standalone Codex CLI, restart Codex Desktop, then run mimo_healthcheck.";
@@ -28,6 +35,14 @@ function preflightRecovery(errorCode: CodexCommandErrorCode): string {
       return "Set CODEX_MIMO_CODEX_BIN to a standalone Codex CLI outside protected WindowsApps packages, restart Codex Desktop, then run mimo_healthcheck.";
     case "codex_app_server_unavailable":
       return "The selected Codex CLI did not pass its launchability check. Run mimo_healthcheck and verify CODEX_MIMO_CODEX_BIN before retrying.";
+    case "codex_app_server_incompatible":
+      return "The selected Codex CLI is incompatible with the required App Server protocol. Update Codex Desktop or set CODEX_MIMO_CODEX_BIN to a compatible standalone Codex CLI, restart Codex Desktop, then run mimo_healthcheck.";
+    case "codex_thread_missing":
+      return "The selected Codex task is unavailable. Open the target task in Codex Desktop and retry with its current threadId.";
+    case "codex_thread_forbidden":
+      return "The selected Codex task is not accessible from this Codex session. Open the target task in Codex Desktop and retry with a task you can access.";
+    case "codex_thread_busy":
+      return "The selected Codex task is currently busy. Wait for its current turn to finish, then retry.";
   }
 }
 
@@ -47,7 +62,7 @@ export interface LaunchJobDependencies {
     input: NotificationInput | undefined,
     env: NodeJS.ProcessEnv
   ) => NotificationTarget | undefined;
-  probeCodex?: typeof probeCodexCommand;
+  prepareCodex?: typeof prepareCodexConnection;
   createJob?: (cwd: string, input: CreateJobInput) => JobRecord;
   spawnJobSupervisor?: typeof spawnJobSupervisor;
   spawnNotificationWorker?: typeof spawnNotificationWorker;
@@ -71,15 +86,19 @@ export async function launchJob(
     : cloneTarget(input.notificationTarget);
 
   if (target?.type === "codex") {
-    const probe = await (dependencies.probeCodex ?? probeCodexCommand)({ env });
-    if (!probe.ok) {
-      const errorCode = PREFLIGHT_ERROR_CODES.has(probe.errorCode as CodexCommandErrorCode)
-        ? probe.errorCode!
+    const prepared = await (dependencies.prepareCodex ?? prepareCodexConnection)({
+      env,
+      threadId: target.threadId
+    });
+    if (!prepared.probe.ok) {
+      const errorCode = PREFLIGHT_ERROR_CODES.has(prepared.probe.errorCode as NotificationErrorCode)
+        ? prepared.probe.errorCode!
         : "codex_app_server_unavailable";
       throw new InputValidationError(
         `Codex notification preflight failed: ${errorCode}. ${preflightRecovery(errorCode)}`
       );
     }
+    await closePreflightConnection(prepared);
   }
 
   const createJob = dependencies.createJob ?? ((cwd, createInput) =>
@@ -114,6 +133,14 @@ export async function launchJob(
   }
 
   return toJobReceipt(job);
+}
+
+async function closePreflightConnection(prepared: PreparedCodexConnection): Promise<void> {
+  try {
+    await prepared.client?.close();
+  } catch {
+    // Target validation succeeded; a best-effort cleanup failure must not block the queued job.
+  }
 }
 
 function cloneTarget(target: NotificationTarget | null): NotificationTarget | undefined {

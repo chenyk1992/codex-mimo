@@ -543,7 +543,7 @@ describe("unified background jobs", () => {
         notify: { type: "codex", threadId: "thread-frozen" }
       }, {
         env: {},
-        probeCodex: async () => ({ ok: true, source: "path" }),
+        prepareCodex: async () => ({ probe: { ok: true, source: "path" } }),
         spawnJobSupervisor: () => 123
       });
       return { content: [{ type: "text", text: JSON.stringify(launched) }] };
