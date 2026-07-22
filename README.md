@@ -115,6 +115,19 @@ Read `CODEX_THREAD_ID` from the task command environment and supply it as `notif
 
 If preflight failed with `codex_cli_not_found`, `codex_cli_not_executable`, or `codex_app_server_unavailable`, run `mimo_healthcheck` and configure `CODEX_MIMO_CODEX_BIN`. Preflight failure does not automatically relaunch without notify; only an explicit user choice may switch to a no-notify or Cursor companion launch.
 
+Preflight validates CLI launchability before job persistence. A successful preflight does not merge later App Server callback delivery into job execution; the durable outbox handles delivery independently after the job is created.
+
+Diagnostic example when MiMo is healthy but Codex notification is not:
+
+```text
+MiMo ok + codexNotification.source=path + codex_cli_not_executable
+→ PATH resolved a non-runnable Codex command (commonly protected WindowsApps)
+→ set CODEX_MIMO_CODEX_BIN to a standalone CLI
+→ restart Codex Desktop
+→ require mimo_healthcheck.codexNotification.ok=true
+→ retry with the same explicit notify.threadId
+```
+
 CLI users may omit `notify` intentionally or supply `--notify codex --thread-id <id>`. Cursor companion launches may omit Codex notify. Webhook and Codex notification settings remain mutually exclusive.
 
 ### Codex notification error codes

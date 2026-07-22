@@ -131,4 +131,23 @@ describe("public release contract", () => {
     expect(skill).toMatch(/mimo_result[\s\S]{0,120}output/i);
     expect(skill).toMatch(/callback[\s\S]{0,200}mimo_result/i);
   });
+
+  it("documents resolved Execa spawn failures and protected WindowsApps recovery", () => {
+    for (const file of [SKILL, "README.md", "doc/operations-guide.md"]) {
+      const contents = readDoc(file);
+      expect(contents).toMatch(/codex_cli_not_executable/);
+      expect(contents).toMatch(/WindowsApps/i);
+      expect(contents).toMatch(/CODEX_MIMO_CODEX_BIN/);
+      expect(contents).toMatch(/restart(?: Codex)? Desktop/i);
+      expect(contents).toMatch(/mimo_healthcheck/i);
+    }
+  });
+
+  it("distinguishes preflight launchability from later callback delivery", () => {
+    for (const file of ["README.md", "doc/operations-guide.md"]) {
+      const contents = readDoc(file);
+      expect(contents).toMatch(/preflight[\s\S]{0,160}launchability/i);
+      expect(contents).toMatch(/delivery[\s\S]{0,200}(?:independent|later|outbox)/i);
+    }
+  });
 });

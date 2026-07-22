@@ -42,7 +42,10 @@ For Codex Desktop launches:
    { "notify": { "type": "codex", "threadId": "<current-task-id>" } }
    ```
    Read `CODEX_THREAD_ID` from the task command environment and pass it as `notify.threadId`. The packaged MCP config does not forward `CODEX_THREAD_ID`; never configure that variable as a Windows user or system environment value.
-2. Before creating a job, the work tool preflights the configured Codex CLI's launchability. On preflight failure, report the safe code (for example `codex_cli_not_executable`) and stop. Only an explicit user choice may switch to no-notify or Cursor companion after seeing the diagnostic. Run `mimo_healthcheck` and configure `CODEX_MIMO_CODEX_BIN` when preflight reports `codex_cli_not_found`, `codex_cli_not_executable`, or `codex_app_server_unavailable`.
+2. Before creating a job, the work tool preflights the configured Codex CLI's launchability. Resolved Execa spawn failures (including protected WindowsApps Desktop binaries that return EPERM) map to safe preflight codes. On preflight failure, report the safe code and stop. Only an explicit user choice may switch to no-notify or Cursor companion after seeing the diagnostic:
+   - `codex_cli_not_found`: no standalone Codex CLI was resolved; configure `CODEX_MIMO_CODEX_BIN`, restart Codex Desktop, then run `mimo_healthcheck`.
+   - `codex_cli_not_executable`: the resolved command cannot be spawned, including a protected WindowsApps Desktop binary; configure a standalone CLI outside WindowsApps, restart Codex Desktop, then run `mimo_healthcheck`.
+   - `codex_app_server_unavailable`: the selected command failed its generic launchability/version check; run `mimo_healthcheck` and verify the configured CLI.
 3. If the call returns `Codex notification requires threadId` or a schema `threadId` required error, stop and keep `notify` on any later Codex callback attempt.
 4. Cursor companion launches may omit `notify` and must continue using the companion stop hook.
 5. CLI users may omit `notify` intentionally or supply `--notify codex --thread-id <id>`.
