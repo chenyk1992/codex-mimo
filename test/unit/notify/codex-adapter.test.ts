@@ -8,6 +8,7 @@ import {
 } from "../../../src/notify/codex-app-server.js";
 import {
   buildCodexNotificationPrompt,
+  classifyCodexError,
   deliverCodexNotification
 } from "../../../src/notify/codex-adapter.js";
 import type { NotificationDelivery } from "../../../src/notify/types.js";
@@ -120,7 +121,11 @@ describe("Codex notification adapter", () => {
   it("returns retry while the original turn is active", async () => {
     const client = fakeClient({ exists: true, busy: true });
 
-    expect((await deliverCodexNotification(delivery, job, signal, client)).outcome).toBe("retry");
+    expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({
+      outcome: "retry",
+      error: "Codex thread is busy",
+      errorCode: "codex_thread_busy"
+    });
     expect(client.startTurn).not.toHaveBeenCalled();
     expect(client.close).toHaveBeenCalledOnce();
   });
@@ -130,7 +135,8 @@ describe("Codex notification adapter", () => {
 
     expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({
       outcome: "permanent",
-      error: "Codex thread does not exist"
+      error: "Codex thread does not exist",
+      errorCode: "codex_thread_missing"
     });
     expect(client.startTurn).not.toHaveBeenCalled();
   });
@@ -138,12 +144,13 @@ describe("Codex notification adapter", () => {
   it("returns permanent when the original thread is forbidden", async () => {
     const client = fakeClient();
     client.resumeThread.mockRejectedValueOnce(
-      new CodexAppServerError("forbidden", "Codex thread is forbidden")
+      new CodexAppServerError("codex_thread_forbidden", "Codex thread is forbidden")
     );
 
     expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({
       outcome: "permanent",
-      error: "Codex thread is forbidden"
+      error: "Codex thread is forbidden",
+      errorCode: "codex_thread_forbidden"
     });
   });
 
@@ -152,12 +159,13 @@ describe("Codex notification adapter", () => {
     async (method) => {
       const client = fakeClient();
       client[method].mockRejectedValueOnce(
-        new CodexAppServerError("transport", "private transport detail")
+        new CodexAppServerError("codex_app_server_unavailable", "private transport detail")
       );
 
       expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({
         outcome: "retry",
-        error: "Codex App Server request failed"
+        error: "Codex App Server request failed",
+        errorCode: "codex_app_server_unavailable"
       });
       expect(client.close).toHaveBeenCalledOnce();
     }
@@ -166,13 +174,14 @@ describe("Codex notification adapter", () => {
   it("keeps the primary permanent result when close also fails", async () => {
     const client = fakeClient();
     client.resumeThread.mockRejectedValueOnce(
-      new CodexAppServerError("forbidden", "Codex thread is forbidden")
+      new CodexAppServerError("codex_thread_forbidden", "Codex thread is forbidden")
     );
     client.close.mockRejectedValueOnce(new Error("close private detail"));
 
     expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({
       outcome: "permanent",
-      error: "Codex thread is forbidden"
+      error: "Codex thread is forbidden",
+      errorCode: "codex_thread_forbidden"
     });
   });
 
@@ -189,13 +198,14 @@ describe("Codex notification adapter", () => {
   it("keeps a pre-acceptance transport failure when close also fails", async () => {
     const client = fakeClient();
     client.startTurn.mockRejectedValueOnce(
-      new CodexAppServerError("transport", "private transport detail")
+      new CodexAppServerError("codex_app_server_unavailable", "private transport detail")
     );
     client.close.mockRejectedValueOnce(new Error("close private detail"));
 
     expect(await deliverCodexNotification(delivery, job, signal, client)).toEqual({
       outcome: "retry",
-      error: "Codex App Server request failed"
+      error: "Codex App Server request failed",
+      errorCode: "codex_app_server_unavailable"
     });
   });
 
@@ -252,6 +262,28 @@ describe("Codex notification adapter", () => {
     expect(prompt).toContain(`jobId ${JSON.stringify(jobId)}`);
     expect(prompt.length).toBeGreaterThan(240);
     expect(prompt).not.toMatch(/[\r\n]/);
+  });
+
+  it("classifies malformed protocol as permanent incompatibility", () => {
+    expect(classifyCodexError(new CodexAppServerError(
+      "codex_app_server_incompatible",
+      "Codex App Server protocol is incompatible"
+    ))).toEqual({
+      outcome: "permanent",
+      error: "Codex App Server protocol is incompatible",
+      errorCode: "codex_app_server_incompatible"
+    });
+  });
+
+  it("classifies transport and timeout failures as retryable unavailability", () => {
+    expect(classifyCodexError(new CodexAppServerError(
+      "codex_app_server_unavailable",
+      "Codex App Server request failed"
+    ))).toEqual({
+      outcome: "retry",
+      error: "Codex App Server request failed",
+      errorCode: "codex_app_server_unavailable"
+    });
   });
 
   it("permanently rejects a non-Codex target", async () => {

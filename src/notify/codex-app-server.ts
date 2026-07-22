@@ -3,9 +3,11 @@ import fs from "node:fs";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { withUtf8ProcessEnv } from "../core/encoding.js";
 import {
+  codexCommandErrorCode,
   resolveCodexCommand,
   type CodexCommandSelection
 } from "./codex-command.js";
+import type { NotificationErrorCode } from "./types.js";
 
 export interface ThreadResumeResult {
   exists: boolean;
@@ -19,11 +21,9 @@ export interface CodexAppServerClient {
   close(): Promise<void>;
 }
 
-export type CodexAppServerErrorKind = "forbidden" | "protocol" | "transport";
-
 export class CodexAppServerError extends Error {
   constructor(
-    public readonly kind: CodexAppServerErrorKind,
+    public readonly code: NotificationErrorCode,
     message: string
   ) {
     super(message);
@@ -80,8 +80,9 @@ export function createCodexAppServerClient(
         env: withUtf8ProcessEnv(processEnv)
       }
     ) as ChildProcessWithoutNullStreams;
-  } catch {
-    throw new CodexAppServerError("transport", "Codex App Server transport failed");
+  } catch (error) {
+    const code = codexCommandErrorCode(error);
+    throw new CodexAppServerError(code, safeCodexErrorMessage(code));
   }
 
   return new StdioCodexAppServerClient(child, options);
@@ -98,11 +99,11 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
   private resourcesReleased = false;
   private readonly lines: ReadlineInterface;
   private readonly onLine = (line: string) => this.handleLine(line);
-  private readonly onTransportError = () => this.failTransport();
+  private readonly onTransportError = (cause?: unknown) => this.failTransport(cause);
   private readonly onLateError = (): void => undefined;
   private readonly onExit = () => {
     this.processExited = true;
-    this.failTransport("Codex App Server exited");
+    this.failTransport(undefined, "Codex App Server exited");
   };
 
   private readonly requestTimeoutMs: number;
@@ -152,7 +153,10 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     if (status === "active" || status === "notLoaded") {
       return { exists: true, busy: true };
     }
-    throw new CodexAppServerError("protocol", "Codex thread is unavailable");
+    throw new CodexAppServerError(
+      "codex_app_server_incompatible",
+      "Codex thread is unavailable"
+    );
   }
 
   async startTurn(threadId: string, prompt: string, signal?: AbortSignal): Promise<void> {
@@ -197,7 +201,10 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
   private requireInitialized(): void {
     if (this.terminalError) throw this.terminalError;
     if (!this.initialized) {
-      throw new CodexAppServerError("protocol", "Codex App Server is not initialized");
+      throw new CodexAppServerError(
+        "codex_app_server_incompatible",
+        "Codex App Server is not initialized"
+      );
     }
   }
 
@@ -234,7 +241,10 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
 
   private write(message: unknown): void {
     if (this.terminalError || this.hasExited() || !this.child.stdin.writable) {
-      throw new CodexAppServerError("transport", "Codex App Server transport failed");
+      throw new CodexAppServerError(
+        "codex_app_server_unavailable",
+        "Codex App Server transport failed"
+      );
     }
     this.child.stdin.write(`${JSON.stringify(message)}\n`, "utf8");
   }
@@ -292,19 +302,31 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
       return;
     }
     if (pending.method === "thread/resume" && isForbiddenThreadError(response.error)) {
-      pending.reject(new CodexAppServerError("forbidden", "Codex thread is forbidden"));
+      pending.reject(new CodexAppServerError(
+        "codex_thread_forbidden",
+        "Codex thread is forbidden"
+      ));
       return;
     }
-    pending.reject(new CodexAppServerError("protocol", "Codex App Server request failed"));
+    pending.reject(new CodexAppServerError(
+      "codex_app_server_incompatible",
+      "Codex App Server request failed"
+    ));
   }
 
   private failProtocol(): void {
-    this.failAll(new CodexAppServerError("protocol", "Invalid Codex App Server response"));
+    this.failAll(new CodexAppServerError(
+      "codex_app_server_incompatible",
+      "Codex App Server protocol is incompatible"
+    ));
     this.observeTeardown();
   }
 
-  private failTransport(message = "Codex App Server transport failed"): void {
-    this.failAll(new CodexAppServerError("transport", message));
+  private failTransport(cause?: unknown, message?: string): void {
+    const code = cause !== undefined
+      ? codexCommandErrorCode(cause)
+      : "codex_app_server_unavailable";
+    this.failAll(new CodexAppServerError(code, message ?? safeCodexErrorMessage(code)));
     this.observeTeardown();
   }
 
@@ -416,13 +438,37 @@ function readAuditableThreadId(method: string, params: unknown): string | undefi
 
 function readThreadStatus(result: unknown): "active" | "idle" | "notLoaded" | "systemError" {
   if (!isRecord(result) || !isRecord(result.thread) || !isRecord(result.thread.status)) {
-    throw new CodexAppServerError("protocol", "Invalid Codex thread response");
+    throw new CodexAppServerError(
+      "codex_app_server_incompatible",
+      "Invalid Codex thread response"
+    );
   }
   const type = result.thread.status.type;
   if (type === "active" || type === "idle" || type === "notLoaded" || type === "systemError") {
     return type;
   }
-  throw new CodexAppServerError("protocol", "Invalid Codex thread response");
+  throw new CodexAppServerError(
+    "codex_app_server_incompatible",
+    "Invalid Codex thread response"
+  );
+}
+
+function safeCodexErrorMessage(code: NotificationErrorCode): string {
+  switch (code) {
+    case "codex_cli_not_found":
+    case "codex_cli_not_executable":
+      return "Codex App Server executable is unavailable";
+    case "codex_app_server_incompatible":
+      return "Codex App Server protocol is incompatible";
+    case "codex_thread_forbidden":
+      return "Codex thread is forbidden";
+    case "codex_thread_missing":
+      return "Codex thread does not exist";
+    case "codex_thread_busy":
+      return "Codex thread is busy";
+    case "codex_app_server_unavailable":
+      return "Codex App Server request failed";
+  }
 }
 
 function isMissingThreadError(error: RpcError): boolean {

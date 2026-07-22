@@ -4,7 +4,11 @@ import {
   CodexAppServerError,
   type CodexAppServerClient
 } from "./codex-app-server.js";
-import type { DeliveryAttemptResult, NotificationDelivery } from "./types.js";
+import type {
+  DeliveryAttemptResult,
+  NotificationDelivery,
+  NotificationErrorCode
+} from "./types.js";
 import { publicProgressSummary } from "../core/public-summary.js";
 
 const MAX_PROMPT_LENGTH = 240;
@@ -48,9 +52,17 @@ export async function deliverCodexNotification(
     await client.initialize(attemptSignal);
     const thread = await client.resumeThread(delivery.target.threadId, attemptSignal);
     if (!thread.exists) {
-      result = { outcome: "permanent", error: "Codex thread does not exist" };
+      result = {
+        outcome: "permanent",
+        error: "Codex thread does not exist",
+        errorCode: "codex_thread_missing"
+      };
     } else if (thread.busy) {
-      result = { outcome: "retry", error: "Codex thread is busy" };
+      result = {
+        outcome: "retry",
+        error: "Codex thread is busy",
+        errorCode: "codex_thread_busy"
+      };
     } else {
       await client.startTurn(
         delivery.target.threadId,
@@ -71,10 +83,42 @@ export async function deliverCodexNotification(
   return result;
 }
 
-function classifyCodexError(error: unknown): DeliveryAttemptResult {
-  return error instanceof CodexAppServerError && error.kind === "forbidden"
-    ? { outcome: "permanent", error: "Codex thread is forbidden" }
-    : { outcome: "retry", error: "Codex App Server request failed" };
+export function classifyCodexError(error: unknown): DeliveryAttemptResult {
+  if (!(error instanceof CodexAppServerError)) {
+    return {
+      outcome: "retry",
+      error: "Codex App Server request failed",
+      errorCode: "codex_app_server_unavailable"
+    };
+  }
+  const permanent = error.code === "codex_cli_not_found" ||
+    error.code === "codex_cli_not_executable" ||
+    error.code === "codex_app_server_incompatible" ||
+    error.code === "codex_thread_missing" ||
+    error.code === "codex_thread_forbidden";
+  return {
+    outcome: permanent ? "permanent" : "retry",
+    error: publicCodexNotificationError(error.code),
+    errorCode: error.code
+  };
+}
+
+function publicCodexNotificationError(code: NotificationErrorCode): string {
+  switch (code) {
+    case "codex_cli_not_found":
+    case "codex_cli_not_executable":
+      return "Codex App Server executable is unavailable";
+    case "codex_app_server_incompatible":
+      return "Codex App Server protocol is incompatible";
+    case "codex_thread_missing":
+      return "Codex thread does not exist";
+    case "codex_thread_forbidden":
+      return "Codex thread is forbidden";
+    case "codex_thread_busy":
+      return "Codex thread is busy";
+    case "codex_app_server_unavailable":
+      return "Codex App Server request failed";
+  }
 }
 
 function singleLine(value: string): string {

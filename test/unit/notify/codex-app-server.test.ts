@@ -16,6 +16,7 @@ import {
   CodexAppServerError,
   createCodexAppServerClient
 } from "../../../src/notify/codex-app-server.js";
+import { classifyCodexError } from "../../../src/notify/codex-adapter.js";
 
 class FakeAppServerProcess extends EventEmitter {
   readonly stdin = new PassThrough();
@@ -290,7 +291,7 @@ describe("Codex App Server client", () => {
     const client = createCodexAppServerClient({ requestTimeoutMs: 100 });
 
     const initialization = client.initialize();
-    const rejected = expect(initialization).rejects.toMatchObject({ kind: "transport" });
+    const rejected = expect(initialization).rejects.toMatchObject({ code: "codex_app_server_unavailable" });
     expect(messagesFrom(process)).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(100);
 
@@ -317,7 +318,7 @@ describe("Codex App Server client", () => {
       const request = method === "thread/resume"
         ? client.resumeThread("thread-1")
         : client.startTurn("thread-1", "continue");
-      const rejected = expect(request).rejects.toMatchObject({ kind: "transport" });
+      const rejected = expect(request).rejects.toMatchObject({ code: "codex_app_server_unavailable" });
       await vi.advanceTimersByTimeAsync(100);
 
       await rejected;
@@ -334,7 +335,7 @@ describe("Codex App Server client", () => {
     const controller = new AbortController();
     const client = createCodexAppServerClient({ requestTimeoutMs: 10_000 });
     const initialization = client.initialize(controller.signal);
-    const rejected = expect(initialization).rejects.toMatchObject({ kind: "transport" });
+    const rejected = expect(initialization).rejects.toMatchObject({ code: "codex_app_server_unavailable" });
     messagesFrom(process);
 
     controller.abort();
@@ -381,7 +382,7 @@ describe("Codex App Server client", () => {
 
     respond(process, { id: 1, result: { userAgent: "codex-cli/0.144.2" } });
 
-    await expect(initialization).rejects.toMatchObject({ kind: "protocol" });
+    await expect(initialization).rejects.toMatchObject({ code: "codex_app_server_incompatible" });
     expect(messagesFrom(process)).toEqual([]);
     await client.close();
   });
@@ -437,7 +438,7 @@ describe("Codex App Server client", () => {
     await Promise.resolve();
     process.exit(17);
 
-    await expect(resume).rejects.toMatchObject({ kind: "protocol" });
+    await expect(resume).rejects.toMatchObject({ code: "codex_app_server_incompatible" });
     await client.close();
   });
 
@@ -453,9 +454,9 @@ describe("Codex App Server client", () => {
     await Promise.resolve();
     process.exit(17);
 
-    await expect(resume).rejects.toMatchObject({ kind: "protocol" });
-    await expect(start).rejects.toMatchObject({ kind: "protocol" });
-    await expect(client.resumeThread("thread-1")).rejects.toMatchObject({ kind: "protocol" });
+    await expect(resume).rejects.toMatchObject({ code: "codex_app_server_incompatible" });
+    await expect(start).rejects.toMatchObject({ code: "codex_app_server_incompatible" });
+    await expect(client.resumeThread("thread-1")).rejects.toMatchObject({ code: "codex_app_server_incompatible" });
     await client.close();
   });
 
@@ -476,12 +477,12 @@ describe("Codex App Server client", () => {
     const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
 
     respond(process, frame(id));
-    await expect(resume).rejects.toMatchObject({ kind: "protocol" });
+    await expect(resume).rejects.toMatchObject({ code: "codex_app_server_incompatible" });
 
     const future = client.resumeThread("thread-1");
     void future.catch(() => undefined);
     process.exit(17);
-    await expect(future).rejects.toMatchObject({ kind: "protocol" });
+    await expect(future).rejects.toMatchObject({ code: "codex_app_server_incompatible" });
     await client.close();
   });
 
@@ -495,7 +496,7 @@ describe("Codex App Server client", () => {
       result: { thread: { id: "thread-1", status: { type: "idle" }, turns: [] } }
     });
 
-    await expect(resume).rejects.toMatchObject({ kind: "protocol" });
+    await expect(resume).rejects.toMatchObject({ code: "codex_app_server_incompatible" });
     await client.close();
   });
 
@@ -506,7 +507,7 @@ describe("Codex App Server client", () => {
 
     respond(process, { id, result: { turn: { id: "turn-1" } } });
 
-    await expect(start).rejects.toMatchObject({ kind: "protocol" });
+    await expect(start).rejects.toMatchObject({ code: "codex_app_server_incompatible" });
     await client.close();
   });
 
@@ -550,7 +551,7 @@ describe("Codex App Server client", () => {
       result: threadResumeResult("thread-error", { type: "systemError" })
     });
 
-    await expect(resume).rejects.toMatchObject({ kind: "protocol" });
+    await expect(resume).rejects.toMatchObject({ code: "codex_app_server_incompatible" });
     await client.close();
   });
 
@@ -582,7 +583,7 @@ describe("Codex App Server client", () => {
 
     await expect(resume).rejects.toMatchObject({
       name: "CodexAppServerError",
-      kind: "forbidden",
+      code: "codex_thread_forbidden",
       message: "Codex thread is forbidden"
     });
     await client.close();
@@ -596,9 +597,9 @@ describe("Codex App Server client", () => {
 
     process.exit(17);
 
-    await expect(resume).rejects.toMatchObject({ kind: "transport" });
-    await expect(start).rejects.toMatchObject({ kind: "transport" });
-    await expect(client.resumeThread("thread-1")).rejects.toMatchObject({ kind: "transport" });
+    await expect(resume).rejects.toMatchObject({ code: "codex_app_server_unavailable" });
+    await expect(start).rejects.toMatchObject({ code: "codex_app_server_unavailable" });
+    await expect(client.resumeThread("thread-1")).rejects.toMatchObject({ code: "codex_app_server_unavailable" });
     await client.close();
     expect(process.killCalls).toBe(0);
   });
@@ -610,10 +611,11 @@ describe("Codex App Server client", () => {
 
     process.emit("error", new Error("spawn private detail"));
 
-    await expect(initialization).rejects.toEqual(
-      new CodexAppServerError("transport", "Codex App Server transport failed")
-    );
-    await expect(client.resumeThread("thread-1")).rejects.toMatchObject({ kind: "transport" });
+    await expect(initialization).rejects.toMatchObject({
+      code: "codex_app_server_unavailable",
+      message: "Codex App Server request failed"
+    });
+    await expect(client.resumeThread("thread-1")).rejects.toMatchObject({ code: "codex_app_server_unavailable" });
     await client.close();
     expect(process.stdin.writableEnded).toBe(true);
     expect(process.killCalls).toBe(0);
@@ -628,7 +630,7 @@ describe("Codex App Server client", () => {
 
       process[stream].emit("error", new Error("private stream detail"));
 
-      await expect(resume).rejects.toMatchObject({ kind: "transport" });
+      await expect(resume).rejects.toMatchObject({ code: "codex_app_server_unavailable" });
       await client.close();
       expect(process.stdin.writableEnded).toBe(true);
       expect(process.killCalls).toBe(0);
@@ -663,7 +665,7 @@ describe("Codex App Server client", () => {
       emitter.emit("error", new Error("first private transport detail"));
       const teardown = client.close();
       const pendingError = await resume.catch((error: unknown) => error);
-      expect(pendingError).toMatchObject({ kind: "transport" });
+      expect(pendingError).toMatchObject({ code: "codex_app_server_unavailable" });
 
       const expectErrorsGuarded = () => {
         const kills = [...process.killSignals];
@@ -771,7 +773,7 @@ describe("Codex App Server client", () => {
     expect(secondClose).toBe(firstClose);
     await vi.advanceTimersByTimeAsync(5_000);
 
-    await expect(resume).rejects.toMatchObject({ kind: "transport" });
+    await expect(resume).rejects.toMatchObject({ code: "codex_app_server_unavailable" });
     await expect(firstClose).resolves.toBeUndefined();
     expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
   });
@@ -791,7 +793,7 @@ describe("Codex App Server client", () => {
     await vi.advanceTimersByTimeAsync(5_000);
 
     const pendingError = await resume.catch((error: unknown) => error);
-    expect(pendingError).toMatchObject({ kind: "protocol" });
+    expect(pendingError).toMatchObject({ code: "codex_app_server_incompatible" });
     await expect(teardown).resolves.toBeUndefined();
     expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
 
@@ -804,5 +806,44 @@ describe("Codex App Server client", () => {
     expect(process.unrefCalls).toBe(1);
     expect(await resume.catch((error: unknown) => error)).toBe(pendingError);
     expect(await client.resumeThread("thread-1").catch((error: unknown) => error)).toBe(pendingError);
+  });
+
+  it.each([
+    ["ENOENT", "codex_cli_not_found"],
+    ["EPERM", "codex_cli_not_executable"],
+    ["EACCES", "codex_cli_not_executable"]
+  ] as const)("classifies spawn %s as permanent %s", async (osCode, errorCode) => {
+    const spawnError = Object.assign(new Error("private path"), { code: osCode });
+    spawnMock.mockImplementationOnce(() => { throw spawnError; });
+
+    let caught: unknown;
+    try {
+      createCodexAppServerClient({ spawnProcess: spawnMock });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({ code: errorCode });
+    expect((caught as Error).message).not.toContain("private path");
+    expect(classifyCodexError(caught)).toEqual({
+      outcome: "permanent",
+      error: "Codex App Server executable is unavailable",
+      errorCode
+    });
+  });
+
+  it("classifies an asynchronous child error carrying EPERM as permanent", async () => {
+    const client = createCodexAppServerClient();
+    const initialization = client.initialize();
+    messagesFrom(process);
+
+    process.emit("error", Object.assign(new Error("private path"), { code: "EPERM" }));
+
+    await expect(initialization).rejects.toMatchObject({ code: "codex_cli_not_executable" });
+    expect(classifyCodexError(await initialization.catch((error: unknown) => error))).toEqual({
+      outcome: "permanent",
+      error: "Codex App Server executable is unavailable",
+      errorCode: "codex_cli_not_executable"
+    });
+    await client.close();
   });
 });

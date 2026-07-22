@@ -192,9 +192,14 @@ async function deliverByTarget(
     );
   }
 
-  const client = (dependencies.createCodexClient ?? createCodexAppServerClient)({
-    requestTimeoutMs: timeoutMs
-  });
+  let client: CodexAppServerClient;
+  try {
+    client = (dependencies.createCodexClient ?? createCodexAppServerClient)({
+      requestTimeoutMs: timeoutMs
+    });
+  } catch (error) {
+    return classifyCodexError(error);
+  }
   return (dependencies.deliverCodex ?? deliverCodexNotification)(
     delivery,
     job,
