@@ -70,7 +70,7 @@ describe("mimo_resume", () => {
       probeCodex,
       spawnJobSupervisor
     })).rejects.toThrow(
-      "Codex notification preflight failed: codex_cli_not_executable. Run mimo_healthcheck and configure CODEX_MIMO_CODEX_BIN."
+      "Codex notification preflight failed: codex_cli_not_executable. Set CODEX_MIMO_CODEX_BIN to a standalone Codex CLI outside protected WindowsApps packages, restart Codex Desktop, then run mimo_healthcheck."
     );
 
     expect(probeCodex).toHaveBeenCalledOnce();
