@@ -29,6 +29,7 @@ export interface ComposeReport {
   gitCommits?: string[];
   verification: VerificationResult[];
   error?: string;
+  errorCode?: string;
   reportPaths: {
     json: string;
     markdown: string;
@@ -55,6 +56,7 @@ export interface CreateComposeReportInput {
   gitCommits?: string[];
   verification: VerificationResult[];
   error?: string;
+  errorCode?: string;
   reportDir: string;
   eventsDir: string;
   diffsDir: string;
@@ -107,6 +109,7 @@ export function createComposeReport(input: CreateComposeReportInput): ComposeRep
               : "completed"
         })
       : undefined,
+    errorCode: input.errorCode,
     reportPaths: {
       json: path.join(input.reportDir, `${input.id}.json`),
       markdown: path.join(input.reportDir, `${input.id}.md`),
@@ -260,6 +263,15 @@ export function renderMarkdownReport(report: ComposeReport): string {
       "## Termination",
       "",
       `Reason: \`${report.terminationReason}\``,
+      ""
+    );
+  }
+
+  if (report.errorCode) {
+    lines.push(
+      "## Error Code",
+      "",
+      `Error code: \`${report.errorCode}\``,
       ""
     );
   }

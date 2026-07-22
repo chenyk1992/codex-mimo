@@ -469,6 +469,7 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     gitCommits: context.commitChanges?.commits,
     verification,
     error: outcome.error,
+    errorCode: outcome.errorCode,
     reportDir: context.request.reportDir ?? path.join(context.request.cwd, ".codex-mimo", "reports"),
     eventsDir: path.join(context.request.cwd, ".codex-mimo", "events"),
     diffsDir: path.join(context.request.cwd, ".codex-mimo", "diffs")

@@ -217,6 +217,34 @@ describe("compose report", () => {
     expect(markdown).toContain("MiMoCode startup failed: mimo not found");
   });
 
+  it("retains a safe terminal errorCode without echoing the detailed error text", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-report-error-code-"));
+    try {
+      const report = createComposeReport({
+        id: "error-code-report",
+        createdAt: "2026-07-22T00:00:00.000Z",
+        workflow: "plan",
+        cwd: root,
+        requestedSkills: ["compose:plan"],
+        status: "failed",
+        events: [],
+        diff: { changedFiles: [], diffStat: "", diff: "" },
+        verification: [],
+        error: "Read-only workflow plan modified files: .mimocode/.cron-lock",
+        errorCode: "read_only_violation",
+        reportDir: path.join(root, "reports"),
+        eventsDir: path.join(root, "events"),
+        diffsDir: path.join(root, "diffs")
+      });
+
+      expect(report.errorCode).toBe("read_only_violation");
+      expect(renderMarkdownReport(report)).toContain("Error code: `read_only_violation`");
+      expect(renderMarkdownReport(report)).not.toContain("Read-only workflow plan modified files");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("renders callback summary when callback is present", () => {
     const markdown = renderMarkdownReport({
       id: "run_5",
