@@ -66,6 +66,7 @@ const CLOSE_GRACE_MS = 1_000;
 const CLOSE_TERM_WAIT_MS = 1_000;
 const CLOSE_KILL_WAIT_MS = 1_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_TURN_COMPLETION_TIMEOUT_MS = 300_000;
 
 export interface CodexAppServerClientOptions {
   spawnProcess?: typeof spawn;
@@ -74,6 +75,9 @@ export interface CodexAppServerClientOptions {
   requestTimeoutMs?: number;
   scheduleRequestTimeout?: (callback: () => void, delayMs: number) => unknown;
   cancelRequestTimeout?: (timer: unknown) => void;
+  turnCompletionTimeoutMs?: number;
+  scheduleTurnCompletionTimeout?: (callback: () => void, delayMs: number) => unknown;
+  cancelTurnCompletionTimeout?: (timer: unknown) => void;
 }
 
 export function createCodexAppServerClient(
@@ -108,6 +112,7 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     threadId: string;
     resolve: (completion: CodexTurnCompletion) => void;
     reject: (error: CodexAppServerError) => void;
+    cleanup: () => void;
   }>();
   private initialized = false;
   private initializePromise?: Promise<void>;
@@ -127,6 +132,9 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
   private readonly requestTimeoutMs: number;
   private readonly scheduleRequestTimeout: (callback: () => void, delayMs: number) => unknown;
   private readonly cancelRequestTimeout: (timer: unknown) => void;
+  private readonly turnCompletionTimeoutMs: number;
+  private readonly scheduleTurnCompletionTimeout: (callback: () => void, delayMs: number) => unknown;
+  private readonly cancelTurnCompletionTimeout: (timer: unknown) => void;
 
   constructor(
     private readonly child: ChildProcessWithoutNullStreams,
@@ -135,6 +143,14 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     this.requestTimeoutMs = Math.max(1, options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
     this.scheduleRequestTimeout = options.scheduleRequestTimeout ?? defaultScheduleRequestTimeout;
     this.cancelRequestTimeout = options.cancelRequestTimeout ?? defaultCancelRequestTimeout;
+    this.turnCompletionTimeoutMs = Math.max(
+      1,
+      options.turnCompletionTimeoutMs ?? DEFAULT_TURN_COMPLETION_TIMEOUT_MS
+    );
+    this.scheduleTurnCompletionTimeout =
+      options.scheduleTurnCompletionTimeout ?? defaultScheduleTurnCompletionTimeout;
+    this.cancelTurnCompletionTimeout =
+      options.cancelTurnCompletionTimeout ?? defaultCancelTurnCompletionTimeout;
     this.lines = createInterface({ input: child.stdout });
     this.lines.on("line", this.onLine);
     this.lines.on("error", this.onTransportError);
@@ -246,15 +262,49 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
   private waitForTurnCompletion(
     threadId: string,
     turnId: string,
-    _signal?: AbortSignal
+    signal?: AbortSignal
   ): Promise<CodexTurnCompletion> {
+    if (signal?.aborted) {
+      this.failTransport();
+      return Promise.reject(this.terminalError!);
+    }
     const buffered = this.terminalTurns.get(turnId);
     if (buffered?.threadId === threadId) {
       this.terminalTurns.delete(turnId);
       return Promise.resolve({ turnId, status: buffered.status });
     }
     return new Promise((resolve, reject) => {
-      this.turnWaiters.set(turnId, { threadId, resolve, reject });
+      let timer: unknown;
+      let cleaned = false;
+      const onAbort = () => this.failTransport();
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        this.cancelTurnCompletionTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      timer = this.scheduleTurnCompletionTimeout(() => {
+        this.failAll(new CodexAppServerError(
+          "codex_turn_timeout",
+          "Codex callback turn timed out"
+        ));
+        this.observeTeardown();
+      }, this.turnCompletionTimeoutMs);
+      this.turnWaiters.set(turnId, {
+        threadId,
+        resolve: (completion) => {
+          cleanup();
+          this.turnWaiters.delete(turnId);
+          resolve(completion);
+        },
+        reject: (error) => {
+          cleanup();
+          this.turnWaiters.delete(turnId);
+          reject(error);
+        },
+        cleanup
+      });
     });
   }
 
@@ -312,7 +362,11 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
       return;
     }
     if (!hasOwn(parsed, "id")) {
-      if (!isNotification(parsed)) this.failProtocol();
+      if (!isNotification(parsed)) {
+        this.failProtocol();
+        return;
+      }
+      this.handleNotification(parsed);
       return;
     }
     const response = parsed as unknown as RpcResponse;
@@ -364,6 +418,22 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
     ));
   }
 
+  private handleNotification(notification: Record<string, unknown>): void {
+    if (notification.method !== "turn/completed") return;
+    const completion = readTurnCompletedNotification(notification);
+    if (!completion) {
+      this.failProtocol();
+      return;
+    }
+    const waiter = this.turnWaiters.get(completion.turnId);
+    if (!waiter) {
+      this.terminalTurns.set(completion.turnId, completion);
+      return;
+    }
+    if (waiter.threadId !== completion.threadId) return;
+    waiter.resolve({ turnId: completion.turnId, status: completion.status });
+  }
+
   private failProtocol(): void {
     this.failAll(new CodexAppServerError(
       "codex_app_server_incompatible",
@@ -387,6 +457,12 @@ class StdioCodexAppServerClient implements CodexAppServerClient {
       pending.reject(this.terminalError);
     }
     this.pending.clear();
+    for (const [turnId, waiter] of this.turnWaiters) {
+      waiter.cleanup();
+      waiter.reject(this.terminalError);
+      this.turnWaiters.delete(turnId);
+    }
+    this.terminalTurns.clear();
   }
 
   private hasExited(): boolean {
@@ -564,6 +640,35 @@ function defaultScheduleRequestTimeout(
 
 function defaultCancelRequestTimeout(timer: unknown): void {
   clearTimeout(timer as ReturnType<typeof setTimeout>);
+}
+
+function defaultScheduleTurnCompletionTimeout(
+  callback: () => void,
+  delayMs: number
+): ReturnType<typeof setTimeout> {
+  return setTimeout(callback, delayMs);
+}
+
+function defaultCancelTurnCompletionTimeout(timer: unknown): void {
+  clearTimeout(timer as ReturnType<typeof setTimeout>);
+}
+
+function readTurnCompletedNotification(value: Record<string, unknown>):
+  | (CodexTurnCompletion & { threadId: string })
+  | undefined {
+  if (!isRecord(value.params) ||
+      typeof value.params.threadId !== "string" ||
+      !isRecord(value.params.turn) ||
+      typeof value.params.turn.id !== "string" ||
+      typeof value.params.turn.status !== "string" ||
+      !isTerminalTurnStatus(value.params.turn.status)) {
+    return undefined;
+  }
+  return {
+    threadId: value.params.threadId,
+    turnId: value.params.turn.id,
+    status: value.params.turn.status
+  };
 }
 
 function isValidResult(method: string, result: unknown): boolean {

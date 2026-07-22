@@ -14,7 +14,8 @@ vi.mock("node:child_process", async () => {
 
 import {
   CodexAppServerError,
-  createCodexAppServerClient
+  createCodexAppServerClient,
+  type CodexAppServerClientOptions
 } from "../../../src/notify/codex-app-server.js";
 import { classifyCodexError } from "../../../src/notify/codex-adapter.js";
 
@@ -113,8 +114,11 @@ function respond(process: FakeAppServerProcess, message: unknown): void {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
-async function initializeClient(process: FakeAppServerProcess) {
-  const client = createCodexAppServerClient();
+async function initializeClient(
+  process: FakeAppServerProcess,
+  options: CodexAppServerClientOptions = {}
+) {
+  const client = createCodexAppServerClient(options);
   const initialized = client.initialize();
   expect(messagesFrom(process)).toEqual([{
     method: "initialize",
@@ -526,6 +530,133 @@ describe("Codex App Server client", () => {
       status: "completed"
     });
     await client.close();
+  });
+
+  function completeTurn(
+    process: FakeAppServerProcess,
+    threadId: string,
+    turnId: string,
+    status: "completed" | "interrupted" | "failed"
+  ): void {
+    respond(process, {
+      method: "turn/completed",
+      params: {
+        threadId,
+        turn: { id: turnId, status, items: [] }
+      }
+    });
+  }
+
+  it("waits for the matching turn/completed notification", async () => {
+    const client = await initializeClient(process);
+    const completion = client.startTurnAndWait("thread-1", "continue");
+    const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
+    respond(process, { id, result: turnStartResult("turn-1") });
+
+    let settled = false;
+    void completion.finally(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    completeTurn(process, "thread-other", "turn-1", "completed");
+    completeTurn(process, "thread-1", "turn-other", "completed");
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    completeTurn(process, "thread-1", "turn-1", "completed");
+    await expect(completion).resolves.toEqual({ turnId: "turn-1", status: "completed" });
+    await client.close();
+  });
+
+  it.each(["interrupted", "failed"] as const)(
+    "returns terminal callback status %s",
+    async (status) => {
+      const client = await initializeClient(process);
+      const completion = client.startTurnAndWait("thread-1", "continue");
+      const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
+      respond(process, { id, result: turnStartResult("turn-1") });
+      completeTurn(process, "thread-1", "turn-1", status);
+      await expect(completion).resolves.toEqual({ turnId: "turn-1", status });
+      await client.close();
+    }
+  );
+
+  it("consumes a completion that arrives before the turn/start response", async () => {
+    const client = await initializeClient(process);
+    const completion = client.startTurnAndWait("thread-1", "continue");
+    const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
+
+    completeTurn(process, "thread-1", "turn-race", "completed");
+    respond(process, { id, result: turnStartResult("turn-race") });
+
+    await expect(completion).resolves.toEqual({
+      turnId: "turn-race",
+      status: "completed"
+    });
+    await client.close();
+  });
+
+  it("rejects a malformed turn/completed notification as incompatible", async () => {
+    const client = await initializeClient(process);
+    const completion = client.startTurnAndWait("thread-1", "continue");
+    const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
+    respond(process, { id, result: turnStartResult("turn-1") });
+    respond(process, {
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "inProgress" } }
+    });
+    await expect(completion).rejects.toMatchObject({
+      code: "codex_app_server_incompatible"
+    });
+    await client.close();
+  });
+
+  it("times out an in-progress callback turn", async () => {
+    let fireTimeout: (() => void) | undefined;
+    const cancelTimeout = vi.fn();
+    const client = await initializeClient(process, {
+      turnCompletionTimeoutMs: 50,
+      scheduleTurnCompletionTimeout: (callback) => {
+        fireTimeout = callback;
+        return "turn-timeout";
+      },
+      cancelTurnCompletionTimeout: cancelTimeout
+    });
+    const completion = client.startTurnAndWait("thread-1", "continue");
+    const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
+    respond(process, { id, result: turnStartResult("turn-1") });
+    await Promise.resolve();
+    fireTimeout!();
+    await expect(completion).rejects.toMatchObject({
+      code: "codex_turn_timeout",
+      message: "Codex callback turn timed out"
+    });
+    expect(cancelTimeout).toHaveBeenCalledWith("turn-timeout");
+    await client.close();
+  });
+
+  it("rejects a pending completion when its abort signal fires", async () => {
+    const controller = new AbortController();
+    const client = await initializeClient(process);
+    const completion = client.startTurnAndWait("thread-1", "continue", controller.signal);
+    const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
+    respond(process, { id, result: turnStartResult("turn-1") });
+    controller.abort();
+    await expect(completion).rejects.toMatchObject({
+      code: "codex_app_server_unavailable"
+    });
+    await client.close();
+  });
+
+  it("rejects a pending completion when the client closes", async () => {
+    const client = await initializeClient(process);
+    const completion = client.startTurnAndWait("thread-1", "continue");
+    const [{ id }] = messagesFrom(process) as Array<{ id: number }>;
+    respond(process, { id, result: turnStartResult("turn-1") });
+    await client.close();
+    await expect(completion).rejects.toMatchObject({
+      code: "codex_app_server_unavailable"
+    });
   });
 
   it("decodes the installed thread status union", async () => {
