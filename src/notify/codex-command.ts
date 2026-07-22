@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { execa } from "execa";
 import { withUtf8ProcessEnv } from "../core/encoding.js";
@@ -7,7 +7,7 @@ export const CODEX_COMMAND_ENV = "CODEX_MIMO_CODEX_BIN";
 
 export interface CodexCommandSelection {
   command: string;
-  source: "configured" | "path";
+  source: "configured" | "path" | "desktop-local";
 }
 
 export function resolveCodexCommand(
@@ -53,42 +53,107 @@ function isPathCommand(command: string): boolean {
     || command.includes("\\");
 }
 
-/**
- * Resolve a bare command name to an absolute path via PATH (and Windows PATHEXT).
- * Path-like commands are normalized and returned as-is. Used only for spawning;
- * never surface the resolved path in probes, logs, or errors.
- */
-function resolveCommandPath(
+function commandNames(
   command: string,
-  env: NodeJS.ProcessEnv
-): string | undefined {
-  if (isPathCommand(command)) {
-    return path.normalize(command);
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform
+): string[] {
+  const names = [command];
+  if (platform !== "win32") return names;
+
+  const pathext = env.PATHEXT ?? process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM";
+  for (const ext of pathext.split(";")) {
+    if (!ext) continue;
+    const normalizedExt = ext.startsWith(".") ? ext : `.${ext}`;
+    names.push(command + normalizedExt);
   }
+  return names;
+}
+
+/** Resolve every existing bare-command PATH hit to normalized absolute paths. */
+function resolvePathCandidates(
+  command: string,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform
+): string[] {
+  if (isPathCommand(command)) return [path.normalize(command)];
 
   const pathEnv = env.PATH ?? env.Path;
-  if (!pathEnv) return undefined;
+  if (!pathEnv) return [];
 
   const dirs = pathEnv.split(path.delimiter).filter((dir) => dir.length > 0);
-  const names = [command];
-  if (process.platform === "win32") {
-    const pathext = env.PATHEXT ?? process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM";
-    for (const ext of pathext.split(";")) {
-      if (!ext) continue;
-      const normalizedExt = (ext.startsWith(".") ? ext : `.${ext}`).toLowerCase();
-      names.push(command + normalizedExt);
-    }
-  }
+  const names = commandNames(command, env, platform);
+  const candidates: string[] = [];
 
   for (const dir of dirs) {
     for (const name of names) {
-      const candidate = path.join(dir, name);
+      const candidate = path.resolve(dir, name);
       if (existsSync(candidate)) {
-        return candidate;
+        candidates.push(path.normalize(candidate));
       }
     }
   }
-  return undefined;
+  return candidates;
+}
+
+function desktopLocalCandidates(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform
+): string[] {
+  if (platform !== "win32") return [];
+  const localAppData = env.LOCALAPPDATA?.trim();
+  if (!localAppData) return [];
+
+  const bin = path.join(localAppData, "OpenAI", "Codex", "bin");
+  const versions: { command: string; modified: number }[] = [];
+  try {
+    for (const entry of readdirSync(bin, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const folder = path.join(bin, entry.name);
+      const command = path.join(folder, "codex.exe");
+      if (!existsSync(command)) continue;
+      versions.push({ command: path.normalize(command), modified: statSync(folder).mtimeMs });
+    }
+  } catch {}
+
+  versions.sort((left, right) => right.modified - left.modified);
+  const candidates = versions.map(({ command }) => command);
+  const root = path.join(bin, "codex.exe");
+  if (existsSync(root)) candidates.push(path.normalize(root));
+  return candidates;
+}
+
+function deDuplicateCandidates(
+  candidates: CodexCommandSelection[],
+  platform: NodeJS.Platform
+): CodexCommandSelection[] {
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    const key = platform === "win32"
+      ? candidate.command.toLowerCase()
+      : candidate.command;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function discoverCodexCandidates(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform
+): CodexCommandSelection[] {
+  const configured = env[CODEX_COMMAND_ENV]?.trim();
+  if (configured) {
+    const candidates = resolvePathCandidates(configured, env, platform);
+    return candidates.map((command) => ({ command, source: "configured" }));
+  }
+
+  return deDuplicateCandidates([
+    ...resolvePathCandidates("codex", env, platform)
+      .map((command) => ({ command, source: "path" as const })),
+    ...desktopLocalCandidates(env, platform)
+      .map((command) => ({ command, source: "desktop-local" as const }))
+  ], platform);
 }
 
 /**
@@ -127,6 +192,8 @@ export interface CodexCommandExecutionResult {
 
 export interface CodexCommandProbeOptions {
   env?: NodeJS.ProcessEnv;
+  /** Test-only platform override; production probes use the current platform. */
+  platform?: NodeJS.Platform;
   execute?: (
     command: string,
     args: string[],
@@ -152,10 +219,10 @@ export async function probeCodexCommand(
   options: CodexCommandProbeOptions = {}
 ): Promise<CodexCommandProbe> {
   const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
   const selection = resolveCodexCommand(env);
-  const resolved = resolveCommandPath(selection.command, env);
-
-  if (resolved === undefined && !isPathCommand(selection.command)) {
+  const candidates = discoverCodexCandidates(env, platform);
+  if (candidates.length === 0) {
     return {
       ok: false,
       source: selection.source,
@@ -163,29 +230,33 @@ export async function probeCodexCommand(
     };
   }
 
-  const commandToRun = resolved ?? selection.command;
   const execute = options.execute ?? ((command, args, executeOptions) =>
     execa(command, args, executeOptions));
-  try {
-    const result = await execute(commandToRun, ["--version"], {
-      env: withUtf8ProcessEnv(env),
-      reject: false,
-      timeout: 10_000
-    });
-    if (result.exitCode === 0) {
-      const version = typeof result.stdout === "string" ? result.stdout.trim() : "";
-      return { ok: true, source: selection.source, version };
+  let failure: CodexCommandProbe | undefined;
+  for (const candidate of candidates) {
+    try {
+      const result = await execute(candidate.command, ["--version"], {
+        env: withUtf8ProcessEnv(env),
+        reject: false,
+        timeout: 10_000
+      });
+      if (result.exitCode === 0) {
+        const version = typeof result.stdout === "string" ? result.stdout.trim() : "";
+        return { ok: true, source: candidate.source, version };
+      }
+      failure = {
+        ok: false,
+        source: candidate.source,
+        errorCode: classifyProbeFailure(result, candidate.command)
+      };
+    } catch (error) {
+      failure = {
+        ok: false,
+        source: candidate.source,
+        errorCode: classifyProbeFailure(error, candidate.command)
+      };
     }
-    return {
-      ok: false,
-      source: selection.source,
-      errorCode: classifyProbeFailure(result, selection.command)
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      source: selection.source,
-      errorCode: classifyProbeFailure(error, selection.command)
-    };
+    if (candidate.source === "configured") return failure;
   }
+  return failure!;
 }

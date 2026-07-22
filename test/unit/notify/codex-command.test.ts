@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -28,8 +28,34 @@ function pathEnvWithFakeCodex(): { absolute: string; env: NodeJS.ProcessEnv } {
     env: {
       PATH: dir,
       Path: dir,
-      PATHEXT: ".CMD;.EXE;.BAT;.COM"
+      PATHEXT: ".cmd;.exe;.bat;.com"
     }
+  };
+}
+
+function createDesktopLocalCodex(): {
+  bin: string;
+  root: string;
+  versions: { newer: string; older: string };
+  env: NodeJS.ProcessEnv;
+} {
+  const localAppData = mkdtempSync(path.join(os.tmpdir(), "codex-desktop-local-"));
+  temporaryRoots.push(localAppData);
+  const bin = path.join(localAppData, "OpenAI", "Codex", "bin");
+  const root = path.join(bin, "codex.exe");
+  const newer = path.join(bin, "newer", "codex.exe");
+  const older = path.join(bin, "older", "codex.exe");
+  for (const executable of [root, newer, older]) {
+    mkdirSync(path.dirname(executable), { recursive: true });
+    writeFileSync(executable, "");
+  }
+  utimesSync(path.dirname(newer), new Date("2026-01-02T00:00:00.000Z"), new Date("2026-01-02T00:00:00.000Z"));
+  utimesSync(path.dirname(older), new Date("2026-01-01T00:00:00.000Z"), new Date("2026-01-01T00:00:00.000Z"));
+  return {
+    bin,
+    root,
+    versions: { newer, older },
+    env: { LOCALAPPDATA: localAppData, PATH: "", Path: "", PATHEXT: ".exe" }
   };
 }
 
@@ -90,6 +116,96 @@ describe("codexCommandErrorCode", () => {
 });
 
 describe("Codex command probe", () => {
+  it("falls through failed PATH hits until a later candidate succeeds", async () => {
+    const first = pathEnvWithFakeCodex();
+    const second = pathEnvWithFakeCodex();
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "codex 1.2\n" });
+
+    const result = await probeCodexCommand({
+      env: { ...first.env, PATH: `${first.env.PATH}${path.delimiter}${second.env.PATH}` },
+      execute
+    });
+
+    expect(result).toEqual({ ok: true, source: "path", version: "codex 1.2" });
+    expect(execute.mock.calls.map(([command]) => command)).toEqual([first.absolute, second.absolute]);
+    expect(JSON.stringify(result)).not.toContain(first.absolute);
+    expect(JSON.stringify(result)).not.toContain(second.absolute);
+  });
+
+  it("discovers Desktop-local version folders newest first before the root binary", async () => {
+    const desktop = createDesktopLocalCodex();
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "" })
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "codex Desktop\n" });
+
+    const result = await probeCodexCommand({ env: desktop.env, platform: "win32", execute });
+
+    expect(result).toEqual({ ok: true, source: "desktop-local", version: "codex Desktop" });
+    expect(execute.mock.calls.map(([command]) => command)).toEqual([
+      desktop.versions.newer,
+      desktop.versions.older,
+      desktop.root
+    ]);
+    expect(JSON.stringify(result)).not.toContain(desktop.bin);
+  });
+
+  it("de-duplicates normalized PATH and Desktop-local candidates", async () => {
+    const desktop = createDesktopLocalCodex();
+    const duplicateBin = `${desktop.bin}${path.sep}..${path.sep}${path.basename(desktop.bin)}`;
+    const execute = vi.fn().mockResolvedValue({ exitCode: 1, stdout: "" });
+
+    await probeCodexCommand({
+      env: { ...desktop.env, PATH: duplicateBin, Path: duplicateBin },
+      platform: "win32",
+      execute
+    });
+
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(execute.mock.calls.map(([command]) => command)).toEqual([
+      desktop.root,
+      desktop.versions.newer,
+      desktop.versions.older
+    ]);
+  });
+
+  it("does not discover Desktop-local candidates on non-Windows platforms", async () => {
+    const desktop = createDesktopLocalCodex();
+    const execute = vi.fn();
+
+    const result = await probeCodexCommand({ env: desktop.env, platform: "linux", execute });
+
+    expect(result).toEqual({
+      ok: false,
+      source: "path",
+      errorCode: "codex_cli_not_found"
+    });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back when the configured override fails", async () => {
+    const { absolute, env } = pathEnvWithFakeCodex();
+    const configured = path.join(path.dirname(absolute), "configured-codex");
+    const execute = vi.fn().mockResolvedValue({ exitCode: 1, stdout: "" });
+
+    const result = await probeCodexCommand({
+      env: { ...env, [CODEX_COMMAND_ENV]: configured },
+      execute
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      source: "configured",
+      errorCode: "codex_cli_not_found"
+    });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[0]).toBe(path.normalize(configured));
+    expect(execute.mock.calls[0]?.[0]).not.toBe(absolute);
+    expect(JSON.stringify(result)).not.toContain(configured);
+  });
+
   it("reports configured executable success", async () => {
     const execute = vi.fn().mockResolvedValue({ exitCode: 0, stdout: "codex 1.2.3\n" });
     expect(await probeCodexCommand({
