@@ -32,9 +32,10 @@ describe("mimo_resume", () => {
       const cwd = tempWorkspace();
       const source = parent(cwd, status);
       const spawnJobSupervisor = vi.fn().mockReturnValue(123);
+      const probeCodex = vi.fn().mockResolvedValue({ ok: true, source: "path" });
 
       const receipt = await mimoResume({ cwd, jobId: source.id, task: "Continue" }, {
-        env: { CODEX_THREAD_ID: "thread-drifted" }, spawnJobSupervisor
+        env: { CODEX_THREAD_ID: "thread-drifted" }, spawnJobSupervisor, probeCodex
       });
 
       expect(receipt).toEqual({
@@ -50,19 +51,45 @@ describe("mimo_resume", () => {
         notificationTarget: { type: "codex", threadId: "thread-parent" },
         request: { cwd, jobId: source.id, task: "Continue", sessionId: "ses_parent" }
       });
+      expect(probeCodex).toHaveBeenCalledOnce();
       expect(spawnJobSupervisor).toHaveBeenCalledWith(cwd);
     });
+
+  it("preflights an inherited Codex target and creates no child on failure", async () => {
+    const cwd = tempWorkspace();
+    const source = parent(cwd);
+    const spawnJobSupervisor = vi.fn();
+    const probeCodex = vi.fn().mockResolvedValue({
+      ok: false,
+      source: "path",
+      errorCode: "codex_cli_not_executable"
+    });
+
+    await expect(mimoResume({ cwd, jobId: source.id, task: "Continue" }, {
+      env: {},
+      probeCodex,
+      spawnJobSupervisor
+    })).rejects.toThrow(
+      "Codex notification preflight failed: codex_cli_not_executable. Run mimo_healthcheck and configure CODEX_MIMO_CODEX_BIN."
+    );
+
+    expect(probeCodex).toHaveBeenCalledOnce();
+    expect(spawnJobSupervisor).not.toHaveBeenCalled();
+    expect(listJobs(cwd).map((job) => job.id)).toEqual([source.id]);
+  });
 
   it("uses an explicit notification override instead of the parent target", async () => {
     const cwd = tempWorkspace();
     const source = parent(cwd);
+    const probeCodex = vi.fn();
     const receipt = await mimoResume({
       cwd,
       jobId: source.id,
       task: "Continue",
       notify: { type: "webhook", url: "https://example.test/hook", secretEnv: "HOOK_SECRET" }
-    }, { env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123) });
+    }, { env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123), probeCodex });
 
+    expect(probeCodex).not.toHaveBeenCalled();
     expect(readJob(cwd, receipt.jobId)?.notificationTarget).toEqual({
       type: "webhook", url: "https://example.test/hook", secretEnv: "HOOK_SECRET"
     });

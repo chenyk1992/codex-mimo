@@ -474,7 +474,11 @@ describe("unified background jobs", () => {
         task,
         request: { cwd, task, allowWrite: true, timeoutMs: 2_000 },
         notify: { type: "codex", threadId: "thread-frozen" }
-      }, { env: {}, spawnJobSupervisor: () => 123 });
+      }, {
+        env: {},
+        probeCodex: async () => ({ ok: true, source: "path" }),
+        spawnJobSupervisor: () => 123
+      });
       return { content: [{ type: "text", text: JSON.stringify(launched) }] };
     });
     mcpServer.registerTool("mimo_wait", { inputSchema: {} }, async () => {
@@ -587,6 +591,8 @@ describe("unified background jobs", () => {
   });
 
   it("settles synchronous Codex EPERM launch failures after one attempt while the job stays completed", async () => {
+    // Post-start delivery remains independent of job outcome: a later transport
+    // failure must not rewrite a completed job status (preflight only gates launch).
     const cwd = workspace();
     const target = { type: "codex" as const, threadId: "thread-eperm" };
     const completed = await runFake(cwd, seed(cwd, "implement", target));
