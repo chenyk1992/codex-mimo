@@ -49,6 +49,19 @@ The selected approach reduces Codex context and token consumption relative to th
 
 The implementation must preserve the compact callback prompt and must not add raw result text to the RPC notification payload. A future result-summarization or path-only mode would be a separate product decision because it could reduce fidelity of automatic writeback.
 
+### Zero-model-polling invariant
+
+The accepted token boundary is stricter than merely “fewer retries”:
+
+1. `thread/resume` is one system-level App Server RPC used to read the target task state; it does not invoke the Codex model.
+2. `turn/start` is sent once per delivery attempt and starts the one callback model turn that is allowed to consume the returned result.
+3. After acceptance, the Node notification worker waits by reading App Server notifications from stdout until the matching `turn/completed`. It must not ask the model to check status.
+4. Outbox lease renewal is a Node timer plus local durable-state update. It must not create a Codex turn or call an MCP status tool.
+5. The waiting path must make zero calls to `mimo_status`, `mimo_events`, or `mimo_wait`, and zero additional calls to `turn/start`.
+6. The callback model turn may call `mimo_result` once and generate the user-facing response. This is normal result-consumption cost and is not treated as polling overhead.
+
+Tests and the real callback audit must prove one `thread/resume`, one `turn/start`, one completed callback turn, and no model-driven progress checks between start and completion.
+
 ## Considered approaches
 
 ### Approach A — one connection through terminal turn lifecycle (selected)
