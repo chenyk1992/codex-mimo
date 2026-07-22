@@ -42,7 +42,7 @@ The common worker validates the stored request, builds `mimo run --format json -
 
 Compose uses the platform job statuses: `queued`, `running`, `needs_input`, `blocked`, `completed`, `failed`, `cancelled`, and `timeout`. Report status (`passed`, `failed`, `needs_review`, or `timeout`) is an artifact-level assessment and does not replace job status.
 
-The work call returns a queued receipt. Codex then relies on the parent-task notification and calls `mimo_result` in the resumed turn. `mimo_status`, `mimo_events`, and one `mimo_wait` are available only for explicit diagnosis.
+The work call returns a queued receipt. Codex then relies on the parent-task notification and calls `mimo_result` in the resumed turn, consuming `mimo_result.output` when present. `mimo_status`, `mimo_events`, and one `mimo_wait` are available only for explicit diagnosis.
 
 ## Verification
 
@@ -65,7 +65,9 @@ Commands are split into executable and arguments and run without a shell. A fail
 
 ## Plan workflow
 
-The `plan` workflow is read-only (`writesAllowed: false`). It returns the plan in the job result via `mimo_result` — callers read it there, not from a saved file. The prompt instructs MiMoCode to return the plan in the final response only and not to save plan files. Asking `plan` to write a plan file intentionally ends as `read_only_violation`.
+The `plan` workflow is read-only (`writesAllowed: false`). The plan body is available only from an explicit `mimo_result` read as `mimo_result.output` — callers must not expect it in a saved report file. The prompt instructs MiMoCode to return the plan in the final response only and not to save plan files. Asking `plan` to write a plan file intentionally ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with safe `errorCode: "result_missing"`.
+
+For Codex Desktop callback launches, send `notify: { type: "codex", threadId: "..." }` on the first attempt. Cursor companion and intentional no-notify launches may omit Codex notify.
 
 ```json
 { "workflow": "plan", "task": "Plan the feature; return the plan only" }
@@ -80,7 +82,7 @@ Compose finalization writes:
 - `.codex-mimo/events/<jobId>.jsonl`
 - `.codex-mimo/diffs/<jobId>.diff` when a diff exists
 
-Reports include the workflow, requested skills, structural event counts, Git before/after evidence, changed files, verification, allowlisted callback outcome, and sanitized errors. Report event entries omit message/error text, tool arguments, and raw payloads. Notification payloads contain only a bounded status summary and report paths; they do not contain raw events, final text, complete prompts, or full diffs.
+Reports remain structural and intentionally omit model output. They include the workflow, requested skills, structural event counts, Git before/after evidence, changed files, verification, allowlisted callback outcome, and sanitized errors. Report event entries omit message/error text, tool arguments, and raw payloads. Operators should not expect a plan body in `.codex-mimo/reports/*.md`. Raw job `events.jsonl` remains a diagnostic artifact, not the normal result API. Notification payloads contain only a bounded status summary and report paths; they do not contain raw events, final text, complete prompts, or full diffs.
 
 ## Read-Only Enforcement
 
