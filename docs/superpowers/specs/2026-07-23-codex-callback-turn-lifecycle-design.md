@@ -297,7 +297,7 @@ Strengthen `test/smoke/local-codex-notification.test.ts` so the opt-in Windows s
 2. The marker includes the expected final output token.
 3. The notification outbox is `delivered` only after the marker-producing callback turn completes.
 4. The originating task's callback turn is non-empty and completed, not merely started.
-5. Audit expectations still show one target resume and one callback `turn/start` for the successful path.
+5. Audit expectations show exactly two one-time target resumes (launch preflight and delivery preparation) and one callback `turn/start` for the successful path, with no additional resume while waiting.
 
 The real smoke remains gated by `RUN_LOCAL_CODEX_NOTIFY_SMOKE=1`, but deterministic fake-App-Server lifecycle tests run in the ordinary test suite so this regression cannot depend solely on the optional smoke.
 
