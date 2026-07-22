@@ -564,13 +564,16 @@ describe("notification dispatcher", () => {
     const cwd = makeCwd();
     const { job } = await makeDelivery(cwd, { type: "codex", threadId: "thread-1" });
     const close = vi.fn(async () => undefined);
-    const startTurn = vi.fn(async () => undefined);
+    const startTurnAndWait = vi.fn(async () => ({
+      turnId: "turn-1",
+      status: "completed" as const
+    }));
     const prepareCodex = vi.fn(async () => ({
       probe: { ok: true as const, source: "configured" as const },
       client: {
         initialize: vi.fn(async () => { throw new Error("adapter must not initialize"); }),
         resumeThread: vi.fn(async () => { throw new Error("adapter must not resume"); }),
-        startTurn,
+        startTurnAndWait,
         close
       },
       thread: { exists: true, busy: false }
@@ -588,7 +591,7 @@ describe("notification dispatcher", () => {
       env,
       signal: expect.any(AbortSignal)
     }));
-    expect(startTurn).toHaveBeenCalledOnce();
+    expect(startTurnAndWait).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
     expect(deliverWebhook).not.toHaveBeenCalled();
     expect(readDeliveries(job.notificationOutboxFile)[0].target).toEqual({

@@ -9,7 +9,10 @@ function client(overrides: Partial<CodexAppServerClient> = {}): CodexAppServerCl
   return {
     initialize: vi.fn(async () => undefined),
     resumeThread: vi.fn(async () => ({ exists: true, busy: false })),
-    startTurn: vi.fn(async () => undefined),
+    startTurnAndWait: vi.fn(async () => ({
+      turnId: "turn-1",
+      status: "completed" as const
+    })),
     close: vi.fn(async () => undefined),
     ...overrides
   };
