@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import { readJob } from "../../src/core/job-store.js";
 import { probeCodexCommand } from "../../src/notify/codex-command.js";
 
-const enabled = process.env.RUN_LOCAL_CODEX_NOTIFY_SMOKE === "1";
+const enabled = process.platform === "win32" && process.env.RUN_LOCAL_CODEX_NOTIFY_SMOKE === "1";
 const describeSmoke = enabled ? describe : describe.skip;
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const OUTPUT_MARKER = "CODEX_MIMO_NOTIFY_SMOKE_OUTPUT_v1";
@@ -50,7 +50,7 @@ interface AppServerAuditRecord {
 }
 
 describeSmoke("local Codex notification", () => {
-  it("observes a completed packaged job through the resumed Codex task", async () => {
+  it("discovers Desktop-local Codex and observes one completed callback through the resumed task", async () => {
     const threadId = process.env.CODEX_THREAD_ID?.trim();
     if (!threadId) throw new Error("CODEX_THREAD_ID must be injected by the dedicated Codex task.");
 
@@ -64,10 +64,13 @@ describeSmoke("local Codex notification", () => {
     let receipt: JobReceipt | undefined;
 
     try {
-      const probe = await probeCodexCommand({ env: process.env });
+      const smokeEnv = withoutCodexCommandOverride(process.env);
+      expect(smokeEnv.CODEX_MIMO_CODEX_BIN).toBeUndefined();
+      const probe = await probeCodexCommand({ env: smokeEnv });
       if (!probe.ok) {
         throw new Error(probe.errorCode ?? "codex_app_server_unavailable");
       }
+      expect(probe.source).toBe("desktop-local");
 
       initializeSmokeRepository(workspace, markerFile);
       const server = readPackagedMcpServer();
@@ -76,9 +79,9 @@ describeSmoke("local Codex notification", () => {
         args: server.args,
         cwd: server.cwd ? path.resolve(pluginRoot, server.cwd) : pluginRoot,
         env: {
-          ...stringEnvironment(process.env),
+          ...stringEnvironment(smokeEnv),
           ...server.env,
-          ...forwardedEnvironment(process.env, server.env_vars),
+          ...forwardedEnvironment(smokeEnv, server.env_vars),
           MIMOCODE_HOME: mimoHome,
           CODEX_MIMO_TOOL_AUDIT_FILE: auditFile,
           CODEX_MIMO_APP_SERVER_AUDIT_FILE: appServerAuditFile
@@ -186,6 +189,11 @@ function stringEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
   return Object.fromEntries(
     Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined)
   );
+}
+
+function withoutCodexCommandOverride(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const { CODEX_MIMO_CODEX_BIN: _ignored, ...withoutOverride } = env;
+  return withoutOverride;
 }
 
 function initializeSmokeRepository(workspace: string, markerFile: string): void {

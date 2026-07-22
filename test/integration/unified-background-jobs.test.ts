@@ -671,6 +671,77 @@ describe("unified background jobs", () => {
     expect(methods.filter((method) => method === "turn/start")).toHaveLength(1);
   });
 
+  it.skipIf(process.platform !== "win32")(
+    "automatically discovers, preflights, and delivers a Desktop-local Codex target with one callback turn",
+    async () => {
+      const cwd = workspace();
+      const threadId = "thread-desktop-local";
+      const marker = path.join(cwd, "codex-app-server-desktop-local.jsonl");
+      const localAppData = path.join(cwd, "local-app-data");
+      const desktopCommand = path.join(localAppData, "OpenAI", "Codex", "bin", "current", "codex.exe");
+      const env = { PATH: "", Path: "", PATHEXT: ".exe", LOCALAPPDATA: localAppData };
+      fs.mkdirSync(path.dirname(desktopCommand), { recursive: true });
+      fs.writeFileSync(desktopCommand, "", "utf8");
+      const sources: string[] = [];
+      const versionCommands: string[] = [];
+      const createClient = (options?: CodexAppServerClientOptions) =>
+        createCodexAppServerClient({
+          ...options,
+          env,
+          spawnProcess: (_command, _args, spawnOptions) => track(spawn(process.execPath, [fakeCodexAppServer], {
+            ...spawnOptions,
+            cwd,
+            env: { ...spawnOptions.env, FAKE_CODEX_MARKER: marker },
+            stdio: ["pipe", "pipe", "pipe"]
+          })) as ChildProcessWithoutNullStreams
+        });
+      const prepareCodex = vi.fn(async (options: Parameters<typeof prepareCodexConnection>[0]) => {
+        expect(options.env?.[CODEX_COMMAND_ENV]).toBeUndefined();
+        const prepared = await prepareCodexConnection({
+          ...options,
+          execute: async (command, args) => {
+            versionCommands.push(command);
+            expect(args).toEqual(["--version"]);
+            return { exitCode: 0, stdout: "fake-codex Desktop" };
+          },
+          createClient
+        });
+        sources.push(prepared.probe.source);
+        return prepared;
+      });
+
+      const receipt = await mimoImplement({
+        cwd,
+        task: "Complete the fake notification job.",
+        allowWrite: true,
+        notify: { type: "codex", threadId }
+      }, {
+        env,
+        prepareCodex,
+        spawnJobSupervisor: () => 123
+      });
+      const completed = await runFake(cwd, readJob(cwd, receipt.jobId)!);
+      const delivered = await dispatchNextDelivery(cwd, { env, prepareCodex });
+
+      expect(receipt).toMatchObject({ kind: "implement", status: "queued" });
+      expect(completed.status).toBe("completed");
+      expect(delivered).toMatchObject({ outcome: "settled", delivery: { status: "delivered" } });
+      expect(sources).toEqual(["desktop-local", "desktop-local"]);
+      expect(versionCommands).toEqual([desktopCommand, desktopCommand]);
+      expect(prepareCodex).toHaveBeenCalledWith({ env, threadId });
+      expect(prepareCodex).toHaveBeenLastCalledWith(expect.objectContaining({
+        env,
+        threadId,
+        signal: expect.any(AbortSignal)
+      }));
+
+      const methods = readJsonLines(marker).map((call) => call.method);
+      expect(methods.filter((method) => method === "initialize")).toHaveLength(2);
+      expect(methods.filter((method) => method === "thread/resume")).toHaveLength(2);
+      expect(methods.filter((method) => method === "turn/start")).toHaveLength(1);
+    }
+  );
+
   it("settles synchronous Codex EPERM launch failures after one attempt while the job stays completed", async () => {
     // Post-start delivery remains independent of job outcome: a later transport
     // failure must not rewrite a completed job status (preflight only gates launch).
