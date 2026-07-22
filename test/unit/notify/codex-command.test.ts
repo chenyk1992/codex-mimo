@@ -1,3 +1,5 @@
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   CODEX_COMMAND_ENV,
@@ -37,6 +39,13 @@ describe("Codex command error classification", () => {
   it("maps unknown errors to unavailable", () => {
     expect(codexCommandErrorCode(new Error("private detail"))).toBe("codex_app_server_unavailable");
     expect(codexCommandErrorCode(null)).toBe("codex_app_server_unavailable");
+  });
+
+  it("classifies nested cause codes without inspecting messages", () => {
+    expect(codexCommandErrorCode({
+      code: undefined,
+      cause: { code: "EPERM", message: "C:\\private\\codex.exe" }
+    })).toBe("codex_cli_not_executable");
   });
 });
 
@@ -83,6 +92,26 @@ describe("Codex command probe", () => {
     expect(execute).toHaveBeenCalledWith("codex", ["--version"], expect.any(Object));
   });
 
+  it.each([
+    ["ENOENT", "codex_cli_not_found"],
+    ["EPERM", "codex_cli_not_executable"],
+    ["EACCES", "codex_cli_not_executable"]
+  ] as const)("classifies resolved Execa cause %s as %s", async (osCode, errorCode) => {
+    const privatePath = "C:\\private\\WindowsApps\\codex.exe";
+    const execute = vi.fn().mockResolvedValue({
+      failed: true,
+      exitCode: undefined,
+      stdout: "",
+      code: undefined,
+      cause: Object.assign(new Error(privatePath), { code: osCode })
+    });
+
+    const result = await probeCodexCommand({ env: {}, execute });
+
+    expect(result).toEqual({ ok: false, source: "path", errorCode });
+    expect(JSON.stringify(result)).not.toContain(privatePath);
+  });
+
   it("classifies ENOENT without leaking private details", async () => {
     const execute = vi.fn().mockRejectedValue(Object.assign(new Error("private path"), { code: "ENOENT" }));
     const result = await probeCodexCommand({ env: {}, execute });
@@ -100,10 +129,34 @@ describe("Codex command probe", () => {
     expect(JSON.stringify(result)).not.toContain("WindowsApps");
   });
 
-  it("reports non-zero --version as unavailable without stderr", async () => {
-    const execute = vi.fn().mockResolvedValue({ exitCode: 1, stdout: "private stderr detail" });
+  it("reports an ordinary non-zero version exit as app server unavailable", async () => {
+    const execute = vi.fn().mockResolvedValue({ exitCode: 1, stdout: "private output" });
     const result = await probeCodexCommand({ env: {}, execute });
-    expect(result).toEqual({ ok: false, source: "path", errorCode: "codex_app_server_unavailable" });
-    expect(JSON.stringify(result)).not.toContain("private");
+
+    expect(result).toEqual({
+      ok: false,
+      source: "path",
+      errorCode: "codex_app_server_unavailable"
+    });
+    expect(JSON.stringify(result)).not.toContain("private output");
+  });
+
+  it("classifies a real reject:false missing executable without leaking its path", async () => {
+    const privateMissingPath = path.join(
+      os.tmpdir(),
+      `private-codex-missing-${process.pid}-${Date.now()}`,
+      "codex"
+    );
+
+    const result = await probeCodexCommand({
+      env: { [CODEX_COMMAND_ENV]: privateMissingPath }
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      source: "configured",
+      errorCode: "codex_cli_not_found"
+    });
+    expect(JSON.stringify(result)).not.toContain(privateMissingPath);
   });
 });
