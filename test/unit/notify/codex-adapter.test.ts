@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JobSignal } from "../../../src/core/job-signals.js";
 import type { JobRecord } from "../../../src/core/jobs.js";
 import {
@@ -8,6 +11,7 @@ import {
 } from "../../../src/notify/codex-app-server.js";
 import type { PreparedCodexConnection } from "../../../src/notify/codex-connection.js";
 import {
+  buildCodexCallbackResult,
   buildCodexNotificationPrompt,
   classifyCodexError,
   deliverCodexNotification
@@ -15,6 +19,7 @@ import {
 import type { NotificationDelivery } from "../../../src/notify/types.js";
 
 const createdAt = "2026-07-16T00:00:00.000Z";
+const tempDirs: string[] = [];
 const delivery: NotificationDelivery = {
   id: "implement-1:3:codex",
   eventId: "implement-1:3:codex",
@@ -57,6 +62,22 @@ const signal: JobSignal = {
   summary: "Implementation completed."
 };
 
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
+
+function jobWithEvents(text: string, overrides: Partial<JobRecord> = {}): JobRecord {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-adapter-"));
+  tempDirs.push(dir);
+  const eventsFile = path.join(dir, "implement-1.events.jsonl");
+  fs.writeFileSync(
+    eventsFile,
+    JSON.stringify({ type: "text", timestamp: createdAt, text }) + "\n",
+    "utf8"
+  );
+  return { ...job, eventsFile, ...overrides };
+}
+
 function fakeClient(result: ThreadResumeResult = { exists: true, busy: false }): CodexAppServerClient & {
   initialize: ReturnType<typeof vi.fn>;
   resumeThread: ReturnType<typeof vi.fn>;
@@ -86,37 +107,41 @@ function preparedConnection(
 }
 
 describe("Codex notification adapter", () => {
-  it("includes the frozen cwd required to fetch the notified job result", () => {
-    const prompt = buildCodexNotificationPrompt(delivery, job, signal);
+  it("attaches one public final result and forbids callback tool calls", () => {
+    const prepared = jobWithEvents("CODEX_MIMO_NOTIFY_SMOKE_OUTPUT_v1");
+    const prompt = buildCodexNotificationPrompt(delivery, prepared, signal);
 
+    expect(prompt.startsWith("MIMO_CALLBACK_RESULT_V1\n")).toBe(true);
     expect(prompt).toContain('notification event "implement-1:3:codex"');
-    expect(prompt).toContain("may be a retry");
-    expect(prompt).toContain('Call mimo_result with cwd "C:\\\\workspace"');
-    expect(prompt).toContain('and jobId "implement-1"');
+    expect(prompt).toContain("Do not call mimo_result, mimo_status, mimo_events, mimo_wait, or any other tool.");
+    expect(prompt).toContain("<mimo_callback_result>");
+    expect(prompt).toContain('"output":"CODEX_MIMO_NOTIFY_SMOKE_OUTPUT_v1"');
+    expect(prompt).toContain("</mimo_callback_result>");
+    expect(prompt).not.toContain("Call mimo_result");
+    expect(prompt).not.toContain("private task prompt");
+    expect(prompt).not.toContain("request-secret");
+    expect(prompt).not.toContain('"actions"');
+    expect(prompt).not.toContain('"notification"');
   });
 
-  it("keeps long frozen identifiers exact even when the callback prompt exceeds the compact target", () => {
-    const cwd = `C:\\\\${"nested\\\\".repeat(40)}quoted-\"目录`;
-    const jobId = `implement-${"x".repeat(260)}-\"quoted\"`;
-
-    const prompt = buildCodexNotificationPrompt(
-      { ...delivery, id: `${jobId}:3:codex`, eventId: `${jobId}:3:codex`, jobId },
-      { ...job, cwd, id: jobId },
-      signal
-    );
-
-    expect(prompt).toContain(`cwd ${JSON.stringify(cwd)}`);
-    expect(prompt).toContain(`jobId ${JSON.stringify(jobId)}`);
-    expect(prompt.length).toBeGreaterThan(240);
+  it("creates a partial callback result without actions or notification", () => {
+    const result = buildCodexCallbackResult({ ...job, status: "needs_input" });
+    expect(result).toMatchObject({ jobId: "implement-1", status: "needs_input", resultType: "partial" });
+    expect(result).not.toHaveProperty("actions");
+    expect(result).not.toHaveProperty("notification");
   });
 
   it("starts exactly one new turn for an already prepared idle thread", async () => {
+    const prepared = jobWithEvents("CODEX_MIMO_NOTIFY_SMOKE_OUTPUT_v1");
     const calls: string[] = [];
     const client: CodexAppServerClient = {
       initialize: async () => { throw new Error("adapter must not initialize"); },
       resumeThread: async () => { throw new Error("adapter must not resume"); },
       startTurnAndWait: async (threadId, prompt) => {
-        calls.push(`turn:${threadId}:${prompt}`);
+        calls.push(`turn:${threadId}`);
+        expect(prompt.startsWith("MIMO_CALLBACK_RESULT_V1\n")).toBe(true);
+        expect(prompt).toContain('"output":"CODEX_MIMO_NOTIFY_SMOKE_OUTPUT_v1"');
+        expect(prompt).not.toContain("Call mimo_result");
         return { turnId: "turn-1", status: "completed" };
       },
       close: async () => { calls.push("close"); }
@@ -124,16 +149,13 @@ describe("Codex notification adapter", () => {
 
     await expect(deliverCodexNotification(
       delivery,
-      job,
+      prepared,
       signal,
       preparedConnection(client)
     )).resolves.toEqual({
       outcome: "delivered"
     });
-    expect(calls).toEqual([
-      'turn:thread-1:MiMoCode notification event "implement-1:3:codex" emitted completed and may be a retry. Call mimo_result with cwd "C:\\\\workspace" and jobId "implement-1"; continue handling the original request.',
-      "close"
-    ]);
+    expect(calls).toEqual(["turn:thread-1", "close"]);
   });
 
   it("retries an already prepared busy thread without starting a turn", async () => {
@@ -316,61 +338,6 @@ describe("Codex notification adapter", () => {
       error: "Codex App Server request failed",
       errorCode: "codex_app_server_unavailable"
     });
-  });
-
-  it("builds one compact line without private job fields", () => {
-    const inputSignal: JobSignal = {
-      ...signal,
-      kind: "needs_input",
-      status: "needs_input",
-      summary: "Need   the API token\r\nfrom the operator."
-    };
-
-    const prompt = buildCodexNotificationPrompt(delivery, job, inputSignal);
-
-    expect(prompt).toBe(
-      'MiMoCode notification event "implement-1:3:codex" emitted needs_input and may be a retry. Call mimo_result with cwd "C:\\\\workspace" and jobId "implement-1"; continue handling the original request. Reason: MiMoCode needs additional input.'
-    );
-    expect(prompt).not.toContain("private task prompt");
-    expect(prompt).not.toContain("request-secret");
-    expect(prompt).not.toContain("private-callback");
-    expect(prompt).not.toContain("callback-secret");
-    expect(prompt).not.toMatch(/[\r\n]/);
-    expect(prompt.length).toBeLessThanOrEqual(240);
-  });
-
-  it("caps blocked prompts at 240 characters", () => {
-    const blockedSignal: JobSignal = {
-      ...signal,
-      kind: "blocked",
-      status: "blocked",
-      summary: `Blocked ${"because ".repeat(100)}`
-    };
-
-    const prompt = buildCodexNotificationPrompt(delivery, job, blockedSignal);
-
-    expect(prompt).toContain(" Reason: MiMoCode is blocked by an external cond");
-    expect(prompt.length).toBe(240);
-    expect(prompt).not.toMatch(/[\r\n]/);
-  });
-
-  it("does not append a reason for terminal events", () => {
-    expect(buildCodexNotificationPrompt(delivery, job, signal)).toBe(
-      'MiMoCode notification event "implement-1:3:codex" emitted completed and may be a retry. Call mimo_result with cwd "C:\\\\workspace" and jobId "implement-1"; continue handling the original request.'
-    );
-  });
-
-  it("preserves an unexpectedly long internal job id in terminal prompts", () => {
-    const jobId = `implement-${"x".repeat(500)}`;
-    const prompt = buildCodexNotificationPrompt(
-      { ...delivery, id: `${jobId}:3:codex`, eventId: `${jobId}:3:codex`, jobId },
-      { ...job, id: jobId },
-      signal
-    );
-
-    expect(prompt).toContain(`jobId ${JSON.stringify(jobId)}`);
-    expect(prompt.length).toBeGreaterThan(240);
-    expect(prompt).not.toMatch(/[\r\n]/);
   });
 
   it("classifies malformed protocol as permanent incompatibility", () => {

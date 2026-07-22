@@ -313,10 +313,11 @@ describe("unified background jobs", () => {
     const start = readJsonLines(marker).find((call) => call.method === "turn/start")!;
     const params = start.params as { threadId: string; input: Array<{ text: string }> };
     expect(params.threadId).toBe("thread-plan-output");
-    expect(params.input[0].text).toContain("Call mimo_result");
-    expect(params.input[0].text).toContain(`jobId ${JSON.stringify(completed.id)}`);
-    expect(params.input[0].text).toContain(`cwd ${JSON.stringify(cwd)}`);
-    expect(params.input[0].text).not.toContain(planMarkdown);
+    expect(params.input[0].text).toContain("MIMO_CALLBACK_RESULT_V1");
+    expect(params.input[0].text).toContain('"jobId":"' + completed.id + '"');
+    expect(params.input[0].text).toContain('"output":' + JSON.stringify(planMarkdown));
+    expect(params.input[0].text).toContain("Do not call mimo_result, mimo_status, mimo_events, mimo_wait, or any other tool.");
+    expect(params.input[0].text).not.toContain("Call mimo_result");
   });
 
   it("fails compose plan with result_missing when final text is empty and omits raw payload from public surfaces", async () => {
@@ -609,9 +610,11 @@ describe("unified background jobs", () => {
     const start = calls.find((call) => call.method === "turn/start")!;
     const params = start.params as { threadId: string; input: Array<{ text: string }> };
     expect(params.threadId).toBe("thread-frozen");
-    expect(params.input[0].text).toContain("Call mimo_result");
-    expect(params.input[0].text).toContain(`jobId "${receipt.jobId}"`);
-    expect(params.input[0].text).toContain(`cwd "${cwd.replace(/\\/g, "\\\\")}"`);
+    expect(params.input[0].text).toContain("MIMO_CALLBACK_RESULT_V1");
+    expect(params.input[0].text).toContain('"jobId":"' + completed.id + '"');
+    expect(params.input[0].text).toContain('"output":' + JSON.stringify("Job completed from fake MiMo."));
+    expect(params.input[0].text).toContain("Do not call mimo_result, mimo_status, mimo_events, mimo_wait, or any other tool.");
+    expect(params.input[0].text).not.toContain("Call mimo_result");
   });
 
   it("rejects explicit Codex notify without a thread ID and creates no job records", async () => {
