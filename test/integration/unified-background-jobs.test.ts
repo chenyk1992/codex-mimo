@@ -25,7 +25,11 @@ import { runMimoCliStreaming } from "../../src/mimo/streaming-runner.js";
 import { readDeliveries } from "../../src/notify/outbox.js";
 import { dispatchNextDelivery } from "../../src/notify/dispatcher.js";
 import { runNotificationWorker } from "../../src/notify/worker.js";
-import { createCodexAppServerClient } from "../../src/notify/codex-app-server.js";
+import {
+  createCodexAppServerClient,
+  type CodexAppServerClientOptions
+} from "../../src/notify/codex-app-server.js";
+import { CODEX_COMMAND_ENV } from "../../src/notify/codex-command.js";
 import { mimoImplement } from "../../src/codex/tools.js";
 
 const workspaces: string[] = [];
@@ -469,8 +473,8 @@ describe("unified background jobs", () => {
         cwd,
         task,
         request: { cwd, task, allowWrite: true, timeoutMs: 2_000 },
-        notify: { type: "codex" }
-      }, { env: { CODEX_THREAD_ID: "thread-frozen" }, spawnJobSupervisor: () => 123 });
+        notify: { type: "codex", threadId: "thread-frozen" }
+      }, { env: {}, spawnJobSupervisor: () => 123 });
       return { content: [{ type: "text", text: JSON.stringify(launched) }] };
     });
     mcpServer.registerTool("mimo_wait", { inputSchema: {} }, async () => {
@@ -534,10 +538,78 @@ describe("unified background jobs", () => {
       allowWrite: true,
       notify: { type: "codex" }
     }, { env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123) }))
-      .rejects.toThrow("Codex notification requires threadId");
+      .rejects.toThrow(/threadId|Required/);
 
     expect(listJobs(cwd)).toEqual([]);
     expect(fs.existsSync(path.join(cwd, ".codex-mimo", "jobs"))).toBe(false);
+  });
+
+  it("delivers through a configured Codex command with initialize, thread/resume, and turn/start", async () => {
+    const cwd = workspace();
+    const configuredCommand = process.execPath;
+    const threadId = "thread-configured-cli";
+    const target = { type: "codex" as const, threadId };
+    const completed = await runFake(cwd, seed(cwd, "implement", target));
+    const spawnCalls: Array<{ command: string; args: string[] }> = [];
+    const marker = path.join(cwd, "codex-app-server-configured.jsonl");
+    const dispatchEnv = { [CODEX_COMMAND_ENV]: configuredCommand };
+    const createClient = (options?: CodexAppServerClientOptions) =>
+      createCodexAppServerClient({
+        ...options,
+        env: dispatchEnv,
+        spawnProcess: (command, args, spawnOptions) => {
+          spawnCalls.push({ command, args: [...args] });
+          return track(spawn(process.execPath, [fakeCodexAppServer], {
+            ...spawnOptions,
+            cwd,
+            env: { ...spawnOptions.env, FAKE_CODEX_MARKER: marker },
+            stdio: ["pipe", "pipe", "pipe"]
+          })) as ChildProcessWithoutNullStreams;
+        }
+      });
+
+    const delivered = await dispatchNextDelivery(cwd, {
+      createCodexClient: createClient,
+      env: dispatchEnv
+    });
+
+    expect(completed.status).toBe("completed");
+    expect(delivered).toMatchObject({ outcome: "settled", delivery: { status: "delivered" } });
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]).toEqual({
+      command: configuredCommand,
+      args: ["app-server", "--listen", "stdio://"]
+    });
+    const methods = readJsonLines(marker).map((call) => call.method);
+    expect(methods.filter((method) => method === "initialize")).toHaveLength(1);
+    expect(methods.filter((method) => method === "thread/resume")).toHaveLength(1);
+    expect(methods.filter((method) => method === "turn/start")).toHaveLength(1);
+  });
+
+  it("settles synchronous Codex EPERM launch failures after one attempt while the job stays completed", async () => {
+    const cwd = workspace();
+    const target = { type: "codex" as const, threadId: "thread-eperm" };
+    const completed = await runFake(cwd, seed(cwd, "implement", target));
+    const createClient = () => createCodexAppServerClient({
+      spawnProcess: () => {
+        throw Object.assign(new Error("private executable path"), { code: "EPERM" });
+      }
+    });
+
+    const settled = await dispatchNextDelivery(cwd, { createCodexClient: createClient });
+    const retry = await dispatchNextDelivery(cwd, { createCodexClient: createClient });
+
+    expect(completed.status).toBe("completed");
+    expect(settled).toMatchObject({ outcome: "settled", delivery: { status: "failed", attempts: 1 } });
+    expect(retry).toEqual({ outcome: "idle" });
+    expect(readDeliveries(completed.notificationOutboxFile)[0]).toMatchObject({
+      status: "failed",
+      attempts: 1,
+      lastError: "Codex App Server executable is unavailable",
+      lastErrorCode: "codex_cli_not_executable"
+    });
+    expect(readJob(cwd, completed.id)?.status).toBe("completed");
+    expect(fs.readFileSync(completed.notificationOutboxFile, "utf8")).not.toContain("private");
   });
 
   it("allows implement without notify and persists no notification target", async () => {

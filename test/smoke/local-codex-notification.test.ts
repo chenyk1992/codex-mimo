@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { describe, expect, it } from "vitest";
 import { readJob } from "../../src/core/job-store.js";
+import { probeCodexCommand } from "../../src/notify/codex-command.js";
 
 const enabled = process.env.RUN_LOCAL_CODEX_NOTIFY_SMOKE === "1";
 const describeSmoke = enabled ? describe : describe.skip;
@@ -62,10 +63,13 @@ describeSmoke("local Codex notification", () => {
     let receipt: JobReceipt | undefined;
 
     try {
+      const probe = await probeCodexCommand({ env: process.env });
+      if (!probe.ok) {
+        throw new Error(probe.errorCode ?? "codex_app_server_unavailable");
+      }
+
       initializeSmokeRepository(workspace, markerFile);
       const server = readPackagedMcpServer();
-      const forwarded = forwardedEnvironment(process.env, server.env_vars);
-      expect(forwarded.CODEX_THREAD_ID).toBe(threadId);
       transport = new StdioClientTransport({
         command: server.command,
         args: server.args,
@@ -90,7 +94,7 @@ describeSmoke("local Codex notification", () => {
         task: "Follow the AGENTS.md notification smoke instructions exactly without changing files.",
         allowWrite: true,
         timeoutMs: 300_000,
-        notify: { type: "codex" }
+        notify: { type: "codex", threadId }
       });
       expect(receipt).toMatchObject({ kind: "implement", status: "queued" });
       expect(readJob(workspace, receipt.jobId)?.notificationTarget).toEqual({
