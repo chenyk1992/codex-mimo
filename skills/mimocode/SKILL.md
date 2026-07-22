@@ -52,7 +52,7 @@ After a successful Codex notify launch:
 
 1. Return the queued receipt to the user. Do not call `mimo_wait` after launch.
 2. Rely on the callback turn created when the job needs attention or reaches a terminal state.
-3. When resumed by the callback turn, call `mimo_result(jobId)` and consume `mimo_result.output` as the explicit final assistant output, then inspect relevant changes and verify independently.
+3. When resumed by the callback turn, call `mimo_result` with the `jobId` and consume `mimo_result.output` as the explicit final assistant output, then inspect relevant changes and verify independently.
 
 A queued receipt alone does not prove a Codex notification target exists unless the explicit Codex notification launch succeeded.
 
