@@ -8,6 +8,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { describe, expect, it } from "vitest";
 import { readJob } from "../../src/core/job-store.js";
 import { probeCodexCommand } from "../../src/notify/codex-command.js";
+import { readNotificationDeliveries } from "../../src/notify/dispatcher.js";
+import type { NotificationDelivery } from "../../src/notify/types.js";
 import {
   prepareCodexNotificationSmokeEnvironment,
   resolveInstalledPluginRoot,
@@ -124,15 +126,26 @@ describeSmoke("local Codex notification", () => {
       });
       expect(marker.output).toContain(OUTPUT_MARKER);
 
+      const markerWrittenAt = fs.statSync(markerFile).mtimeMs;
+      const finalDelivery = await waitForTerminalDelivery(workspace, receipt.jobId, 30_000);
+      expect(finalDelivery).toMatchObject({
+        status: "delivered",
+        attempts: 1
+      });
+      expect(finalDelivery.deliveredAt).toBeDefined();
+      expect(Date.parse(finalDelivery.deliveredAt!))
+        .toBeGreaterThanOrEqual(markerWrittenAt - 1_000);
+
       const appServerRecords = readAppServerAudit(appServerAuditFile);
       expect(appServerRecords.filter((record) => record.method === "initialize")).toHaveLength(2);
-      expect(appServerRecords.filter((record) => record.method === "thread/resume")).toEqual([
-        expect.objectContaining({ threadId }),
-        expect.objectContaining({ threadId })
-      ]);
-      expect(appServerRecords.filter((record) => record.method === "turn/start")).toEqual([
-        expect.objectContaining({ threadId })
-      ]);
+      expect(
+        appServerRecords.filter((record) => record.method === "thread/resume"),
+        "resumes are launch preflight plus delivery preparation, not polling"
+      ).toHaveLength(2);
+      expect(
+        appServerRecords.filter((record) => record.method === "turn/start"),
+        "exactly one callback turn/start per successful attempt"
+      ).toHaveLength(1);
     } finally {
       if (client && receipt) await cancelIfActive(client, workspace, receipt.jobId);
       await client?.close().catch(() => undefined);
@@ -202,12 +215,13 @@ function initializeSmokeRepository(workspace: string, markerFile: string): void 
     `Your final response must include the exact marker ${JSON.stringify(OUTPUT_MARKER)}.`,
     "Your final response must instruct the resumed Codex task to do all of the following:",
     "",
-    "1. Use the notification's exact cwd and jobId to call `mimo_result` once.",
-    `2. Write UTF-8 JSON to ${markerInstruction}.`,
-    "3. Copy the exact `jobId`, `kind`, `status`, `resultType`, and `output` fields from that result.",
-    "4. Add the literal field `\"source\": \"mimo_result\"`.",
-    "5. Do not call `mimo_wait` or infer any result field.",
-    "6. Do not copy `summary`; the callback must validate `output`, not the generic completion summary.",
+    "1. Call `mimo_result` exactly once using the notification's exact cwd and jobId.",
+    "2. Do not call `mimo_status`, `mimo_events`, or `mimo_wait`.",
+    `3. Write UTF-8 JSON to ${markerInstruction}.`,
+    "4. Copy the exact `jobId`, `kind`, `status`, `resultType`, and `output` fields from that result.",
+    "5. Add the literal field `\"source\": \"mimo_result\"`.",
+    "6. Do not infer any result field.",
+    "7. Do not copy `summary`; the callback must validate `output`, not the generic completion summary.",
     ""
   ].join("\n"), "utf8");
   fs.writeFileSync(path.join(workspace, "README.md"), "Codex notification smoke workspace.\n", "utf8");
@@ -256,6 +270,21 @@ async function waitForTerminalStatus(
     if (terminal.has(status.status)) return;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+}
+
+async function waitForTerminalDelivery(
+  cwd: string,
+  jobId: string,
+  timeoutMs: number
+): Promise<NotificationDelivery> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const delivery = readNotificationDeliveries(cwd)
+      .find((candidate) => candidate.jobId === jobId);
+    if (delivery?.status === "delivered" || delivery?.status === "failed") return delivery;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for terminal notification delivery: ${jobId}`);
 }
 
 async function waitForResultMarker(file: string, timeoutMs: number): Promise<ResultMarker> {
