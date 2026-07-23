@@ -14,7 +14,9 @@ const VALID_MIMOCODE_SKILL_BODY = [
   "### Cursor with companion",
   "The companion stop hook blocks until attention; on follow-up call mimo_result with the jobId.",
   "### Cursor without companion",
-  "When companion hooks are not installed, return the receipt and stop; use control tools only if the user insists."
+  "When companion hooks are not installed, return the receipt and stop; use control tools only if the user insists.",
+  "### Codex Desktop",
+  "Omit notify and create an in-chat scheduled follow-up heartbeat; each beat may call mimo_status, then mimo_result, then delete the schedule."
 ].join("\n\n");
 
 interface FixtureTool {
@@ -291,6 +293,33 @@ describe("lightweight plugin validator", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("must not instruct Codex to poll or loop on mimo_wait");
+  });
+
+  it("rejects mimocode skill guidance that omits Desktop heartbeat follow-up", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      skillBody: [
+        "### Cursor with companion",
+        "The companion stop hook blocks until attention; on follow-up call mimo_result with the jobId.",
+        "### Cursor without companion",
+        "When companion hooks are not installed, return the receipt and stop."
+      ].join("\n\n")
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("must document Codex Desktop in-chat heartbeat follow-up");
+  });
+
+  it("rejects mimocode skill guidance that requires Desktop notify as primary", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      skillBody: `${VALID_MIMOCODE_SKILL_BODY}\n\nEvery Codex Desktop work launch must send \`notify\` with threadId.`
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("must not require Desktop notify as the primary wait path");
   });
 
   it("rejects packaged MCP config that omits CODEX_MIMO_CODEX_BIN env_vars forwarding", () => {

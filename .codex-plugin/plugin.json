@@ -1,6 +1,6 @@
 {
   "name": "codex-mimocode",
-  "version": "0.1.0+codex.20260723025440",
+  "version": "0.1.0+codex.20260723032400",
   "description": "Bridge that lets Codex invoke MiMoCode as a specialist coding agent for planning, implementation, and review",
   "author": {
     "name": "Xiaomi MiMo Team"
@@ -17,7 +17,7 @@
   "interface": {
     "displayName": "Codex MiMoCode Bridge",
     "shortDescription": "Invoke MiMoCode for planning, implementation, and review",
-    "longDescription": "This plugin exposes six queued work tools and seven control/diagnostic tools. Codex can delegate specialized coding tasks to MiMoCode, receive durable completion notifications, and verify the results.",
+    "longDescription": "This plugin exposes six queued work tools and seven control/diagnostic tools. Codex Desktop delegates specialized coding tasks to MiMoCode, waits with an in-chat scheduled follow-up heartbeat, reads durable results, and verifies the outcome. Optional App Server notify remains a compatibility history-write path.",
     "developerName": "Xiaomi MiMo Team",
     "category": "Developer Tools",
     "capabilities": [

@@ -7,6 +7,9 @@ export type NotificationTarget =
   | { type: "webhook"; url: string; secretEnv: string };
 
 export type DeliveryStatus = "pending" | "delivering" | "delivered" | "failed";
+// For Codex targets, "delivered" means the matching App Server callback turn completed on
+// the independent notify-worker connection (session-history writeback). It does not mean
+// the Codex Desktop renderer refreshed the open chat.
 
 export const NOTIFICATION_ERROR_CODES = [
   "codex_cli_not_found",

@@ -46,8 +46,10 @@ interface AppServerAuditRecord {
   threadId?: string;
 }
 
-describeSmoke("local Codex notification", () => {
-  it("discovers Desktop-local Codex and observes one completed callback through the resumed task", async () => {
+describeSmoke("local Codex notification (App Server history writeback)", () => {
+  it("delivers one completed callback into session history without claiming Desktop UI refresh", async () => {
+    // This smoke proves independent App Server session-history writeback.
+    // It does not prove Codex Desktop renderer refresh or live UI visibility.
     const threadId = process.env.CODEX_THREAD_ID?.trim();
     if (!threadId) throw new Error("CODEX_THREAD_ID must be injected by the dedicated Codex task.");
 

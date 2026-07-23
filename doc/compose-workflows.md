@@ -67,7 +67,7 @@ Commands are split into executable and arguments and run without a shell. A fail
 
 The `plan` workflow is read-only (`writesAllowed: false`). The plan body is available only from an explicit `mimo_result` read as `mimo_result.output` — callers must not expect it in a saved report file. The prompt instructs MiMoCode to return the plan in the final response only and not to save plan files. Asking `plan` to write a plan file intentionally ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with safe `errorCode: "result_missing"`.
 
-For Codex Desktop callback launches, send `notify: { type: "codex", threadId: "..." }` on the first attempt. Cursor companion and intentional no-notify launches may omit Codex notify.
+For Codex Desktop, omit `notify` and use an in-chat scheduled follow-up heartbeat. For CLI/compat App Server history writeback, send `notify: { type: "codex", threadId: "..." }` on the first attempt. Cursor companion and intentional no-notify launches may omit Codex notify. Outbox `delivered` does not mean the Desktop UI refreshed.
 
 ```json
 { "workflow": "plan", "task": "Plan the feature; return the plan only" }

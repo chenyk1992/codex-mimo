@@ -77,7 +77,7 @@ Every work tool returns:
 }
 ```
 
-The default Codex flow does not call `mimo_status`, `mimo_events`, or `mimo_wait` after launch. Codex returns the receipt; the notify worker waits on App Server `turn/completed` without model polling and starts one callback turn when the job emits `needs_input`, `blocked`, or a terminal result. That callback prompt already contains the prefetched public job result and must not call any tool. Outbox `delivered` means the matching callback turn completed, not merely that App Server accepted `turn/start`. Direct user diagnostics may still use `mimo_result`.
+The default Codex Desktop flow omits `notify` and uses a native in-chat scheduled follow-up (heartbeat) about once per minute: each beat may call at most one `mimo_status`; on `needs_input`, `blocked`, or a terminal status it calls at most one `mimo_result`, deletes the schedule, and answers the user. Do not call `mimo_events` or `mimo_wait` on that path. Optional App Server `notify: { type: "codex", threadId }` remains a CLI/compat history-write path: the notify worker waits on App Server `turn/completed` and starts one callback turn whose prompt already contains the prefetched public result and must not call any tool. Outbox `delivered` means that matching callback turn completed on the independent App Server connection — never that the Desktop UI refreshed. Direct user diagnostics may still use `mimo_result`.
 
 ## Result privacy boundary
 
@@ -89,31 +89,40 @@ Direct `mimo_plan` and Compose `workflow: "plan"` cannot finish `completed` with
 
 Each job freezes at most one target when it is created from explicit `notify` input only. The launcher never reads `CODEX_THREAD_ID` from a long-lived MCP process environment.
 
-Distinguish three independent signals:
+Distinguish four independent signals:
 
 - MiMo `session.post` — execution evidence that the MiMoCode run finished (or failed) inside the job worker.
-- Codex notification — wakes the originating Codex Desktop task through the frozen Codex target.
+- Codex Desktop heartbeat — native in-chat scheduled follow-up that calls `mimo_status` / `mimo_result` in the same Desktop chat.
+- Codex App Server notification — optional compatibility history writeback through a frozen Codex target on an independent App Server connection; `delivered` does not mean the Desktop UI refreshed.
 - Cursor companion — host stop-hook wakeup; launch without Codex `notify` and continue using the companion path.
 
 A queued work receipt alone does not prove a Codex notification target exists unless the explicit Codex notification launch succeeded.
 
-For Codex Desktop, pass the current task ID explicitly on every work-tool launch:
+### Codex Desktop launch sequence (recommended)
+
+1. Launch one work job and **omit `notify`**.
+2. Return the queued receipt and `jobId`.
+3. Create an in-chat scheduled follow-up / heartbeat about once per minute.
+4. Each beat: at most one `mimo_status`. While `queued`/`running`, stop quietly. On `needs_input`, `blocked`, `completed`, `failed`, `cancelled`, or `timeout`: call at most one `mimo_result`, **delete/cancel/stop the heartbeat schedule**, then answer from `mimo_result.output` when present.
+5. Never treat App Server `delivered` or later session-history reads as Desktop UI visibility.
+
+### Codex App Server notify (compat / CLI)
+
+For CLI or explicit compatibility launches, pass the current task ID:
 
 ```json
 { "notify": { "type": "codex", "threadId": "thread-id" } }
 ```
 
-Read `CODEX_THREAD_ID` from the task command environment and supply it as `notify.threadId`; never store it globally. If launch fails with `Codex notification requires threadId` or a schema `threadId` required error, stop and keep `notify` on any later Codex callback attempt.
-
-### Codex Desktop launch sequence
+Read `CODEX_THREAD_ID` from the task command environment and supply it as `notify.threadId`; never store it globally. If launch fails with `Codex notification requires threadId` or a schema `threadId` required error, stop and keep `notify` on any later Codex callback attempt. This path may write a callback into session history, but `delivered` never means the Desktop renderer refreshed.
 
 1. Windows Desktop local discovery automatically checks `%LOCALAPPDATA%\\OpenAI\\Codex\\bin` version folders (`desktop-local`) after PATH candidates. It tries newer version folders before the stable root CLI because the root CLI can be older. A protected WindowsApps Desktop `codex.exe` is not a valid standalone callback CLI.
 2. `CODEX_MIMO_CODEX_BIN` remains the authoritative optional override: set it to force one runnable standalone CLI before Codex Desktop starts, then restart Codex Desktop so the plugin MCP and detached workers inherit it.
 3. Read the current task-scoped `CODEX_THREAD_ID` from the task command environment and pass it explicitly as `notify.threadId`; never store it globally.
-4. Run `mimo_healthcheck` or `codex-mimo doctor` and require `mimo_healthcheck.codexNotification.ok === true` before expecting callbacks. This is basic CLI readiness only: its safe source can be `configured`, `path`, or `desktop-local` and it does not validate a task.
-5. Launch one work job with `notify: { type: "codex", threadId: "..." }`. The target-aware launch preflight validates the selected CLI, App Server protocol, and this explicit target task before job creation. Stop polling and let the callback turn answer from the prefetched public result without tools.
+4. Run `mimo_healthcheck` or `codex-mimo doctor` and require `mimo_healthcheck.codexNotification.ok === true` before expecting App Server callbacks. This is basic CLI readiness only: its safe source can be `configured`, `path`, or `desktop-local` and it does not validate a task.
+5. Launch one work job with `notify: { type: "codex", threadId: "..." }`. The target-aware launch preflight validates the selected CLI, App Server protocol, and this explicit target task before job creation. Stop model-driven polling and let the compatibility callback turn answer from the prefetched public result without tools.
 
-If preflight failed with `codex_cli_not_found`, `codex_cli_not_executable`, or `codex_app_server_unavailable`, run `mimo_healthcheck` and configure `CODEX_MIMO_CODEX_BIN`. Preflight failure does not automatically relaunch without notify; only an explicit user choice may switch to a no-notify or Cursor companion launch.
+If preflight failed with `codex_cli_not_found`, `codex_cli_not_executable`, or `codex_app_server_unavailable`, run `mimo_healthcheck` and configure `CODEX_MIMO_CODEX_BIN`. Preflight failure does not automatically relaunch without notify; only an explicit user choice may switch to a no-notify Desktop heartbeat or Cursor companion launch.
 
 Target-aware preflight validates CLI launchability and the explicit task before job persistence. A successful preflight does not merge later App Server callback delivery into job execution; the durable outbox handles delivery independently after the job is created.
 
@@ -144,7 +153,7 @@ CLI users may omit `notify` intentionally or supply `--notify codex --thread-id 
 | `codex_turn_failed` | Callback turn failed | At most one retry (two total attempts). |
 | `codex_turn_timeout` | Five-minute callback budget expired | Fail the current event immediately after the first attempt. |
 
-Codex delivery is at-least-once across process crashes. A full notified job normally performs two system-only `thread/resume` probes: launch preflight and delivery preparation. In normal operation, each delivery attempt performs exactly one `turn/start`; the notify worker waits on `turn/completed` without calling `mimo_status`, `mimo_events`, or `mimo_wait`, and marks the outbox `delivered` only after the matching callback turn completes. The callback turn receives a prefetched public result and must not call tools. If the notification process crashes after `turn/start` but before callback completion is settled, the same persisted event ID can be retried and start a duplicate callback turn. The callback prompt includes that event ID and identifies the notification as a possible retry.
+Codex App Server delivery is at-least-once across process crashes and remains a compatibility history-write path. A full notified job normally performs two system-only `thread/resume` probes: launch preflight and delivery preparation. In normal operation, each delivery attempt performs exactly one `turn/start`; the notify worker waits on `turn/completed` without calling `mimo_status`, `mimo_events`, or `mimo_wait`, and marks the outbox `delivered` only after the matching callback turn completes on that independent App Server connection. `delivered` does not mean the Desktop UI refreshed. The callback turn receives a prefetched public result and must not call tools. If the notification process crashes after `turn/start` but before callback completion is settled, the same persisted event ID can be retried and start a duplicate callback turn. The callback prompt includes that event ID and identifies the notification as a possible retry.
 
 Webhook targets name an environment variable; secret values are never stored in job, event, log, report, or outbox files:
 

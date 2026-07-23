@@ -18,6 +18,7 @@ describe("public release contract", () => {
 
     expect(manifest.interface?.longDescription).toMatch(/six queued work tools/i);
     expect(manifest.interface?.longDescription).toMatch(/seven control(?: and|\/)diagnostic tools/i);
+    expect(manifest.interface?.longDescription).toMatch(/heartbeat|scheduled follow-up|in-chat/i);
     expect(manifest.keywords ?? []).not.toContain("acp");
   });
 
@@ -30,7 +31,38 @@ describe("public release contract", () => {
     }
   });
 
-  it("publishes at-least-once Codex delivery across crashes in user and release documents", () => {
+  it("publishes Desktop heartbeat as the primary visibility path", () => {
+    for (const file of [SKILL, "README.md", "doc/operations-guide.md"]) {
+      const contents = readDoc(file);
+      expect(contents).toMatch(/heartbeat|scheduled follow-up|in-chat scheduled/i);
+      expect(contents).toMatch(/omit(?:s|ting)? `?notify`?|without `?notify`?|do not (?:pass|send) `?notify`?/i);
+      expect(contents).toMatch(/mimo_status/);
+      expect(contents).toMatch(/mimo_result/);
+      expect(contents).toMatch(/(?:delete|cancel|remove|stop)[\s\S]{0,100}(?:heartbeat|schedule|follow-up)/i);
+    }
+  });
+
+  it("demotes App Server notify delivered to history writeback, not Desktop UI refresh", () => {
+    for (const file of [SKILL, "README.md", "doc/operations-guide.md"]) {
+      const contents = readDoc(file);
+      expect(contents).toMatch(/delivered[\s\S]{0,200}(?:not|does not|never)[\s\S]{0,120}(?:Desktop|renderer|UI|visible|visibility|refresh)/i);
+      expect(contents).toMatch(/compat|compatibility|CLI/i);
+      expect(contents).toMatch(/notify:\s*\{\s*type:\s*"codex",\s*threadId:/);
+    }
+
+    for (const file of USER_DOCS) {
+      const contents = readDoc(file);
+      expect(contents).toMatch(/notify:\s*\{\s*type:\s*"codex",\s*threadId:/);
+    }
+
+    const skill = readDoc(SKILL);
+    expect(skill).not.toMatch(/\{\s*"type"\s*:\s*"codex"\s*\}/);
+    expect(skill).not.toMatch(/forwards task-scoped `CODEX_THREAD_ID`/i);
+    expect(skill).not.toMatch(/packaged MCP server forwards/i);
+    expect(skill).not.toMatch(/Every Codex Desktop work launch must send `notify/i);
+  });
+
+  it("documents at-least-once Codex App Server delivery for the compatibility path", () => {
     for (const file of ["README.md", "doc/operations-guide.md"]) {
       const contents = readDoc(file);
       expect(contents).toMatch(/at-least-once/i);
@@ -38,20 +70,7 @@ describe("public release contract", () => {
     }
   });
 
-  it("requires explicit Codex notify.threadId on the first launch attempt", () => {
-    const skill = readDoc(SKILL);
-    expect(skill).toMatch(/notify:\s*\{\s*type:\s*"codex",\s*threadId:/);
-    expect(skill).not.toMatch(/\{\s*"type"\s*:\s*"codex"\s*\}/);
-    expect(skill).not.toMatch(/forwards task-scoped `CODEX_THREAD_ID`/i);
-    expect(skill).not.toMatch(/packaged MCP server forwards/i);
-
-    for (const file of USER_DOCS) {
-      const contents = readDoc(file);
-      expect(contents).toMatch(/notify:\s*\{\s*type:\s*"codex",\s*threadId:/);
-    }
-  });
-
-  it("documents Codex notification preflight before job creation", () => {
+  it("documents Codex notification preflight before job creation for explicit notify launches", () => {
     for (const file of [SKILL, "README.md", "doc/operations-guide.md"]) {
       const contents = readDoc(file);
       expect(contents).toMatch(/preflight/i);
@@ -108,7 +127,7 @@ describe("public release contract", () => {
     const skill = readDoc(SKILL);
     expect(skill).toMatch(/preflight failure[\s\S]{0,160}stop/i);
     expect(skill).not.toMatch(/retry by omitting `notify`/i);
-    expect(skill).toMatch(/explicit (?:user )?choice[\s\S]{0,120}(?:no-notify|without notifications|Cursor companion)/i);
+    expect(skill).toMatch(/explicit (?:user )?choice[\s\S]{0,120}(?:no-notify|without notifications|Cursor companion|heartbeat)/i);
 
     for (const file of ["README.md", "doc/operations-guide.md"]) {
       const contents = readDoc(file);
@@ -126,10 +145,10 @@ describe("public release contract", () => {
     }
   });
 
-  it("documents callback consumption of mimo_result.output in the skill", () => {
+  it("documents Desktop heartbeat consumption of mimo_result.output in the skill", () => {
     const skill = readDoc(SKILL);
     expect(skill).toMatch(/mimo_result[\s\S]{0,120}output/i);
-    expect(skill).toMatch(/callback[\s\S]{0,200}mimo_result/i);
+    expect(skill).toMatch(/(?:heartbeat|follow-up|scheduled)[\s\S]{0,200}mimo_result/i);
   });
 
   it("documents resolved Execa spawn failures and protected WindowsApps recovery", () => {
@@ -164,5 +183,13 @@ describe("public release contract", () => {
       expect(contents).toMatch(/target-aware/i);
       expect(contents).toMatch(/root CLI[\s\S]{0,160}(?:older|version-folder)/i);
     }
+  });
+
+  it("covers heartbeat cleanup for failure timeout cancel and needs_input", () => {
+    const skill = readDoc(SKILL);
+    for (const token of ["needs_input", "cancelled", "timeout", "failed"]) {
+      expect(skill).toMatch(new RegExp(token));
+    }
+    expect(skill).toMatch(/(?:delete|cancel|remove|stop)[\s\S]{0,120}(?:heartbeat|schedule|follow-up)/i);
   });
 });

@@ -359,6 +359,12 @@ function validateSkill(root, skillDir, errors) {
     if (!/without companion|no companion|without the companion/i.test(parsed.body)) {
       errors.push(`${relativeSkillFile} must document the no-companion demotion path`);
     }
+    if (!/heartbeat|scheduled follow-up|in-chat scheduled/i.test(parsed.body)) {
+      errors.push(`${relativeSkillFile} must document Codex Desktop in-chat heartbeat follow-up`);
+    }
+    if (/Every Codex Desktop work launch must send `notify/i.test(parsed.body)) {
+      errors.push(`${relativeSkillFile} must not require Desktop notify as the primary wait path`);
+    }
   }
 }
 
