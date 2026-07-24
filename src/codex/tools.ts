@@ -1,4 +1,5 @@
 import { execa } from "execa";
+import type { z } from "zod";
 import {
   FixCiInput,
   HealthcheckInput,
@@ -9,6 +10,7 @@ import {
   JobResultInput,
   JobStatusInput,
   JobWaitInput,
+  NotifySchema,
   PlanInput,
   parseComposeInput,
   ResumeInput,
@@ -25,7 +27,7 @@ import {
   type OwnedProcessTermination,
   type ProcessIdentityVerification
 } from "../core/job-process.js";
-import type { JobNotificationStatus, JobRecord } from "../core/jobs.js";
+import { isActiveJobStatus, type JobKind, type JobNotificationStatus, type JobRecord } from "../core/jobs.js";
 import { renderJobResult, renderJobStatus } from "../core/job-render.js";
 import { readFinalJobOutput } from "../core/job-output.js";
 import { readRecentJobLogLines } from "../core/job-log.js";
@@ -36,6 +38,7 @@ import {
 } from "../core/job-signals.js";
 import { requestJobCancellation, transitionJob } from "../core/job-transition.js";
 import { ProcessLockUnavailableError, withProcessLock } from "../core/process-lock.js";
+import { sleep } from "../core/sleep.js";
 import { buildMimoProbeEnvironment, resolveMimoProcessSelection } from "../mimo/run-json.js";
 import {
   readNotificationDeliveries,
@@ -74,52 +77,49 @@ export async function mimoHealthcheck(
   }
 }
 
+async function launchParsedWorkJob<T extends { cwd: string; notify?: z.infer<typeof NotifySchema> }>(
+  kind: Exclude<JobKind, "resume">,
+  parsed: T,
+  task: string,
+  deps: LaunchJobDependencies
+) {
+  const { notify, ...request } = parsed;
+  return launchJob({ kind, cwd: parsed.cwd, task, request, notify }, deps);
+}
+
 export async function mimoPlan(input: unknown, deps: LaunchJobDependencies = {}) {
   const parsed = PlanInput.parse(input);
-  const { notify, ...request } = parsed;
-  return launchJob({ kind: "plan", cwd: parsed.cwd, task: parsed.task, request, notify }, deps);
+  return launchParsedWorkJob("plan", parsed, parsed.task, deps);
 }
 
 export async function mimoImplement(input: unknown, deps: LaunchJobDependencies = {}) {
   const parsed = ImplementInput.parse(input);
-  const { notify, ...request } = parsed;
-  return launchJob({ kind: "implement", cwd: parsed.cwd, task: parsed.task, request, notify }, deps);
+  return launchParsedWorkJob("implement", parsed, parsed.task, deps);
 }
 
 export async function mimoReview(input: unknown, deps: LaunchJobDependencies = {}) {
   const parsed = ReviewInput.parse(input);
-  const { notify, ...request } = parsed;
-  return launchJob({
-    kind: "review",
-    cwd: parsed.cwd,
-    task: `Review changes since ${parsed.base}.`,
-    request,
-    notify
-  }, deps);
+  return launchParsedWorkJob("review", parsed, `Review changes since ${parsed.base}.`, deps);
 }
 
 export async function mimoFixCi(input: unknown, deps: LaunchJobDependencies = {}) {
   const parsed = FixCiInput.parse(input);
-  const { notify, ...request } = parsed;
-  return launchJob({
-    kind: "fix-ci",
-    cwd: parsed.cwd,
-    task: parsed.task ?? "Fix the CI failures shown in the attached log.",
-    request,
-    notify
-  }, deps);
+  return launchParsedWorkJob(
+    "fix-ci",
+    parsed,
+    parsed.task ?? "Fix the CI failures shown in the attached log.",
+    deps
+  );
 }
 
 export async function mimoCompose(input: unknown, deps: LaunchJobDependencies = {}) {
   const parsed = parseComposeInput(input);
-  const { notify, ...request } = parsed;
-  return launchJob({
-    kind: "compose",
-    cwd: parsed.cwd,
-    task: parsed.task ?? `Run ${parsed.workflow} workflow.`,
-    request,
-    notify
-  }, deps);
+  return launchParsedWorkJob(
+    "compose",
+    parsed,
+    parsed.task ?? `Run ${parsed.workflow} workflow.`,
+    deps
+  );
 }
 
 export async function mimoResume(input: unknown, deps: LaunchJobDependencies = {}) {
@@ -207,7 +207,7 @@ export async function mimoWait(input: unknown, deps: MimoWaitDependencies = {}) 
   const parsed = JobWaitInput.parse(input);
   const selected = resolveJobForSignals(parsed.cwd, parsed.jobId);
   const now = deps.now ?? Date.now;
-  const sleep = deps.sleep ?? delay;
+  const sleepFn = deps.sleep ?? sleep;
   const intervalMs = deps.intervalMs ?? WAIT_CHECK_INTERVAL_MS;
   const readSignals = deps.readSignals ?? readAttentionSignals;
   const startedAt = now();
@@ -218,7 +218,7 @@ export async function mimoWait(input: unknown, deps: MimoWaitDependencies = {}) 
 
   while (result.signals.length === 0 && now() < deadline) {
     scanCursor = result.nextCursor;
-    await sleep(Math.min(intervalMs, Math.max(1, deadline - now())));
+    await sleepFn(Math.min(intervalMs, Math.max(1, deadline - now())));
     job = readJob(parsed.cwd, selected.id) ?? job;
     result = readSignals(job, { ...parsed, sinceCursor: scanCursor });
   }
@@ -385,7 +385,7 @@ async function waitForCancellation(cwd: string, jobId: string): Promise<JobRecor
     if (job.status !== "running" || !job.cancellationRequestedAt || Date.now() >= deadline) {
       return job;
     }
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await sleep(25);
   }
 }
 
@@ -447,9 +447,5 @@ function notificationStatus(
 }
 
 function isResultStatus(status: JobRecord["status"]): boolean {
-  return status !== "queued" && status !== "running";
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  return !isActiveJobStatus(status);
 }

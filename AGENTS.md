@@ -26,12 +26,13 @@ Public CLI commands (bin: `codex-mimo`): `plan`, `implement`, `review`, `fix-ci`
 ```text
 src/
   cli/         main.ts (arg parsing + dispatch), commands.ts, doctor.ts, hints.ts
+  companion/   cli.ts (Cursor hooks entry), watch.ts, host-wait.ts
   codex/       mcp-server.ts (stdio MCP, self-starts), tools.ts, tool-schemas.ts, tool-names.ts
   compose/     workflow.ts (11-workflow registry), events.ts, report.ts, verify.ts, post-checks.ts
-  core/        prompt.ts, encoding.ts (UTF-8 process env), jobs.ts, job-definitions.ts,
-               job-launcher.ts, job-store.ts, job-log.ts, job-render.ts, job-transition.ts,
-               job-supervisor.ts, job-worker.ts, job-process.ts, job-signals.ts,
-               process-lock.ts, public-summary.ts, worker-ownership.ts
+  core/        prompt.ts, encoding.ts, errors.ts, sleep.ts, jobs.ts, job-schemas.ts, job-timeouts.ts,
+               job-definitions.ts, job-launcher.ts, job-store.ts, job-log.ts, job-render.ts,
+               job-transition.ts, job-supervisor.ts, job-worker.ts, job-process.ts, job-signals.ts,
+               process-lock.ts, public-summary.ts
   git/         diff.ts (status/diff capture)
   mimo/        run-json.ts (builds `mimo run --format json` args),
                streaming-runner.ts, prompt-transport.ts, hook-callback.ts

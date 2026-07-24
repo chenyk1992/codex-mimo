@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractSessionIdFromEvents, normalizeMimoEvent, parseMimoJsonLines, summarizeEvents } from "../../src/compose/events.js";
+import { extractSessionIdFromRawLine, normalizeMimoEvent, parseMimoJsonLines } from "../../src/compose/events.js";
 
 describe("compose event parsing", () => {
   it("normalizes public message events", () => {
@@ -27,16 +27,6 @@ describe("compose event parsing", () => {
     [{ type: "error", part: { text: "command failed" } }, "command failed"]
   ])("extracts canonical text from MiMo type:error JSONL %#", (raw, text) => {
     expect(normalizeMimoEvent(raw)).toMatchObject({ type: "error", text });
-  });
-
-  it("summarizes message and tool counts", () => {
-    const events = parseMimoJsonLines('{"type":"message","text":"hello"}\n{"type":"tool","tool":"edit","status":"completed"}\n');
-    expect(summarizeEvents(events)).toMatchObject({
-      messages: 1,
-      tools: 1,
-      diffs: 0,
-      errors: 0
-    });
   });
 
   it("extracts text from MiMo raw message parts", () => {
@@ -101,48 +91,36 @@ describe("compose event parsing", () => {
     expect(event).toMatchObject({ type: "tool", toolName: tool, text: "src/canonical.ts" });
   });
 
-  it("counts raw progress events separately from unknown raw events", () => {
-    const summary = summarizeEvents([
-      normalizeMimoEvent({ type: "step_start", part: { type: "step-start" } }),
-      normalizeMimoEvent({ type: "step_finish", part: { type: "step-finish", reason: "tool-calls" } }),
-      normalizeMimoEvent({ type: "unexpected_shape", value: true })
-    ]);
-
-    expect(summary).toMatchObject({
-      messages: 0,
-      tools: 0,
-      diffs: 0,
-      errors: 0,
-      progress: 2,
-      raw: 1
+  it("extracts MiMo sessionID (uppercase) from a raw JSONL line", () => {
+    const line = JSON.stringify({
+      type: "step_start",
+      sessionID: "ses_upper",
+      part: { type: "step-start", sessionID: "ses_part" }
     });
+
+    expect(extractSessionIdFromRawLine(line)).toBe("ses_upper");
   });
 
-  it("extracts MiMo sessionID from raw events", () => {
-    const events = [
-      normalizeMimoEvent({
-        type: "step_start",
-        sessionID: "ses_upper",
-        part: { type: "step-start", sessionID: "ses_part" }
-      })
-    ];
+  it("extracts MiMo sessionId from nested part in a raw JSONL line", () => {
+    const line = JSON.stringify({
+      type: "tool_use",
+      part: {
+        type: "tool",
+        tool: "read",
+        sessionId: "ses_nested",
+        state: { status: "completed", input: { file_path: "README.md" } }
+      }
+    });
 
-    expect(extractSessionIdFromEvents(events)).toBe("ses_upper");
+    expect(extractSessionIdFromRawLine(line)).toBe("ses_nested");
   });
 
-  it("extracts MiMo sessionId from nested part events", () => {
-    const events = [
-      normalizeMimoEvent({
-        type: "tool_use",
-        part: {
-          type: "tool",
-          tool: "read",
-          sessionId: "ses_nested",
-          state: { status: "completed", input: { file_path: "README.md" } }
-        }
-      })
-    ];
+  it("returns null for lines without a session id", () => {
+    expect(extractSessionIdFromRawLine('{"type":"message","text":"hello"}')).toBeNull();
+  });
 
-    expect(extractSessionIdFromEvents(events)).toBe("ses_nested");
+  it("returns null for blank or malformed lines", () => {
+    expect(extractSessionIdFromRawLine("   ")).toBeNull();
+    expect(extractSessionIdFromRawLine("not json")).toBeNull();
   });
 });

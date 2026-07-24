@@ -22,7 +22,7 @@ describe("mimo_plan", () => {
       actions: { status: "mimo_status", events: "mimo_events", result: "mimo_result", cancel: "mimo_cancel" }
     });
     expect(readJob(cwd, result.jobId)?.request).toEqual({
-      cwd, task: "Plan it", model: "mimo-v2", timeoutMs: 1_800_000, idleTimeoutMs: 1_800_000
+      cwd, task: "Plan it", model: "mimo-v2", timeoutMs: 1_800_000, idleTimeoutMs: 90_000
     });
     expect(spawnJobSupervisor).toHaveBeenCalledWith(cwd);
   });

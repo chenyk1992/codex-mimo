@@ -77,7 +77,7 @@ describe("unified CLI work commands", () => {
     ["resume", ["resume", "--cwd", cwd, "--job-id", "parent-1", "Continue implementation"], "mimoResume",
       { cwd, jobId: "parent-1", task: "Continue implementation" }],
     ["compose", ["compose", "--cwd", cwd, "--workflow", "dev", "Build authentication"], "mimoCompose",
-      { cwd, workflow: "dev", task: "Build authentication", timeoutMs: 1_800_000, idleTimeoutMs: 1_800_000 }]
+      { cwd, workflow: "dev", task: "Build authentication", timeoutMs: 1_800_000, idleTimeoutMs: 90_000 }]
   ] as const;
 
   it.each(cases)("%s prints a queued receipt", async (kind, args, dependency, expectedInput) => {

@@ -20,7 +20,7 @@ describe("mimo_review", () => {
       actions: { status: "mimo_status", events: "mimo_events", result: "mimo_result", cancel: "mimo_cancel" }
     });
     expect(readJob(cwd, result.jobId)?.request).toEqual({
-      cwd, base: "main", timeoutMs: 1_800_000, idleTimeoutMs: 1_800_000
+      cwd, base: "main", timeoutMs: 1_800_000, idleTimeoutMs: 90_000
     });
   });
 });

@@ -8,7 +8,8 @@ import {
   resolveProcessLockEndpoint,
   withProcessLock
 } from "../core/process-lock.js";
-import { resolveNotificationWorkerOwnershipKey } from "../core/worker-ownership.js";
+import { resolveNotificationWorkerOwnershipKey } from "../core/job-process.js";
+import { sleep as defaultSleep } from "../core/sleep.js";
 
 const CONCURRENT_WORKER_RETRY_MS = 1;
 
@@ -62,8 +63,4 @@ async function runOwnedNotificationWorker(
     }));
     await sleep(Math.max(CONCURRENT_WORKER_RETRY_MS, nextReadyAt - now.getTime()));
   }
-}
-
-function defaultSleep(delayMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }

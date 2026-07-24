@@ -15,7 +15,9 @@ import {
 } from "../codex/tools.js";
 import { runJobWorker as defaultRunJobWorker } from "../core/job-worker.js";
 import { runJobSupervisor as defaultRunJobSupervisor } from "../core/job-supervisor.js";
+import { errorMessage } from "../core/errors.js";
 import { formatZodError, InputValidationError } from "../core/input-validation.js";
+import { NotifySchema } from "../core/job-schemas.js";
 import { runNotificationWorker as defaultRunNotificationWorker } from "../notify/worker.js";
 import type { NotificationInput } from "../notify/types.js";
 import { parseComposeInput } from "../codex/tool-schemas.js";
@@ -27,7 +29,7 @@ import {
 } from "./doctor.js";
 import { CLI_USAGE } from "./hints.js";
 
-export { CLI_USAGE, DOCTOR_HINT } from "./hints.js";
+export { CLI_USAGE } from "./hints.js";
 
 type OutputWriter = (line: string) => void;
 type AsyncCommand = (input: unknown) => Promise<unknown>;
@@ -279,17 +281,21 @@ function parseNotification(parsed: ParsedArguments): NotificationInput | undefin
     if (threadId || url || secretEnv) throw new CliInputError("Notification details require --notify.");
     return undefined;
   }
+  if (kind === "codex" && (url || secretEnv)) {
+    throw new CliInputError("Codex notifications do not accept --url or --secret-env.");
+  }
+  if (kind === "webhook" && threadId) {
+    throw new CliInputError("Webhook notifications do not accept --thread-id.");
+  }
   if (kind === "codex") {
-    if (url || secretEnv) throw new CliInputError("Codex notifications do not accept --url or --secret-env.");
     if (!threadId?.trim()) throw new CliInputError("Codex notifications require --thread-id.");
-    return { type: "codex", threadId: threadId.trim() };
+    return NotifySchema.parse({ type: "codex", threadId });
   }
   if (kind === "webhook") {
-    if (threadId) throw new CliInputError("Webhook notifications do not accept --thread-id.");
     if (!url || !secretEnv) {
       throw new CliInputError("Webhook notifications require --url and --secret-env.");
     }
-    return { type: "webhook", url, secretEnv };
+    return NotifySchema.parse({ type: "webhook", url, secretEnv });
   }
   throw new CliInputError("--notify must be codex or webhook.");
 }
@@ -398,8 +404,4 @@ class CliInputError extends InputValidationError {}
 
 function isFailedHealthcheck(result: unknown): boolean {
   return typeof result === "object" && result !== null && "ok" in result && result.ok === false;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

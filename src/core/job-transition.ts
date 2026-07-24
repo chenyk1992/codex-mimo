@@ -30,7 +30,7 @@ import {
   enqueueDelivery as enqueueNotificationDelivery,
   readDeliveries
 } from "../notify/outbox.js";
-import { publicProgressSummary } from "./public-summary.js";
+import { publicProgressSummary, toPublicExecutionCallback } from "./public-summary.js";
 
 const LEGAL: Record<JobStatus, readonly JobStatus[]> = {
   queued: ["running", "failed", "cancelled"],
@@ -274,25 +274,11 @@ function buildPendingTransition(
     ...(transition.changedFiles !== undefined ? { changedFiles: transition.changedFiles } : {}),
     ...(transition.verification !== undefined ? { verification: transition.verification } : {}),
     ...(transition.executionCallback !== undefined
-      ? { executionCallback: sanitizeExecutionCallback(transition.executionCallback) }
+      ? { executionCallback: toPublicExecutionCallback(transition.executionCallback) }
       : {}),
     ...(transition.reportPaths !== undefined ? { reportPaths: transition.reportPaths } : {}),
     ...(transition.error !== undefined ? { error: publicSummary } : {}),
     ...(transition.errorCode !== undefined ? { errorCode: transition.errorCode } : {})
-  };
-}
-
-function sanitizeExecutionCallback(
-  callback: NonNullable<JobTransition["executionCallback"]>
-): NonNullable<JobTransition["executionCallback"]> {
-  return {
-    invocationId: callback.invocationId,
-    outcome: callback.outcome,
-    ...(callback.sessionId !== undefined ? { sessionId: callback.sessionId } : {}),
-    ...(callback.receivedAt !== undefined ? { receivedAt: callback.receivedAt } : {}),
-    ...(callback.error !== undefined
-      ? { error: publicProgressSummary({ type: "callback", outcome: callback.outcome }) }
-      : {})
   };
 }
 

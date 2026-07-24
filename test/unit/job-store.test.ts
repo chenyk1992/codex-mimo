@@ -80,10 +80,10 @@ describe("job store", () => {
       request: { cwd, task: "Custom idle budget", idleTimeoutMs: 60_000 }
     });
 
-    expect(defaulted.idleTimeoutMs).toBe(1_800_000);
+    expect(defaulted.idleTimeoutMs).toBe(90_000);
     expect(disabled.idleTimeoutMs).toBe(0);
     expect(custom.idleTimeoutMs).toBe(60_000);
-    expect(readJob(cwd, defaulted.id)?.idleTimeoutMs).toBe(1_800_000);
+    expect(readJob(cwd, defaulted.id)?.idleTimeoutMs).toBe(90_000);
   });
 
   it("reads persisted live observation fields", () => {

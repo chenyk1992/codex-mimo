@@ -5,6 +5,8 @@ import {
   resolveJobDir
 } from "./job-store.js";
 import {
+  resolveJobWorkerOwnershipKey,
+  resolveNotificationWorkerOwnershipKey,
   spawnJobWorker,
   spawnNotificationWorker
 } from "./job-process.js";
@@ -20,10 +22,7 @@ import { runJobWorker } from "./job-worker.js";
 import { runNotificationWorker } from "../notify/worker.js";
 import { startNotificationDispatch } from "../notify/dispatch-process.js";
 import type { NotificationDelivery } from "../notify/types.js";
-import {
-  resolveJobWorkerOwnershipKey,
-  resolveNotificationWorkerOwnershipKey
-} from "./worker-ownership.js";
+import { sleep as defaultSleep } from "./sleep.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 100;
 const OWNERSHIP_HANDOFF_TIMEOUT_MS = 250;
@@ -260,10 +259,6 @@ function processIsRunning(pid: number): boolean {
 
 function isErrorWithCode(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
-}
-
-function defaultSleep(delayMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 function positiveIntegerOr(value: number | undefined, fallback: number): number {

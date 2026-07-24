@@ -1,13 +1,12 @@
 import type { GitHeadSnapshot, GitStatusSnapshot } from "../git/diff.js";
-import { extractFinalText, parseMimoJsonLines } from "./events.js";
-import { detectUnacceptedTask } from "../core/job-outcome.js";
 
-export function detectSemanticFailure(eventsStdout: string): string | undefined {
-  return detectUnacceptedTask(extractFinalText(parseMimoJsonLines(eventsStdout)));
-}
-
-export function detectDirectSemanticFailure(summary: string | undefined): string | null {
-  return detectUnacceptedTask(summary) ?? null;
+export function statusDeltaFiles(before: GitStatusSnapshot, after: GitStatusSnapshot): string[] {
+  if (before.fingerprints && after.fingerprints) {
+    return changedFingerprintFiles(before, after);
+  }
+  const beforeFiles = parseGitStatusFiles(before.short);
+  const afterFiles = parseGitStatusFiles(after.short);
+  return [...afterFiles].filter((file) => !beforeFiles.has(file));
 }
 
 export function detectReadOnlyViolationFiles(
@@ -18,14 +17,7 @@ export function detectReadOnlyViolationFiles(
 ): string[] {
   if (writesAllowed) return [];
   if (!gitStatusBefore || !gitStatusAfter) return changedFiles;
-
-  if (gitStatusBefore.fingerprints && gitStatusAfter.fingerprints) {
-    return changedFingerprintFiles(gitStatusBefore, gitStatusAfter);
-  }
-
-  const beforeFiles = parseGitStatusFiles(gitStatusBefore.short);
-  const afterFiles = parseGitStatusFiles(gitStatusAfter.short);
-  return [...afterFiles].filter((file) => !beforeFiles.has(file));
+  return statusDeltaFiles(gitStatusBefore, gitStatusAfter);
 }
 
 export function buildReadOnlyReportDiff(
@@ -39,12 +31,7 @@ export function buildReadOnlyReportDiff(
 }
 
 export function detectNewFilesFromStatus(before: GitStatusSnapshot, after: GitStatusSnapshot): string[] {
-  if (before.fingerprints && after.fingerprints) {
-    return changedFingerprintFiles(before, after);
-  }
-  const beforeFiles = parseGitStatusFiles(before.short);
-  const afterFiles = parseGitStatusFiles(after.short);
-  return [...afterFiles].filter((file) => !beforeFiles.has(file));
+  return statusDeltaFiles(before, after);
 }
 
 export function parseGitStatusFiles(status: string): Set<string> {

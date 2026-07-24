@@ -37,11 +37,10 @@ describe("launchJob", () => {
       notify: { type: "codex", threadId: "thread-1" }
     }, {
       env,
-      resolveTarget(input, resolvedEnv) {
+      resolveTarget(input) {
         order.push("resolve");
         expect(fs.existsSync(path.join(cwd, ".codex-mimo", "jobs"))).toBe(false);
         expect(input).toEqual({ type: "codex", threadId: "thread-1" });
-        expect(resolvedEnv.CODEX_THREAD_ID).toBe("thread-1");
         return { type: "codex", threadId: "thread-1" };
       },
       async prepareCodex(options) {

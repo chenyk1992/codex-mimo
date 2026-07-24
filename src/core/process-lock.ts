@@ -3,6 +3,8 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 
+import { sleep as delay } from "./sleep.js";
+
 const DEFAULT_TIMEOUT_MS = 2_000;
 const DEFAULT_RETRY_MS = 10;
 const PROCESS_LOCK_PORT_START = 20_000;
@@ -139,10 +141,6 @@ function closeServer(server: net.Server): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
   });
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function isErrorWithCode(error: unknown, code: string): boolean {

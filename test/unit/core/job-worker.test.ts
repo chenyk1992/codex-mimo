@@ -16,7 +16,7 @@ import {
 import type { JobKind, JobRecord } from "../../../src/core/jobs.js";
 import { readJobSignals } from "../../../src/core/job-signals.js";
 import { isProcessLockHeld } from "../../../src/core/process-lock.js";
-import { resolveJobWorkerOwnershipKey } from "../../../src/core/worker-ownership.js";
+import { resolveJobWorkerOwnershipKey } from "../../../src/core/job-process.js";
 import { withUtf8ProcessEnv } from "../../../src/core/encoding.js";
 import { readDeliveries } from "../../../src/notify/outbox.js";
 import type { HookCallbackController, MimoHookCallbackSummary } from "../../../src/mimo/hook-callback.js";
@@ -1248,19 +1248,21 @@ describe("runJobWorker", () => {
     expect(readJob(cwd, job.id)).toMatchObject({ status: "completed", changedFiles: [] });
   });
 
-  it("keeps real .mimocode configuration changes as read-only violations", async () => {
+  it("completes a read-only plan when MiMo writes under .mimocode/", async () => {
     const cwd = gitWorkspace();
     const config = path.join(cwd, ".mimocode", "mimocode.jsonc");
-    fs.mkdirSync(path.dirname(config), { recursive: true });
+    const planFile = path.join(cwd, ".mimocode", "plans", "plan.md");
+    fs.mkdirSync(path.dirname(planFile), { recursive: true });
     fs.writeFileSync(config, '{"before":true}\n', "utf8");
     const job = createJobStore(cwd).create({
-      kind: "review", task: "Review", request: { cwd, base: "HEAD" }
+      kind: "plan", task: "Plan it", request: { cwd, task: "Plan it" }
     });
     const deps = workerDeps({
       runMimoStreaming: async (_cwd, _args, options) => {
         await options.onStart?.(654);
         fs.writeFileSync(config, '{"after":true}\n', "utf8");
-        await options.onLine?.('{"type":"text","text":"Review complete."}');
+        fs.writeFileSync(planFile, "# plan\n", "utf8");
+        await options.onLine?.('{"type":"text","text":"Plan complete."}');
         return { ...completedRun, pid: 654 };
       }
     });
@@ -1272,9 +1274,7 @@ describe("runJobWorker", () => {
 
     await runJobWorker(cwd, job.id, deps);
 
-    expect(readJob(cwd, job.id)).toMatchObject({
-      status: "failed", errorCode: "read_only_violation", changedFiles: [".mimocode/mimocode.jsonc"]
-    });
+    expect(readJob(cwd, job.id)).toMatchObject({ status: "completed", changedFiles: [] });
   });
 
   it("reports only business edits when implement also refreshes the cron lock", async () => {

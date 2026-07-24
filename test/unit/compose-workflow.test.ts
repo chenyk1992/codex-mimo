@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildComposePrompt, getComposeWorkflow, listComposeWorkflows } from "../../src/compose/workflow.js";
+import {
+  buildComposePrompt,
+  COMPOSE_WORKFLOW_NAMES,
+  getComposeWorkflow
+} from "../../src/compose/workflow.js";
 
 describe("compose workflows", () => {
   it("returns dev workflow with expected Compose skill chain", () => {
@@ -53,7 +57,9 @@ describe("compose workflows", () => {
 
 describe("compose workflow official skill coverage", () => {
   it("covers the skills referenced from Compose workflows", () => {
-    const usedSkills = new Set(listComposeWorkflows().flatMap((workflow) => workflow.skillChain));
+    const usedSkills = new Set(
+      COMPOSE_WORKFLOW_NAMES.map((name) => getComposeWorkflow(name)).flatMap((workflow) => workflow.skillChain)
+    );
 
     expect([...usedSkills].sort()).toEqual([
       "compose:brainstorm",
@@ -119,7 +125,9 @@ describe("compose prompt semantics", () => {
       task: "Plan something."
     });
 
-    expect(prompt).toContain("This workflow is read-only. Do not modify files.");
+    expect(prompt).toContain(
+      "This workflow is read-only for project files. Do not modify project files; writes under `.mimocode/` are allowed."
+    );
   });
 
   it("tells compose:plan not to save, execute, or commit the plan", () => {
@@ -128,8 +136,8 @@ describe("compose prompt semantics", () => {
       task: "Plan discount codes."
     });
 
-    expect(prompt).toContain("Return the plan in your final response only");
-    expect(prompt).toContain("Do not save plan files");
+    expect(prompt).toContain("Return the plan in your final response");
+    expect(prompt).toContain("You may also save plan artifacts under `.mimocode/`");
     expect(prompt).toContain("Do not invoke compose:execute");
     expect(prompt).toContain("Do not run implementation steps or commit");
   });

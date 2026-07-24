@@ -79,14 +79,14 @@ A queued receipt alone does not prove a Codex notification target exists unless 
 
 Work tools:
 
-- `mimo_plan`: plan a clear task without writing files. Required: `cwd`, `task`.
+- `mimo_plan`: plan a clear task without modifying project files (writes under `.mimocode/` are allowed). Required: `cwd`, `task`.
 - `mimo_implement`: implement a narrow task. Required: `cwd`, `task`, `allowWrite: true`.
 - `mimo_review`: review the current diff. Required: `cwd`; optional `base` defaults to `HEAD`.
 - `mimo_fix_ci`: repair failures from a log. Required: `cwd`, `file`; optional `task`.
 - `mimo_resume`: create a child job from a `needs_input` or `blocked` parent. Required: `cwd`, parent `jobId`, `task`.
 - `mimo_compose`: run a registered workflow. Required for every request: `cwd`, `workflow`. `brainstorm`, `plan`, `dev`, `fix`, `parallel`, `worktree`, `merge`, and `new-skill` also require `task`; `fix-ci` and `execute-plan` require `file`; `review` requires neither. `fix-ci` may additionally include `task`. Optional fields where valid are `since`, `verification`, and `reportDir`.
 
-`verification` is an array of executable commands (no shell). Put acceptance prose in `task`, not in `verification`. The `plan` workflow is read-only: the plan body is available only as `mimo_result.output` and must not be written to plan files — asking it to save a file ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
+`verification` is an array of executable commands (no shell). Put acceptance prose in `task`, not in `verification`. The `plan` workflow is read-only for project files: read the plan from `mimo_result.output`. Writes under workspace-root `.mimocode/**` are allowed; modifying project/business files ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
 
 ```json
 { "workflow": "plan", "task": "Plan the feature; return the plan only" }
@@ -98,7 +98,7 @@ Work tools:
 
 All work tools accept optional `model`, `timeoutMs`, `idleTimeoutMs`, and one notification target:
 
-- `idleTimeoutMs`: optional idle stop-loss in milliseconds (default 30 minutes; `0` disables). Absolute `timeoutMs` is unchanged; whichever budget fires first wins.
+- `idleTimeoutMs`: optional idle stop-loss in milliseconds (default **90 seconds**; `0` disables). Absolute `timeoutMs` is unchanged; whichever budget fires first wins.
 
 ```json
 { "notify": { "type": "codex", "threadId": "<current-task-id>" } }
@@ -141,7 +141,7 @@ Every work tool returns only this stable receipt shape:
 ## Compose Selection
 
 - `brainstorm`: clarify requirements.
-- `plan`: produce a plan from clear requirements; read-only — read the plan from `mimo_result.output`; do not ask it to write plan files.
+- `plan`: produce a plan from clear requirements; read-only for project files — read the plan from `mimo_result.output`; `.mimocode/**` writes are allowed.
 - `dev`: implement a feature with TDD, verification, and review.
 - `fix`: diagnose and repair a bug.
 - `fix-ci`: repair CI from an attached log.
@@ -154,7 +154,9 @@ Every work tool returns only this stable receipt shape:
 
 ## Idle stop-loss and stall diagnosis
 
-When MiMo stdout goes silent longer than `idleTimeoutMs`, the job worker terminates the process tree and finalizes as `timeout` with `errorCode: idle_timeout`. Treat this like any other attention terminal: on Desktop, the next heartbeat should call `mimo_result` once, delete the schedule, and answer; for explicit App Server notify launches, wait for the compatibility callback turn (which already carries the public result) or an explicit user follow-up that may call `mimo_result` with the receipt's `jobId`.
+When MiMo stdout goes silent longer than `idleTimeoutMs` (default 90s), the job worker terminates the process tree and finalizes as `timeout` with `errorCode: idle_timeout`. Treat this like any other attention terminal: on Desktop, the next heartbeat should call `mimo_result` once, delete the schedule, and answer; for explicit App Server notify launches, wait for the compatibility callback turn (which already carries the public result) or an explicit user follow-up that may call `mimo_result` with the receipt's `jobId`.
+
+When the job enters `needs_input` with `errorCode: phase_oscillation`, MiMo was flipping between phases (for example verifying ↔ investigating). Call `mimo_resume` with a decisive adjudication in `task`, or `mimo_cancel`. Keep delegated slices small so decision space stays narrow.
 
 Distinguish wakeup paths: MiMo `session.post` is execution evidence; Codex Desktop recommended wakeup is the in-chat heartbeat; Codex App Server notification is compatibility history writeback on an independent connection and does not prove Desktop UI visibility; Cursor companion uses the host stop hook. A work receipt alone does not prove a Codex notification target exists unless the explicit Codex notification launch succeeded. Without a frozen Codex target, the terminal state is on disk only — discover it via Desktop heartbeat, `mimo_jobs`, or an explicit user request.
 

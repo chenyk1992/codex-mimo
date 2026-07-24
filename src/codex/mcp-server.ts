@@ -31,7 +31,6 @@ import {
   ReviewInput
 } from "./tool-schemas.js";
 import { appendMcpToolAudit } from "./tool-audit.js";
-export { MIMO_TOOL_NAMES } from "./tool-names.js";
 
 function textResult(result: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };

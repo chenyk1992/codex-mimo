@@ -2,6 +2,7 @@ import { execa } from "execa";
 import fs from "node:fs";
 import path from "node:path";
 import { withUtf8ProcessEnv } from "../core/encoding.js";
+import { errorMessage } from "../core/errors.js";
 import type { JobVerification } from "../core/jobs.js";
 
 export interface VerificationResult {
@@ -87,7 +88,7 @@ export async function runVerificationCommands(
         command,
         exitCode: null,
         stdout: "",
-        stderr: error instanceof Error ? error.message : String(error),
+        stderr: errorMessage(error),
         passed: false,
         durationMs: Date.now() - startedAt
       });

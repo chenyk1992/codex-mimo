@@ -1,19 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isAttentionJobStatus, type JobStatus } from "../core/jobs.js";
+import { DEFAULT_WALL_TIMEOUT_MS } from "../core/job-timeouts.js";
+import { sleep as defaultSleep } from "../core/sleep.js";
 
 export const HOST_POLL_INTERVALS_MS = [30_000, 45_000, 60_000] as const;
 export const HOST_POLL_CAP_MS = 60_000;
 export const HOST_HOOK_SAFETY_PAD_MS = 10_000;
-export const DEFAULT_JOB_TIMEOUT_MS = 1_800_000;
-
-export const ATTENTION_STATUSES = new Set([
-  "needs_input",
-  "blocked",
-  "completed",
-  "failed",
-  "cancelled",
-  "timeout"
-]);
 
 export type JobStatusSnapshot = {
   status: string;
@@ -42,7 +35,7 @@ export function computeWaitBudgetMs(input: {
   const hookBudget = Math.max(0, input.hookTimeoutMs - HOST_HOOK_SAFETY_PAD_MS);
   const jobTimeout = input.jobTimeoutMs && input.jobTimeoutMs > 0
     ? input.jobTimeoutMs
-    : DEFAULT_JOB_TIMEOUT_MS;
+    : DEFAULT_WALL_TIMEOUT_MS;
   const started = input.jobStartedAt ? Date.parse(input.jobStartedAt) : Number.NaN;
   const jobRemaining = Number.isFinite(started)
     ? Math.max(0, started + jobTimeout - input.nowMs)
@@ -75,10 +68,6 @@ export function readJobStatusSnapshot(cwd: string, jobId: string): JobStatusSnap
   }
 }
 
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export async function awaitJobAttention(options: {
   cwd: string;
   jobId: string;
@@ -91,7 +80,7 @@ export async function awaitJobAttention(options: {
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? defaultSleep;
   const readJob = options.readJob ?? readJobStatusSnapshot;
-  const isAttention = options.isAttention ?? ((status) => ATTENTION_STATUSES.has(status));
+  const isAttention = options.isAttention ?? ((status) => isAttentionJobStatus(status as JobStatus));
   const startedAt = now();
   const deadline = startedAt + Math.max(0, options.budgetMs);
   let pollIndex = 0;

@@ -2,8 +2,7 @@ import type { NotificationInput, NotificationTarget } from "./types.js";
 import { InputValidationError } from "../core/input-validation.js";
 
 export function resolveNotificationTarget(
-  input: NotificationInput | undefined,
-  _env: NodeJS.ProcessEnv
+  input: NotificationInput | undefined
 ): NotificationTarget | undefined {
   if (!input) return undefined;
 

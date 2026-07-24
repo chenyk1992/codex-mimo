@@ -34,7 +34,7 @@ Workflow: <name> - <description>
 Use these Compose skills in order: <skill chain>
 ```
 
-Instructions require focused changes, action/verification/risk reporting, and PowerShell-compatible commands on Windows. Read-only workflows explicitly prohibit modifications. Large or non-ASCII prompts use UTF-8 files under `.codex-mimo/inputs/`; the MiMoCode message points at that file.
+Instructions require focused changes, action/verification/risk reporting, and PowerShell-compatible commands on Windows. Read-only workflows prohibit project-file modifications while allowing writes under `.mimocode/`. Large or non-ASCII prompts use UTF-8 files under `.codex-mimo/inputs/`; the MiMoCode message points at that file.
 
 ## Execution and Status
 
@@ -65,7 +65,7 @@ Commands are split into executable and arguments and run without a shell. A fail
 
 ## Plan workflow
 
-The `plan` workflow is read-only (`writesAllowed: false`). The plan body is available only from an explicit `mimo_result` read as `mimo_result.output` — callers must not expect it in a saved report file. The prompt instructs MiMoCode to return the plan in the final response only and not to save plan files. Asking `plan` to write a plan file intentionally ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with safe `errorCode: "result_missing"`.
+The `plan` workflow is read-only for project files (`writesAllowed: false`). The plan body is available from an explicit `mimo_result` read as `mimo_result.output` — callers must not expect it in a saved Compose report file. Writes under workspace-root `.mimocode/**` (for example plan artifacts) are allowed; modifying project/business files ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with safe `errorCode: "result_missing"`.
 
 For Codex Desktop, omit `notify` and use an in-chat scheduled follow-up heartbeat. For CLI/compat App Server history writeback, send `notify: { type: "codex", threadId: "..." }` on the first attempt. Cursor companion and intentional no-notify launches may omit Codex notify. Outbox `delivered` does not mean the Desktop UI refreshed.
 
@@ -86,7 +86,7 @@ Reports remain structural and intentionally omit model output. They include the 
 
 ## Read-Only Enforcement
 
-`brainstorm`, `plan`, and `review` are checked after execution using Git status, diff, untracked-file fingerprints, and HEAD identity. Any change becomes `failed` with `read_only_violation`, even if MiMoCode exited successfully.
+`brainstorm`, `plan`, and `review` are checked after execution using Git status, diff, untracked-file fingerprints, and HEAD identity. Changes under workspace-root `.codex-mimo/**` and `.mimocode/**` are exempt. Any other project-file change (or a HEAD change) becomes `failed` with `read_only_violation`, even if MiMoCode exited successfully.
 
 ## Paused Workflow Continuation
 

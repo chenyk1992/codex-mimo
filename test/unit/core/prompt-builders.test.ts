@@ -10,7 +10,7 @@ describe("prompt builders", () => {
 
   it("planPrompt includes read-only planning guidance", () => {
     const prompt = planPrompt("Add auth middleware");
-    expect(prompt).toContain("Do not edit files");
+    expect(prompt).toContain("Do not modify project files; writes under `.mimocode/` are allowed.");
     expect(prompt).toContain("concise implementation plan");
   });
 

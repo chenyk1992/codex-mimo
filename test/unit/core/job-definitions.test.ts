@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   JOB_DEFINITIONS,
   bindJobDefinition,
-  getJobDefinition,
   type JobRequestByKind
 } from "../../../src/core/job-definitions.js";
 import type { ExecutionCallbackSummary, JobKind, JobRecord } from "../../../src/core/jobs.js";
@@ -82,7 +81,7 @@ describe("job definition registry", () => {
     }, "build"],
     ["compose", { cwd: "E:/project", workflow: "dev", task: "build it" }, "compose"]
   ] as const)("uses the fixed MiMo agent for %s", async (kind, request, agent) => {
-    const definition = getJobDefinition(kind);
+    const definition = JOB_DEFINITIONS[kind];
     const prompt = await definition.buildPrompt(request, ACTIVE_SIGNAL);
     const args = definition.buildMimoArgs(request, prompt);
 
@@ -91,7 +90,7 @@ describe("job definition registry", () => {
   });
 
   it("resumes from the parent session", async () => {
-    const definition = getJobDefinition("resume");
+    const definition = JOB_DEFINITIONS["resume"];
     const request = {
       cwd: "E:/project",
       jobId: "parent-1",
@@ -117,7 +116,7 @@ describe("job definition registry", () => {
       sessionId: "ses_1",
       executionPolicy
     };
-    const definition = getJobDefinition("resume");
+    const definition = JOB_DEFINITIONS["resume"];
     const prompt = await definition.buildPrompt(request, ACTIVE_SIGNAL);
     const args = definition.buildMimoArgs(request, prompt);
     const outcome = await definition.finalize({
@@ -138,13 +137,14 @@ describe("job definition registry", () => {
     });
 
     expect(args[args.indexOf("--agent") + 1]).toBe(agent);
-    if (!executionPolicy.writesAllowed) expect(prompt.message).toContain("Do not edit files");
-    expect(outcome).toMatchObject({ status, ...(errorCode ? { errorCode } : {}) });
+    if (!executionPolicy.writesAllowed) {
+      expect(prompt.message).toContain("Do not modify project files; writes under `.mimocode/` are allowed.");
+    }    expect(outcome).toMatchObject({ status, ...(errorCode ? { errorCode } : {}) });
   });
 
   it("rejects an invalid review base before producing a prompt", async () => {
     const cwd = initGitRepo();
-    await expect(getJobDefinition("review").buildPrompt({ cwd, base: "missing-ref" }, ACTIVE_SIGNAL))
+    await expect(JOB_DEFINITIONS["review"].buildPrompt({ cwd, base: "missing-ref" }, ACTIVE_SIGNAL))
       .rejects.toThrow(/Git diff capture failed.*missing-ref/i);
   });
 
@@ -153,14 +153,14 @@ describe("job definition registry", () => {
     const controller = new AbortController();
     controller.abort();
 
-    await expect(getJobDefinition("review").buildPrompt({ cwd, base: "HEAD" }, controller.signal))
+    await expect(JOB_DEFINITIONS["review"].buildPrompt({ cwd, base: "HEAD" }, controller.signal))
       .rejects.toThrow();
   });
 
   it("describes an empty review diff without creating an attachment", async () => {
     const cwd = initGitRepo();
-    const prompt = await getJobDefinition("review").buildPrompt({ cwd, base: "HEAD" }, ACTIVE_SIGNAL);
-    const args = getJobDefinition("review").buildMimoArgs({ cwd, base: "HEAD" }, prompt);
+    const prompt = await JOB_DEFINITIONS["review"].buildPrompt({ cwd, base: "HEAD" }, ACTIVE_SIGNAL);
+    const args = JOB_DEFINITIONS["review"].buildMimoArgs({ cwd, base: "HEAD" }, prompt);
 
     expect(prompt.files).toEqual([]);
     expect(prompt.message).toContain("No changes found against base HEAD");
@@ -171,7 +171,7 @@ describe("job definition registry", () => {
     const cwd = initGitRepo();
     fs.writeFileSync(path.join(cwd, "app.ts"), `// 中文差异\n${"变更内容".repeat(3_000)}\n`, "utf-8");
     const expected = await captureGitDiff(cwd, "HEAD");
-    const definition = getJobDefinition("review");
+    const definition = JOB_DEFINITIONS["review"];
     const prompt = await definition.buildPrompt(
       { cwd, base: "HEAD", model: "mimo-v2" },
       ACTIVE_SIGNAL
@@ -189,7 +189,7 @@ describe("job definition registry", () => {
 
   it("passes model, fixed attachments, and transported prompt files to MiMo", async () => {
     const cwd = tempDir();
-    const definition = getJobDefinition("fix-ci");
+    const definition = JOB_DEFINITIONS["fix-ci"];
     const request = {
       cwd,
       file: "ci.log",
@@ -206,7 +206,7 @@ describe("job definition registry", () => {
   });
 
   it("builds Compose prompts with the selected workflow skill chain and reference file", async () => {
-    const definition = getJobDefinition("compose");
+    const definition = JOB_DEFINITIONS["compose"];
     const request = {
       cwd: "E:/project",
       workflow: "execute-plan" as const,
@@ -260,7 +260,7 @@ describe("job finalization", () => {
       sessionId: "ses-1",
       receivedAt: "2026-07-16T00:00:01.000Z"
     };
-    const outcome = await getJobDefinition("implement").finalize({
+    const outcome = await JOB_DEFINITIONS["implement"].finalize({
       signal: ACTIVE_SIGNAL,
       job,
       request: job.request as JobRequestByKind["implement"],
@@ -296,7 +296,7 @@ describe("job finalization", () => {
       durationMs: 12
     }]);
 
-    const outcome = await getJobDefinition("compose").finalize({
+    const outcome = await JOB_DEFINITIONS["compose"].finalize({
       signal: ACTIVE_SIGNAL,
       job,
       request,
@@ -331,7 +331,7 @@ describe("job finalization", () => {
     const rawChanged = [".mimocode/.cron-lock"];
     const changedFiles = rawChanged.filter((file) => !isRuntimeArtifactPath(file));
 
-    const outcome = await getJobDefinition("compose").finalize({
+    const outcome = await JOB_DEFINITIONS["compose"].finalize({
       signal: ACTIVE_SIGNAL,
       job: makeJob("compose", request),
       request,
@@ -361,7 +361,7 @@ describe("job finalization", () => {
     const rawChanged = [".mimocode/.cron-lock", "src/app.ts"];
     const changedFiles = rawChanged.filter((file) => !isRuntimeArtifactPath(file));
 
-    const outcome = await getJobDefinition("compose").finalize({
+    const outcome = await JOB_DEFINITIONS["compose"].finalize({
       signal: ACTIVE_SIGNAL,
       job: makeJob("compose", request),
       request,
@@ -406,11 +406,11 @@ describe("job finalization", () => {
     const events = [{ type: "message" as const, text: finalText, raw: { type: "message", text: finalText } }];
     const directRequest: JobRequestByKind["implement"] = { cwd, task: "implement", allowWrite: true };
     const composeRequest: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "implement" };
-    const direct = await getJobDefinition("implement").finalize({
+    const direct = await JOB_DEFINITIONS["implement"].finalize({
       signal: ACTIVE_SIGNAL,
       job: makeJob("implement", directRequest), request: directRequest, run, events, executionCallback, verification: []
     });
-    const compose = await getJobDefinition("compose").finalize({
+    const compose = await JOB_DEFINITIONS["compose"].finalize({
       signal: ACTIVE_SIGNAL,
       job: makeJob("compose", composeRequest), request: composeRequest, run, events, executionCallback,
       verification: [], deps: { runVerification: async () => [], writeComposeReport: () => undefined }
@@ -423,7 +423,7 @@ describe("job finalization", () => {
   it("fails a read-only definition when HEAD changes without a dirty-file delta", async () => {
     const cwd = tempDir();
     const request: JobRequestByKind["plan"] = { cwd, task: "plan" };
-    const outcome = await getJobDefinition("plan").finalize({
+    const outcome = await JOB_DEFINITIONS["plan"].finalize({
       signal: ACTIVE_SIGNAL,
       job: makeJob("plan", request), request,
       run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
@@ -484,7 +484,7 @@ describe("job finalization", () => {
   ] as const)("requires final text only for planning entry points: %s", async (_label, kind, requestPatch, requires) => {
     const cwd = tempDir();
     const request = { cwd, ...requestPatch } as JobRequestByKind[typeof kind];
-    const empty = await getJobDefinition(kind).finalize({
+    const empty = await JOB_DEFINITIONS[kind].finalize({
       signal: ACTIVE_SIGNAL,
       job: makeJob(kind, request),
       request,
@@ -494,7 +494,7 @@ describe("job finalization", () => {
       verification: [],
       deps: { runVerification: async () => [], writeComposeReport: () => undefined }
     });
-    const filled = await getJobDefinition(kind).finalize({
+    const filled = await JOB_DEFINITIONS[kind].finalize({
       signal: ACTIVE_SIGNAL,
       job: makeJob(kind, request),
       request,

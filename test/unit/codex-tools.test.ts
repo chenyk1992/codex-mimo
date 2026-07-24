@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import {
   mimoCompose,
   mimoFixCi,
@@ -97,8 +98,12 @@ describe("codex work tool handlers", () => {
 
   it("keeps background and wait out of every work tool schema", () => {
     for (const schema of [PlanInput, ImplementInput, ReviewInput, FixCiInput, ResumeInput, ComposeInput]) {
-      expect(schema.keyof().options).not.toContain("background");
-      expect(schema.keyof().options).not.toContain("wait");
+      let current: z.ZodTypeAny = schema;
+      while (current instanceof z.ZodEffects) {
+        current = current._def.schema;
+      }
+      expect((current as z.ZodObject<z.ZodRawShape>).keyof().options).not.toContain("background");
+      expect((current as z.ZodObject<z.ZodRawShape>).keyof().options).not.toContain("wait");
     }
   });
 });

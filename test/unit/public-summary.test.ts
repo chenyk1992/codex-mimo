@@ -22,6 +22,16 @@ describe("publicProgressSummary", () => {
     ).toBe("MiMoCode job idle-timed out.");
   });
 
+  it("emits a fixed safe summary for phase_oscillation needs_input", () => {
+    expect(
+      publicProgressSummary({
+        type: "job",
+        status: "needs_input",
+        errorCode: "phase_oscillation"
+      })
+    ).toBe("MiMoCode phase oscillation needs caller input.");
+  });
+
   it("falls back to the generic failed summary for unknown errorCodes", () => {
     expect(
       publicProgressSummary({

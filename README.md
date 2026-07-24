@@ -192,7 +192,7 @@ CLI exit codes are: `0` success; `2` command, input, or schema error; and `1` ru
 
 Registered workflows are `brainstorm`, `plan`, `dev`, `fix`, `fix-ci`, `execute-plan`, `review`, `parallel`, `worktree`, `merge`, and `new-skill`. Compose uses the same worker and job lifecycle as every other kind; only its prompt, workflow rules, verification, and report finalization differ. See [Compose workflows](doc/compose-workflows.md).
 
-`verification` holds executable commands run without a shell — not natural-language acceptance criteria. Put scope or state prose in `task`. The `plan` workflow is read-only; read the plan from an explicit `mimo_result` as `mimo_result.output`. Asking it to write a plan file ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
+`verification` holds executable commands run without a shell — not natural-language acceptance criteria. Put scope or state prose in `task`. The `plan` workflow is read-only for project files; read the plan from an explicit `mimo_result` as `mimo_result.output`. Writes under workspace-root `.mimocode/**` are allowed; modifying project/business files ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
 
 ```json
 { "workflow": "plan", "task": "Plan the feature; return the plan only" }

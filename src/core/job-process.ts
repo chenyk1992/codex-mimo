@@ -3,6 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { withUtf8ProcessEnv } from "./encoding.js";
+import { errorMessage } from "./errors.js";
+import { resolveJobDir, resolveJobPaths } from "./job-store.js";
+
+export function resolveJobWorkerOwnershipKey(cwd: string, jobId: string): string {
+  return `${resolveJobPaths(cwd, jobId).jobFile}.worker-ownership`;
+}
+
+export function resolveNotificationWorkerOwnershipKey(cwd: string): string {
+  return path.join(resolveJobDir(cwd), "notification-worker-ownership");
+}
 
 export type WorkerCommand = "job-supervisor" | "job-worker" | "notify-worker";
 
@@ -506,8 +516,4 @@ function killWindowsTreeWithEvidence(
 
 function isErrorWithCode(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

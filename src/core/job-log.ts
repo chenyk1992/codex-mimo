@@ -1,7 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { normalizeMimoEvent, type NormalizedMimoEvent } from "../compose/events.js";
-import { appendJobSignal } from "./job-signals.js";
+import {
+  createPhaseLoopState,
+  detectPhaseFromText,
+  trackPhaseOscillation,
+  type PhaseOscillationResult
+} from "../compose/phase-loop.js";
+import { appendJobSignal, readJobSignals } from "./job-signals.js";
 import { readJob, resolveJobPaths, updateJobAuthoritative } from "./job-store.js";
 import type { JobPhase } from "./jobs.js";
 import { withProcessLock } from "./process-lock.js";
@@ -9,6 +15,12 @@ import {
   publicProgressSummary,
   type PublicSummaryContext
 } from "./public-summary.js";
+
+export interface AppendRawEventResult {
+  event: NormalizedMimoEvent;
+  phase?: JobPhase;
+  oscillation?: PhaseOscillationResult;
+}
 
 export function appendJobLogLine(logFile: string, context: PublicSummaryContext): void {
   const summary = publicProgressSummary(context);
@@ -40,7 +52,7 @@ export async function appendRawAndNormalizedEvent(
   cwd: string,
   jobId: string,
   line: string
-): Promise<NormalizedMimoEvent | undefined> {
+): Promise<AppendRawEventResult | undefined> {
   const rawLine = line.replace(/\r?\n$/, "");
   if (!rawLine.trim()) return undefined;
 
@@ -50,7 +62,7 @@ export async function appendRawAndNormalizedEvent(
 
     appendJobEventLine(job.eventsFile, rawLine);
     const event = normalizeLine(rawLine);
-    if (job.status !== "running") return event;
+    if (job.status !== "running") return { event };
 
     const phase = inferActivePhase(event);
     const summary = summarizeNormalizedEvent(event);
@@ -66,7 +78,16 @@ export async function appendRawAndNormalizedEvent(
         })
       : job;
 
+    let oscillation: PhaseOscillationResult | undefined;
     if (phase && phase !== job.phase) {
+      const textPhase = detectPhaseFromText(event.text);
+      oscillation = detectOscillation(updated.signalsFile, phase);
+      if (!oscillation.oscillating && textPhase && textPhase !== phase) {
+        oscillation = trackPhaseOscillation(
+          rebuildPhaseLoopState(updated.signalsFile, phase),
+          textPhase
+        );
+      }
       appendJobSignal(updated.signalsFile, {
         jobId,
         kind: "phase_changed",
@@ -76,6 +97,7 @@ export async function appendRawAndNormalizedEvent(
         summary: summary ?? `${job.kind} job entered ${phase}.`
       });
     }
+
     if (summary) {
       appendJobSignal(updated.signalsFile, {
         jobId,
@@ -86,8 +108,28 @@ export async function appendRawAndNormalizedEvent(
         summary
       });
     }
-    return event;
+
+    return {
+      event,
+      ...(phase ? { phase } : {}),
+      ...(oscillation?.oscillating ? { oscillation } : {})
+    };
   });
+}
+
+function detectOscillation(signalsFile: string, nextPhase: string): PhaseOscillationResult {
+  return trackPhaseOscillation(rebuildPhaseLoopState(signalsFile), nextPhase);
+}
+
+function rebuildPhaseLoopState(signalsFile: string, extraPhase?: string) {
+  const state = createPhaseLoopState();
+  for (const signal of readJobSignals(signalsFile).signals) {
+    if (signal.kind === "phase_changed" && signal.phase) {
+      trackPhaseOscillation(state, signal.phase);
+    }
+  }
+  if (extraPhase) trackPhaseOscillation(state, extraPhase);
+  return state;
 }
 
 function normalizeLine(line: string): NormalizedMimoEvent {

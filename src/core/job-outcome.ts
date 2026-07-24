@@ -4,6 +4,7 @@ import type {
   JobStatus,
   JobVerification
 } from "./jobs.js";
+import { toPublicExecutionCallback } from "./public-summary.js";
 
 export interface RunEvidence {
   exitCode: number;
@@ -174,22 +175,6 @@ function commonOutcomeFields(evidence: RunEvidence): Pick<
     ...(evidence.executionCallback
       ? { executionCallback: toPublicExecutionCallback(evidence.executionCallback) }
       : {})
-  };
-}
-
-function toPublicExecutionCallback(callback: ExecutionCallbackSummary): ExecutionCallbackSummary {
-  return {
-    invocationId: callback.invocationId,
-    outcome: callback.outcome,
-    ...(callback.sessionId !== undefined ? { sessionId: callback.sessionId } : {}),
-    ...(callback.receivedAt !== undefined ? { receivedAt: callback.receivedAt } : {}),
-    ...(callback.outcome === "missing"
-      ? { error: "MiMoCode completion callback was not received." }
-      : callback.outcome === "error"
-        ? { error: "MiMoCode completion callback reported an error." }
-        : callback.outcome === "cancelled"
-          ? { error: "MiMoCode completion callback reported cancellation." }
-          : {})
   };
 }
 

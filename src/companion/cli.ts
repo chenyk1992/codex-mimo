@@ -6,6 +6,7 @@ import {
   watchStatePath,
   writeState
 } from "./watch.js";
+import { errorMessage } from "../core/errors.js";
 
 function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -52,7 +53,7 @@ async function main(argv: string[]): Promise<void> {
     }
     writeStdout({});
   } catch (error) {
-    process.stderr.write(`[mimo-companion] ${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`[mimo-companion] ${errorMessage(error)}\n`);
     writeStdout({});
   }
 }

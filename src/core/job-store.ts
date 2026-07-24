@@ -12,6 +12,7 @@ import type { NotificationTarget } from "../notify/types.js";
 import { readDeliveries } from "../notify/outbox.js";
 import { renameWithWindowsRetry } from "./atomic-file.js";
 import { withProcessLock } from "./process-lock.js";
+import { readRequestIdleTimeoutMs } from "./job-timeouts.js";
 
 const DEFAULT_MAX_JOBS = 100;
 
@@ -102,7 +103,7 @@ export function createJobStore(cwd: string, options: JobStoreOptions = {}): {
         updatedAt: timestamp,
         changedFiles: [],
         verification: [],
-        idleTimeoutMs: readIdleTimeoutFromRequest(input.request),
+        idleTimeoutMs: readRequestIdleTimeoutMs(input.request),
         notificationTarget: input.notificationTarget,
         logFile: paths.logFile,
         eventsFile: paths.eventsFile,
@@ -657,17 +658,6 @@ function isPositiveInteger(value: unknown): boolean {
 function isOptionalNonNegativeInteger(value: unknown): boolean {
   return value === undefined ||
     (typeof value === "number" && Number.isInteger(value) && value >= 0);
-}
-
-function readIdleTimeoutFromRequest(request: unknown): number {
-  if (typeof request !== "object" || request === null || Array.isArray(request)) {
-    return 1_800_000;
-  }
-  const value = (request as Record<string, unknown>).idleTimeoutMs;
-  if (typeof value === "number" && Number.isFinite(value) && value >= 0 && Number.isInteger(value)) {
-    return value;
-  }
-  return 1_800_000;
 }
 
 function pruneState(cwd: string, state: JobState, maxJobs: number): JobState {

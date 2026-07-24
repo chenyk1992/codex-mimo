@@ -22,12 +22,9 @@ import {
 } from "../compose/verify.js";
 import {
   buildComposePrompt,
-  COMPOSE_WORKFLOW_NAMES,
-  getComposeWorkflow,
-  validateComposeWorkflowInput,
-  type ComposeWorkflowName
+  getComposeWorkflow
 } from "../compose/workflow.js";
-import { extractFinalText, type NormalizedMimoEvent } from "../compose/events.js";
+import { extractFinalText, collectChangedFilesFromEvents, type NormalizedMimoEvent } from "../compose/events.js";
 import {
   captureGitDiff,
   type GitCommitChangeSnapshot,
@@ -45,58 +42,15 @@ import type { StreamingRunResult } from "../mimo/streaming-runner.js";
 import { implementPrompt, planPrompt, resumePrompt, reviewPrompt } from "./prompt.js";
 import { classifyRunOutcome, type JobOutcome } from "./job-outcome.js";
 import type { ExecutionCallbackSummary, JobKind, JobRecord } from "./jobs.js";
-
-const DEFAULT_TIMEOUT_MS = 1_800_000;
-
-const CommonRequestSchema = z.object({
-  cwd: z.string().min(1),
-  model: z.string().min(1).optional(),
-  timeoutMs: z.number().int().positive().default(DEFAULT_TIMEOUT_MS),
-  idleTimeoutMs: z.number().int().min(0).default(DEFAULT_TIMEOUT_MS)
-}).strict();
-
-const PlanRequestSchema = CommonRequestSchema.extend({
-  task: z.string().min(1)
-});
-
-const ImplementRequestSchema = CommonRequestSchema.extend({
-  task: z.string().min(1),
-  allowWrite: z.literal(true)
-});
-
-const ReviewRequestSchema = CommonRequestSchema.extend({
-  base: z.string().min(1).default("HEAD")
-});
-
-const FixCiRequestSchema = CommonRequestSchema.extend({
-  file: z.string().min(1),
-  task: z.string().min(1).optional()
-});
-
-const JobExecutionPolicySchema = z.object({
-  agent: z.enum(["plan", "build", "compose"]),
-  writesAllowed: z.boolean()
-}).strict();
-
-const ResumeRequestSchema = CommonRequestSchema.extend({
-  jobId: z.string().min(1),
-  task: z.string().min(1),
-  sessionId: z.string().min(1),
-  executionPolicy: JobExecutionPolicySchema
-});
-
-const ComposeRequestSchema = CommonRequestSchema.extend({
-  workflow: z.enum(COMPOSE_WORKFLOW_NAMES),
-  task: z.string().min(1).optional(),
-  file: z.string().min(1).optional(),
-  since: z.string().min(1).optional(),
-  verification: z.array(z.string().min(1)).optional(),
-  reportDir: z.string().min(1).optional()
-}).superRefine((request, context) => {
-  for (const message of validateComposeWorkflowInput(request)) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message });
-  }
-});
+import {
+  ComposeRequestSchema,
+  FixCiRequestSchema,
+  ImplementRequestSchema,
+  JobExecutionPolicySchema,
+  PlanRequestSchema,
+  ResumeRequestSchema,
+  ReviewRequestSchema
+} from "./job-schemas.js";
 
 export type PlanJobRequest = z.input<typeof PlanRequestSchema>;
 export type ImplementJobRequest = z.input<typeof ImplementRequestSchema>;
@@ -105,7 +59,6 @@ export type FixCiJobRequest = z.input<typeof FixCiRequestSchema>;
 export type ResumeJobRequest = z.input<typeof ResumeRequestSchema>;
 export type ComposeJobRequest = z.input<typeof ComposeRequestSchema>;
 export type JobExecutionPolicy = z.infer<typeof JobExecutionPolicySchema>;
-
 export interface JobRequestByKind {
   plan: PlanJobRequest;
   implement: ImplementJobRequest;
@@ -285,23 +238,21 @@ export const JOB_DEFINITIONS: JobDefinitionRegistry = {
   compose: composeDefinition
 };
 
-export function getJobDefinition<Kind extends JobKind>(
-  kind: Kind
-): JobDefinitionRegistry[Kind] {
-  return JOB_DEFINITIONS[kind];
-}
-
-const JOB_BINDERS: Record<JobKind, (job: JobRecord) => BoundJobDefinition> = {
-  plan: (job) => bind(job, PlanRequestSchema, planDefinition),
-  implement: (job) => bind(job, ImplementRequestSchema, implementDefinition),
-  review: (job) => bind(job, ReviewRequestSchema, reviewDefinition),
-  "fix-ci": (job) => bind(job, FixCiRequestSchema, fixCiDefinition),
-  resume: (job) => bind(job, ResumeRequestSchema, resumeDefinition),
-  compose: (job) => bind(job, ComposeRequestSchema, composeDefinition)
-};
-
 export function bindJobDefinition(job: JobRecord): BoundJobDefinition {
-  return JOB_BINDERS[job.kind](job);
+  switch (job.kind) {
+    case "plan":
+      return bind(job, PlanRequestSchema, planDefinition);
+    case "implement":
+      return bind(job, ImplementRequestSchema, implementDefinition);
+    case "review":
+      return bind(job, ReviewRequestSchema, reviewDefinition);
+    case "fix-ci":
+      return bind(job, FixCiRequestSchema, fixCiDefinition);
+    case "resume":
+      return bind(job, ResumeRequestSchema, resumeDefinition);
+    case "compose":
+      return bind(job, ComposeRequestSchema, composeDefinition);
+  }
 }
 
 function bind<Kind extends JobKind, Request extends { cwd: string }>(
@@ -374,33 +325,20 @@ async function finalizeDirect<Request extends { cwd: string }>(
 ): Promise<JobOutcome> {
   const verification = context.verification ?? [];
   const changedFiles = collectChangedFiles(context, writesAllowed);
-  const outcome = classifyRunOutcome({
-    exitCode: context.run.exitCode,
-    terminationReason: context.run.terminationReason,
-    executionCallback: context.executionCallback,
-    verification: compactVerification(verification),
-    finalText: finalTextFrom(context),
-    ...(requireFinalText ? { requireFinalText: true } : {})
-  });
-
-  if (!writesAllowed && hasReadOnlyViolation(context, changedFiles)) {
-    const error = readOnlyViolationError(
-      context.job.kind,
-      changedFiles,
-      context.gitHeadBefore,
-      context.gitHeadAfter
-    );
-    if (!outcome.errorCode?.startsWith("callback_")) {
-      return {
-        ...outcome,
-        status: "failed",
-        summary: error,
-        changedFiles,
-        error,
-        errorCode: "read_only_violation"
-      };
-    }
-  }
+  const outcome = applyReadOnlyViolation(
+    classifyRunOutcome({
+      exitCode: context.run.exitCode,
+      terminationReason: context.run.terminationReason,
+      executionCallback: context.executionCallback,
+      verification: compactVerification(verification),
+      finalText: finalTextFrom(context),
+      ...(requireFinalText ? { requireFinalText: true } : {})
+    }),
+    context,
+    writesAllowed,
+    changedFiles,
+    context.job.kind
+  );
 
   return { ...outcome, changedFiles };
 }
@@ -425,35 +363,20 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     reportDiff = { ...reportDiff, changedFiles };
   }
 
-  let outcome = classifyRunOutcome({
-    exitCode: context.run.exitCode,
-    terminationReason: context.run.terminationReason,
-    executionCallback: context.executionCallback,
-    verification: compactVerification(verification),
-    finalText: finalTextFrom(context),
-    ...(workflow.name === "plan" ? { requireFinalText: true } : {})
-  });
-
-  const readOnlyError = !workflow.writesAllowed && hasReadOnlyViolation(context, changedFiles)
-    ? readOnlyViolationError(
-      workflow.name,
-      changedFiles,
-      context.gitHeadBefore,
-      context.gitHeadAfter
-    )
-    : undefined;
-  const postCheckError = readOnlyError
-    ? { message: readOnlyError, code: "read_only_violation" }
-    : undefined;
-  if (postCheckError && !outcome.errorCode?.startsWith("callback_")) {
-    outcome = {
-      ...outcome,
-      status: "failed",
-      summary: postCheckError.message,
-      error: postCheckError.message,
-      errorCode: postCheckError.code
-    };
-  }
+  const outcome = applyReadOnlyViolation(
+    classifyRunOutcome({
+      exitCode: context.run.exitCode,
+      terminationReason: context.run.terminationReason,
+      executionCallback: context.executionCallback,
+      verification: compactVerification(verification),
+      finalText: finalTextFrom(context),
+      ...(workflow.name === "plan" ? { requireFinalText: true } : {})
+    }),
+    context,
+    workflow.writesAllowed,
+    changedFiles,
+    workflow.name
+  );
 
   const report = createComposeReport({
     id: context.job.id,
@@ -501,6 +424,7 @@ function collectChangedFiles(
 ): string[] {
   const diffFiles = context.diff?.changedFiles ?? [];
   const commitFiles = context.commitChanges?.changedFiles ?? [];
+  const eventFiles = collectChangedFilesFromEvents(context.events);
   if (!writesAllowed) {
     const statusFiles = detectReadOnlyViolationFiles(
       false,
@@ -508,12 +432,36 @@ function collectChangedFiles(
       context.gitStatusBefore,
       context.gitStatusAfter
     );
-    return mergeChangedFiles(statusFiles, commitFiles);
+    return mergeChangedFiles(statusFiles, commitFiles, eventFiles);
   }
   const newStatusFiles = context.gitStatusBefore && context.gitStatusAfter
     ? detectNewFilesFromStatus(context.gitStatusBefore, context.gitStatusAfter)
     : [];
-  return mergeChangedFiles(diffFiles, commitFiles, newStatusFiles);
+  return mergeChangedFiles(diffFiles, commitFiles, newStatusFiles, eventFiles);
+}
+
+function applyReadOnlyViolation(
+  outcome: JobOutcome,
+  context: JobExecutionFinalizeContext,
+  writesAllowed: boolean,
+  changedFiles: string[],
+  label: string
+): JobOutcome {
+  if (writesAllowed || !hasReadOnlyViolation(context, changedFiles)) return outcome;
+  if (outcome.errorCode?.startsWith("callback_")) return outcome;
+  const error = readOnlyViolationError(
+    label,
+    changedFiles,
+    context.gitHeadBefore,
+    context.gitHeadAfter
+  );
+  return {
+    ...outcome,
+    status: "failed",
+    summary: error,
+    error,
+    errorCode: "read_only_violation"
+  };
 }
 
 function hasReadOnlyViolation(context: JobExecutionFinalizeContext, changedFiles: string[]): boolean {
@@ -537,8 +485,4 @@ function composeReportStatus(
   if (outcome.status !== "completed") return "failed";
   if (verification.length === 0 && changedFiles.length > 0) return "needs_review";
   return "passed";
-}
-
-function defaultComposeTask(workflow: ComposeWorkflowName): string {
-  return `Run ${workflow} workflow.`;
 }

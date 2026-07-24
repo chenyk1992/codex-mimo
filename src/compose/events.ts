@@ -13,17 +13,6 @@ export interface NormalizedMimoEvent {
   raw: unknown;
 }
 
-interface EventSummary {
-  messages: number;
-  tools: number;
-  diffs: number;
-  errors: number;
-  progress: number;
-  raw: number;
-  lastEvent?: string;
-  lastTool?: string;
-}
-
 export function parseMimoJsonLines(stdout: string): NormalizedMimoEvent[] {
   const events: NormalizedMimoEvent[] = [];
   for (const line of stdout.split(/\r?\n/)) {
@@ -83,11 +72,13 @@ export function normalizeMimoEvent(raw: unknown): NormalizedMimoEvent {
     const part = raw.part;
     if (isRecord(part) && stringValue(part.type) === "tool") {
       const state = isRecord(part.state) ? part.state : undefined;
+      const toolName = stringValue(part.tool ?? part.name ?? part.toolName);
       return {
         type: "tool",
-        toolName: stringValue(part.tool ?? part.name ?? part.toolName),
+        toolName,
         status: stringValue(state?.status ?? part.status),
         text: nestedToolCommandText(part),
+        path: nestedToolFilePath(part, toolName),
         raw
       };
     }
@@ -103,22 +94,6 @@ export function normalizeMimoEvent(raw: unknown): NormalizedMimoEvent {
   }
 
   return { type: "raw", raw };
-}
-
-export function summarizeEvents(events: NormalizedMimoEvent[]): EventSummary {
-  const last = [...events].reverse().find((event) => event.type !== "usage");
-  const lastTool = [...events].reverse().find((event) => event.type === "tool" && event.toolName);
-
-  return {
-    messages: events.filter((event) => event.type === "message").length,
-    tools: events.filter((event) => event.type === "tool").length,
-    diffs: events.filter((event) => event.type === "diff").length,
-    errors: events.filter((event) => event.type === "error").length,
-    progress: events.filter((event) => event.type === "progress").length,
-    raw: events.filter((event) => event.type === "raw").length,
-    lastEvent: last ? describeEvent(last) : undefined,
-    lastTool: lastTool?.toolName
-  };
 }
 
 export function extractSessionIdFromRawLine(line: string): string | null {
@@ -142,19 +117,28 @@ export function extractToolNameFromRawLine(line: string): string | undefined {
   }
 }
 
-export function extractSessionIdFromEvents(events: NormalizedMimoEvent[]): string | null {
-  for (const event of events) {
-    const sessionId = extractSessionId(event.raw);
-    if (sessionId) return sessionId;
-  }
-  return null;
-}
-
 export function extractFinalText(events: NormalizedMimoEvent[]): string {
   return [...events]
     .reverse()
     .find((event) => event.type === "message" && event.text?.trim())
     ?.text?.trim() ?? "";
+}
+
+/** Paths from write/edit/apply_patch tool_use events (and explicit diff events). */
+export function collectChangedFilesFromEvents(events: readonly NormalizedMimoEvent[]): string[] {
+  const files: string[] = [];
+  for (const event of events) {
+    if (event.type === "diff" && event.path?.trim()) {
+      files.push(event.path.trim());
+      continue;
+    }
+    if (event.type !== "tool") continue;
+    const tool = event.toolName?.toLowerCase();
+    if (tool !== "write" && tool !== "edit" && tool !== "apply_patch") continue;
+    const filePath = event.path?.trim();
+    if (filePath) files.push(filePath);
+  }
+  return [...new Set(files)];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -195,21 +179,26 @@ function nestedToolCommandText(part: Record<string, unknown>): string | undefine
   return stringValue(input.command ?? input.file_path ?? input.filepath ?? input.filePath ?? input.path);
 }
 
+function nestedToolFilePath(
+  part: Record<string, unknown>,
+  toolName: string | undefined
+): string | undefined {
+  const tool = toolName?.toLowerCase();
+  if (tool !== "write" && tool !== "edit" && tool !== "apply_patch" && tool !== "read") {
+    return undefined;
+  }
+  const state = part.state;
+  if (!isRecord(state)) return undefined;
+  const input = state.input;
+  if (!isRecord(input)) return undefined;
+  return stringValue(input.file_path ?? input.filepath ?? input.filePath ?? input.path);
+}
+
 function errorText(raw: Record<string, unknown>): string | undefined {
   const direct = stringValue(raw.error ?? raw.message);
   if (direct) return direct;
   const part = raw.part;
   return isRecord(part) ? stringValue(part.message ?? part.text) : undefined;
-}
-
-function describeEvent(event: NormalizedMimoEvent): string {
-  if (event.type === "tool") return `tool:${event.toolName ?? "unknown"}${event.status ? `:${event.status}` : ""}`;
-  if (event.type === "progress") return event.progressKind ?? "progress";
-  if (event.type === "message") return "message";
-  if (event.type === "error") return "error";
-  if (event.type === "diff") return `diff:${event.path ?? "unknown"}`;
-  if (event.type === "usage") return "usage";
-  return "raw";
 }
 
 function extractSessionId(value: unknown): string | null {

@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MIMO_TOOL_NAMES } from "../codex/tool-names.js";
+import { errorMessage } from "../core/errors.js";
 import { buildMimoProbeEnvironment, resolveMimoProcessSelection } from "../mimo/run-json.js";
 import { DOCTOR_HINT } from "./hints.js";
 import { probeCodexCommand, type CodexCommandProbe } from "../notify/codex-command.js";
@@ -169,7 +170,7 @@ async function defaultCheckMimoVersion(cwd: string): Promise<DoctorCheck> {
     }
     return { ok: true, version: result.stdout.trim() };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    return { ok: false, error: errorMessage(error) };
   }
 }
 
@@ -209,7 +210,7 @@ function readMcpConfig(pluginRoot: string): RawMcpConfigCheck {
   } catch (error) {
     return {
       ok: false,
-      report: { ok: false, error: error instanceof Error ? error.message : String(error) }
+      report: { ok: false, error: errorMessage(error) }
     };
   }
 }
@@ -251,7 +252,7 @@ async function probeToolsIfPossible(
       expectedTools: [...MIMO_TOOL_NAMES],
       missingTools: [...MIMO_TOOL_NAMES],
       unexpectedTools: [],
-      error: error instanceof Error ? error.message : String(error)
+      error: errorMessage(error)
     };
   }
 }
