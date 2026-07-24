@@ -2,7 +2,6 @@ import { execa } from "execa";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { errorMessage } from "../core/errors.js";
 
 export interface GitFileFingerprint {
   status: string;
@@ -155,7 +154,7 @@ export async function captureGitDiff(
     };
   } catch (error) {
     throw new Error(
-      `Git diff capture failed for base ${base}: ${errorMessage(error)}`,
+      `Git diff capture failed for base ${base}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error }
     );
   }

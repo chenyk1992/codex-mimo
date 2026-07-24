@@ -14,6 +14,10 @@ export const COMPOSE_WORKFLOW_NAMES = [
 
 export type ComposeWorkflowName = typeof COMPOSE_WORKFLOW_NAMES[number];
 
+export function composeWorkflowUsage(): string {
+  return COMPOSE_WORKFLOW_NAMES.join("|");
+}
+
 export interface ComposeWorkflow {
   name: ComposeWorkflowName;
   description: string;
@@ -146,6 +150,10 @@ export function getComposeWorkflow(name: string): ComposeWorkflow {
   return workflows[name as ComposeWorkflowName];
 }
 
+export function listComposeWorkflows(): ComposeWorkflow[] {
+  return Object.values(workflows);
+}
+
 export function validateComposeWorkflowInput(input: ComposeWorkflowInput): string[] {
   const workflow = getComposeWorkflow(input.workflow);
   const issues: string[] = [];
@@ -191,7 +199,7 @@ export function buildComposePrompt(input: BuildComposePromptInput): string {
     lines.push("- Stop exploring and start writing the plan as soon as you have enough context to identify files and interfaces.");
     lines.push("- Intermediate analysis (code reviews, file surveys) must feed into the plan, not replace it.");
     lines.push("- If you cannot complete the full plan, output a partial plan with clear gaps listed.");
-    lines.push("- Return the plan in your final response (required for mimo_result.output). You may also save plan artifacts under `.mimocode/`; do not write project docs, reports, notes, or code outside `.mimocode/`.");
+    lines.push("- Return the plan in your final response only. Do not save plan files, project docs, reports, or notes to disk.");
     lines.push("- Do not invoke compose:execute, compose:subagent, compose:tdd, compose:verify, compose:report, or any implementation handoff.");
     lines.push("- Do not run implementation steps or commit, even if the compose:plan skill suggests frequent commits or execution handoff.");
   }
@@ -213,7 +221,7 @@ export function buildComposePrompt(input: BuildComposePromptInput): string {
 
   if (!workflow.writesAllowed) {
     lines.push("");
-    lines.push("This workflow is read-only for project files. Do not modify project files; writes under `.mimocode/` are allowed.");
+    lines.push("This workflow is read-only. Do not modify files.");
   }
 
   return lines.join("\n");

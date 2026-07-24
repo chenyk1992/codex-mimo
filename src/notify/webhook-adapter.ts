@@ -9,7 +9,6 @@ import type {
 } from "../core/jobs.js";
 import type { DeliveryAttemptResult, NotificationDelivery } from "./types.js";
 import { publicProgressSummary } from "../core/public-summary.js";
-import { DEFAULT_NOTIFICATION_ATTEMPT_TIMEOUT_MS } from "../core/job-timeouts.js";
 
 export interface NotificationPayload {
   version: 1;
@@ -28,6 +27,8 @@ export interface NotificationPayload {
     reportPaths: JobReportPaths;
   };
 }
+
+const DEFAULT_WEBHOOK_TIMEOUT_MS = 10_000;
 
 export interface WebhookAttemptOptions {
   signal?: AbortSignal;
@@ -134,7 +135,7 @@ function createDeadline(options: WebhookAttemptOptions): {
   const controller = new AbortController();
   const schedule = options.scheduleTimeout ?? defaultScheduleTimeout;
   const cancel = options.cancelTimeout ?? defaultCancelTimeout;
-  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_NOTIFICATION_ATTEMPT_TIMEOUT_MS);
+  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_WEBHOOK_TIMEOUT_MS);
   const onParentAbort = () => controller.abort();
   let rejectExpired!: (error: Error) => void;
   const expired = new Promise<never>((_resolve, reject) => { rejectExpired = reject; });

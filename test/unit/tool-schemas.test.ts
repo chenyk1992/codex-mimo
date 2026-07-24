@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { z } from "zod";
 import {
   ComposeInput,
+  ComposeInputShape,
   FixCiInput,
   ImplementInput,
   JobCancelInput,
   JobEventsInput,
   JobListInput,
+  JobOptionsSchema,
   JobResultInput,
   JobStatusInput,
   NotifySchema,
@@ -16,45 +17,33 @@ import {
   JobWaitInput,
   ReviewInput
 } from "../../src/codex/tool-schemas.js";
-import { JobRequestBaseSchema } from "../../src/core/job-schemas.js";
 
 const forbidden = [
   "background", "wait", "pollMs", "agent", "allowInstall",
   "session", "attach", "fork", "continue", "dryRun"
 ] as const;
 
-function objectShape(schema: z.ZodTypeAny): Record<string, z.ZodTypeAny> {
-  let current: z.ZodTypeAny = schema;
-  while (current instanceof z.ZodEffects) {
-    current = current._def.schema;
-  }
-  if (!(current instanceof z.ZodObject)) {
-    throw new Error("Expected an object schema");
-  }
-  return current.shape;
-}
-
 describe("work tool schemas", () => {
-  it("accepts only the common job request fields", () => {
-    expect(Object.keys(JobRequestBaseSchema.shape).sort()).toEqual([
-      "cwd", "idleTimeoutMs", "model", "timeoutMs"
+  it("accepts only the common job options", () => {
+    expect(Object.keys(JobOptionsSchema.shape).sort()).toEqual([
+      "cwd", "idleTimeoutMs", "model", "notify", "timeoutMs"
     ]);
   });
 
-  it("defaults idleTimeoutMs to 90 seconds when omitted", () => {
-    expect(JobRequestBaseSchema.parse({ cwd: "E:/project" }).idleTimeoutMs).toBe(90_000);
-    expect(PlanInput.parse({ cwd: "E:/project", task: "Plan" }).idleTimeoutMs).toBe(90_000);
+  it("defaults idleTimeoutMs to 30 minutes when omitted", () => {
+    expect(JobOptionsSchema.parse({ cwd: "E:/project" }).idleTimeoutMs).toBe(1_800_000);
+    expect(PlanInput.parse({ cwd: "E:/project", task: "Plan" }).idleTimeoutMs).toBe(1_800_000);
     expect(ImplementInput.parse({ cwd: "E:/project", task: "Build", allowWrite: true }).idleTimeoutMs)
-      .toBe(90_000);
+      .toBe(1_800_000);
   });
 
   it("accepts idleTimeoutMs of 0 to disable idle stop-loss", () => {
-    expect(JobRequestBaseSchema.parse({ cwd: "E:/project", idleTimeoutMs: 0 }).idleTimeoutMs).toBe(0);
+    expect(JobOptionsSchema.parse({ cwd: "E:/project", idleTimeoutMs: 0 }).idleTimeoutMs).toBe(0);
     expect(PlanInput.parse({ cwd: "E:/project", task: "Plan", idleTimeoutMs: 0 }).idleTimeoutMs).toBe(0);
   });
 
   it("rejects negative idleTimeoutMs", () => {
-    expect(() => JobRequestBaseSchema.parse({ cwd: "E:/project", idleTimeoutMs: -1 })).toThrow();
+    expect(() => JobOptionsSchema.parse({ cwd: "E:/project", idleTimeoutMs: -1 })).toThrow();
     expect(() => PlanInput.parse({ cwd: "E:/project", task: "Plan", idleTimeoutMs: -1 })).toThrow();
   });
 
@@ -88,16 +77,13 @@ describe("work tool schemas", () => {
     expect(Object.keys(ReviewInput.shape).sort()).toEqual(["base", "cwd", "idleTimeoutMs", "model", "notify", "timeoutMs"]);
     expect(Object.keys(FixCiInput.shape).sort()).toEqual(["cwd", "file", "idleTimeoutMs", "model", "notify", "task", "timeoutMs"]);
     expect(Object.keys(ResumeInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "jobId", "model", "notify", "task", "timeoutMs"]);
-    expect(Object.keys(objectShape(ComposeInput)).sort()).toEqual([
+    expect(Object.keys(ComposeInputShape).sort()).toEqual([
       "cwd", "file", "idleTimeoutMs", "model", "notify", "reportDir", "since", "task", "timeoutMs", "verification", "workflow"
     ]);
   });
 
-  it("rejects allowWrite values other than true at parse time", () => {
-    expect(() => ImplementInput.parse({ cwd: "E:/project", task: "Build", allowWrite: false })).toThrow();
-  });
-
   it("enforces workflow requirements at the public parser while keeping an MCP object schema", () => {
+    expect(ComposeInput.shape).toEqual(ComposeInputShape);
     expect(() => parseComposeInput({ cwd: "E:/project", workflow: "dev" }))
       .toThrow(/requires a task/i);
     expect(() => parseComposeInput({ cwd: "E:/project", workflow: "fix-ci" }))
@@ -118,7 +104,7 @@ describe("work tool schemas", () => {
   });
 
   it("describes verification as executable no-shell commands, not acceptance criteria", () => {
-    const verification = objectShape(ComposeInput).verification;
+    const verification = ComposeInputShape.verification;
     const fieldDescription = verification.description ?? "";
     const itemDescription = verification._def.innerType.element.description ?? "";
     const combined = `${fieldDescription} ${itemDescription}`.toLowerCase();

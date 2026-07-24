@@ -30,24 +30,11 @@ The eight statuses are `queued`, `running`, `needs_input`, `blocked`, `completed
 
 ### Idle stop-loss
 
-Every work request may include optional `idleTimeoutMs` (default **90 seconds**; `0` disables idle stop-loss). Absolute `timeoutMs` remains 30 minutes by default; whichever budget fires first wins. The idle clock measures silence since the last stdout JSONL line; `lastEventAt` is set on run start so boot is not immediately idle.
+Every work request may include optional `idleTimeoutMs` (default 30 minutes; `0` disables idle stop-loss). Absolute `timeoutMs` is unchanged; whichever budget fires first wins. The idle clock measures silence since the last stdout JSONL line; `lastEventAt` is set on run start so boot is not immediately idle.
 
 When silence exceeds the budget, the worker kills the MiMo process tree and finalizes as `timeout` with `errorCode: idle_timeout` (distinct from absolute run-budget timeout, which keeps `errorCode: timeout`). This emits an attention signal and enqueues outbox delivery like other terminal attention events.
 
 Long workflows such as `parallel` may need a raised `idleTimeoutMs` when subagents can run for extended periods without JSONL.
-
-### Terminal artifacts on every exit
-
-On success, failure, cancel, idle timeout, and phase-oscillation pause, the worker merges `changedFiles` from:
-
-1. `write` / `edit` / `apply_patch` paths in persisted JSONL events
-2. Git status/diff snapshots
-
-Compose jobs still run verification commands when configured; results are written even when the outcome is not `completed`.
-
-### Phase oscillation → `needs_input`
-
-When MiMo alternates between the same phase pair (for example `verifying` ↔ `investigating`) at least four times, the worker stops the process, finalizes partial `changedFiles`, and transitions to `needs_input` with `errorCode: phase_oscillation`. Callers should `mimo_wait` / `mimo_events`, then `mimo_resume` with an adjudicating task or `mimo_cancel`.
 
 Distinguish wakeup paths:
 

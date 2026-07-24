@@ -1,20 +1,86 @@
 import { z } from "zod";
-import { DEFAULT_WAIT_TIMEOUT_MS } from "../core/job-timeouts.js";
+import {
+  COMPOSE_WORKFLOW_NAMES,
+  validateComposeWorkflowInput
+} from "../compose/workflow.js";
 
-export {
-  ComposeInput,
-  FixCiInput,
-  ImplementInput,
-  NotifySchema,
-  PlanInput,
-  parseComposeInput,
-  ResumeInput,
-  ReviewInput
-} from "../core/job-schemas.js";
+const CodexNotifySchema = z.object({
+  type: z.literal("codex"),
+  threadId: z.string().trim().min(1).describe("Originating Codex task ID")
+}).strict();
+
+const WebhookNotifySchema = z.object({
+  type: z.literal("webhook"),
+  url: z.string().min(1),
+  secretEnv: z.string().min(1)
+}).strict();
+
+export const NotifySchema = z.discriminatedUnion("type", [CodexNotifySchema, WebhookNotifySchema]);
+
+export const JobOptionsSchema = z.object({
+  cwd: z.string().min(1),
+  model: z.string().min(1).optional(),
+  timeoutMs: z.number().int().positive().default(1_800_000),
+  idleTimeoutMs: z.number().int().min(0).default(1_800_000),
+  notify: NotifySchema.optional()
+}).strict();
+
+export const PlanInput = JobOptionsSchema.extend({
+  task: z.string().min(1)
+}).strict();
+
+export const ImplementInput = JobOptionsSchema.extend({
+  task: z.string().min(1),
+  allowWrite: z.boolean()
+}).strict();
+
+export const ReviewInput = JobOptionsSchema.extend({
+  base: z.string().min(1).default("HEAD")
+}).strict();
+
+export const FixCiInput = JobOptionsSchema.extend({
+  file: z.string().min(1),
+  task: z.string().min(1).optional()
+}).strict();
+
+export const ResumeInput = JobOptionsSchema.extend({
+  jobId: z.string().min(1),
+  task: z.string().min(1)
+}).strict();
 
 export const HealthcheckInput = z.object({
   cwd: z.string().optional()
 }).strict();
+
+export const ComposeWorkflowSchema = z.enum(COMPOSE_WORKFLOW_NAMES);
+
+export const ComposeInputShape = {
+  ...JobOptionsSchema.shape,
+  workflow: ComposeWorkflowSchema,
+  task: z.string().min(1).optional(),
+  file: z.string().min(1).optional(),
+  since: z.string().min(1).optional(),
+  verification: z.array(
+    z.string().trim().min(1).describe(
+      "One executable command with arguments; commands run without a shell"
+    )
+  ).optional().describe(
+    "Executable verification commands, not natural-language acceptance criteria"
+  ),
+  reportDir: z.string().min(1).optional()
+};
+
+export const ComposeInput = z.object(ComposeInputShape).strict();
+
+const ComposeInputWithWorkflowRequirements = ComposeInput.superRefine((input, context) => {
+  for (const message of validateComposeWorkflowInput(input)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message });
+  }
+});
+
+export function parseComposeInput(input: unknown): z.infer<typeof ComposeInput> {
+  return ComposeInputWithWorkflowRequirements.parse(input);
+}
 
 export const JobStatusInput = z.object({
   cwd: z.string().min(1),
@@ -30,7 +96,7 @@ export const JobEventsInput = z.object({
 }).strict();
 
 export const JobWaitInput = JobEventsInput.extend({
-  timeoutMs: z.number().int().positive().default(DEFAULT_WAIT_TIMEOUT_MS),
+  timeoutMs: z.number().int().positive().default(1_800_000),
   // Wait must see completed/cancelled attention signals (level "info" in job-transition).
   minLevel: z.enum(["debug", "info", "warn", "error"]).default("info")
 }).strict();

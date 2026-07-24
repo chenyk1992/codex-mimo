@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import {
   bindJobDefinition,
   type BoundJobDefinition,
@@ -14,7 +13,7 @@ import {
   type JobTransition,
   type JobTransitionResult
 } from "./job-transition.js";
-import { isTerminalJobStatus, nowIso, type JobRecord, type JobStatus } from "./jobs.js";
+import { nowIso, type JobRecord, type JobStatus } from "./jobs.js";
 import {
   captureGitCommitChanges,
   captureGitDiff,
@@ -35,7 +34,6 @@ import {
 } from "../mimo/streaming-runner.js";
 import {
   captureProcessIdentity,
-  resolveJobWorkerOwnershipKey,
   terminateOwnedJobProcess,
   type OwnedProcessTermination
 } from "./job-process.js";
@@ -44,24 +42,16 @@ import { spawnNotificationWorker } from "./job-process.js";
 import type { NormalizedMimoEvent } from "../compose/events.js";
 import {
   extractSessionIdFromRawLine,
-  extractToolNameFromRawLine,
-  parseMimoJsonLines
+  extractToolNameFromRawLine
 } from "../compose/events.js";
 import {
   ProcessLockUnavailableError,
   resolveProcessLockEndpoint,
   withProcessLock
 } from "./process-lock.js";
+import { resolveJobWorkerOwnershipKey } from "./worker-ownership.js";
 import { isRuntimeArtifactPath } from "./runtime-paths.js";
 import type { PublicSummaryContext } from "./public-summary.js";
-import { captureTerminalArtifacts } from "./job-artifacts.js";
-import type { PhaseOscillationResult } from "../compose/phase-loop.js";
-import { errorMessage } from "./errors.js";
-import { sleep as defaultSleep } from "./sleep.js";
-import {
-  readRequestIdleTimeoutMs,
-  readRequestTimeoutMs
-} from "./job-timeouts.js";
 
 export interface JobWorkerDependencies {
   bindJobDefinition?: (job: JobRecord) => BoundJobDefinition;
@@ -85,6 +75,15 @@ export interface JobWorkerDependencies {
 }
 
 type WorkerStage = "starting" | "prompt" | "hook" | "run" | "callback" | "finalize";
+
+const TERMINAL_STATUSES = new Set<JobStatus>([
+  "needs_input",
+  "blocked",
+  "completed",
+  "failed",
+  "cancelled",
+  "timeout"
+]);
 
 export async function runJobWorker(
   cwd: string,
@@ -117,7 +116,7 @@ async function runOwnedJobWorker(
   if (recovered?.deliveryCreated) startNotificationWorker(cwd, recovered.job, deps);
 
   const initial = requireJob(cwd, jobId);
-  if (isTerminalJobStatus(initial.status)) return;
+  if (TERMINAL_STATUSES.has(initial.status)) return;
 
   const transition = deps.transitionJob ?? transitionJob;
   if (initial.status === "running") {
@@ -195,8 +194,12 @@ async function runOwnedJobWorker(
         onAbandonedResolve: async (lateHook) => {
           try {
             await lateHook.close();
-          } catch {
-            bestEffortJobLog(cwd, jobId);
+          } catch (error) {
+            bestEffortJobLog(
+              cwd,
+              jobId,
+              `Failed to close late MiMoCode callback controller: ${errorMessage(error)}`
+            );
           }
         }
       }
@@ -204,22 +207,11 @@ async function runOwnedJobWorker(
     assertJobActive(cwd, jobId, executionGuard.signal);
 
     const events: NormalizedMimoEvent[] = [];
-    let phaseOscillation: PhaseOscillationResult | undefined;
-    const queueEventWrite = (action: () => Promise<
-      | NormalizedMimoEvent
-      | { event: NormalizedMimoEvent; oscillation?: PhaseOscillationResult }
-      | undefined
-    >) => {
+    const queueEventWrite = (action: () => Promise<NormalizedMimoEvent | undefined>) => {
       eventWrites = eventWrites.then(async () => {
         try {
           const result = await action();
-          if (!result) return;
-          const event = "raw" in result ? result : result.event;
-          if (event && "raw" in event) events.push(event);
-          if (result && "oscillation" in result && result.oscillation?.oscillating) {
-            phaseOscillation ??= result.oscillation;
-            executionGuard?.abort("needs_input");
-          }
+          if (result && "raw" in result) events.push(result);
         } catch (error) {
           eventWriteError ??= error;
         }
@@ -231,8 +223,8 @@ async function runOwnedJobWorker(
     let processTerminationConfirmed = false;
     try {
       run = await (deps.runMimoStreaming ?? runMimoCliStreaming)(cwd, mimoArgs, {
-          timeoutMs: readRequestTimeoutMs(initial.request),
-          idleTimeoutMs: readRequestIdleTimeoutMs(initial.request),
+          timeoutMs: readTimeout(initial.request),
+          idleTimeoutMs: readIdleTimeout(initial.request),
           env: hook.env,
           omitEnv: listWebhookSecretEnvironmentNames(cwd),
           signal: executionGuard.signal,
@@ -277,60 +269,37 @@ async function runOwnedJobWorker(
         await (deps.updateRunningJobProcess ?? updateRunningJobProcess)(cwd, jobId, null, null);
       }
     }
-    try {
-      await awaitWithAbort(eventWrites, executionGuard.signal);
-    } catch {
-      // Cancellation/oscillation aborts auxiliary event persistence without holding ownership.
-    }
-    if (eventWriteError) throw eventWriteError;
-
-    if (phaseOscillation?.oscillating) {
-      executionGuard.stop();
-      const artifacts = await captureTerminalArtifacts(cwd, events, {
-        captureDiff: deps.captureDiff ?? captureGitDiff
-      });
-      const pair = phaseOscillation.pair?.join(" ↔ ") ?? "phase";
-      const paused = await transitionRecoverably(cwd, jobId, {
-        status: "needs_input",
-        summary:
-          `MiMoCode phase oscillation detected (${pair}, ${phaseOscillation.flipCount} flips). ` +
-          "Resume with adjudication or cancel.",
-        errorCode: "phase_oscillation",
-        changedFiles: artifacts.changedFiles
-      }, deps);
-      if (paused.deliveryCreated) startNotificationWorker(cwd, paused.job, deps);
-      return;
-    }
-
     if (requireJob(cwd, jobId).cancellationRequestedAt) {
       executionGuard.stop();
-      const artifacts = await captureTerminalArtifacts(cwd, events, {
-        captureDiff: deps.captureDiff ?? captureGitDiff
-      });
       const cancelled = await transitionRecoverably(cwd, jobId, {
         status: "cancelled",
         summary: `Cancelled ${jobId}.`,
-        errorCode: "cancelled",
-        changedFiles: artifacts.changedFiles
+        errorCode: "cancelled"
       }, deps);
       if (cancelled.deliveryCreated) startNotificationWorker(cwd, cancelled.job, deps);
       return;
     }
+    await awaitWithAbort(eventWrites, executionGuard.signal);
+    if (eventWriteError) throw eventWriteError;
 
     assertJobActive(cwd, jobId, executionGuard.signal);
 
     stage = "callback";
     const callbackEvidence = toExecutionCallbackEvidence(
       hook.invocationId,
-      await awaitWithAbort(hook.waitForCallback(), executionGuard.signal)
+      await waitForExecutionCallback(hook, executionGuard.signal)
     );
     const completedHook = hook;
     hook = undefined;
     try {
       await awaitWithAbort(completedHook.close(), executionGuard.signal);
-    } catch {
+    } catch (error) {
       executionGuard.signal.throwIfAborted();
-      bestEffortJobLog(cwd, jobId);
+      bestEffortJobLog(
+        cwd,
+        jobId,
+        `Failed to close MiMoCode callback controller: ${errorMessage(error)}`
+      );
     }
     assertJobActive(cwd, jobId, executionGuard.signal);
 
@@ -400,13 +369,24 @@ async function runOwnedJobWorker(
           hook.close(),
           executionGuard?.signal ?? new AbortController().signal
         );
-      } catch {
+      } catch (error) {
         if (!executionGuard?.signal.aborted) {
-          bestEffortJobLog(cwd, jobId);
+          bestEffortJobLog(
+            cwd,
+            jobId,
+            `Failed to close MiMoCode callback controller: ${errorMessage(error)}`
+          );
         }
       }
     }
   }
+}
+
+async function waitForExecutionCallback(
+  hook: HookCallbackController,
+  signal: AbortSignal
+): Promise<Awaited<ReturnType<HookCallbackController["waitForCallback"]>>> {
+  return awaitWithAbort(hook.waitForCallback(), signal);
 }
 
 interface AbortAwareAwaitOptions<T> {
@@ -519,7 +499,7 @@ async function failWorker(
   deps: JobWorkerDependencies
 ): Promise<void> {
   let existing = requireJob(cwd, jobId);
-  if (isTerminalJobStatus(existing.status)) {
+  if (TERMINAL_STATUSES.has(existing.status)) {
     const recovered = await (deps.recoverPendingTransition ?? recoverPendingTransition)(cwd, jobId);
     if (recovered?.deliveryCreated) startNotificationWorker(cwd, recovered.job, deps);
     return;
@@ -532,38 +512,32 @@ async function failWorker(
   }
 
   if (existing.cancellationRequestedAt) {
-    const artifacts = await captureTerminalArtifactsBestEffort(cwd, existing, deps);
     const cancelled = await transitionRecoverably(cwd, jobId, {
       status: "cancelled",
       summary: `Cancelled ${jobId}.`,
-      errorCode: "cancelled",
-      ...(artifacts.changedFiles.length > 0 ? { changedFiles: artifacts.changedFiles } : {})
+      errorCode: "cancelled"
     }, deps);
     if (cancelled.deliveryCreated) startNotificationWorker(cwd, cancelled.job, deps);
     return;
   }
 
   if (jobDeadlineExpired(existing)) {
-    const artifacts = await captureTerminalArtifactsBestEffort(cwd, existing, deps);
     const timedOut = await transitionRecoverably(cwd, jobId, {
       status: "timeout",
       summary: "MiMoCode job timed out.",
       error: "MiMoCode job timed out.",
-      errorCode: "timeout",
-      ...(artifacts.changedFiles.length > 0 ? { changedFiles: artifacts.changedFiles } : {})
+      errorCode: "timeout"
     }, deps);
     if (timedOut.deliveryCreated) startNotificationWorker(cwd, timedOut.job, deps);
     return;
   }
 
   const message = errorMessage(error);
-  const artifacts = await captureTerminalArtifactsBestEffort(cwd, existing, deps);
   const failure: JobTransition = {
     status: "failed",
     summary: `${stageLabel(stage)}: ${message}`,
     error: `${stageLabel(stage)}: ${message}`,
-    errorCode: stageErrorCode(stage),
-    ...(artifacts.changedFiles.length > 0 ? { changedFiles: artifacts.changedFiles } : {})
+    errorCode: stageErrorCode(stage)
   };
   let result: JobTransitionResult;
   try {
@@ -637,32 +611,34 @@ async function recoverOwnedProcess(
   }
 }
 
+function readTimeout(request: unknown): number {
+  if (typeof request !== "object" || request === null || Array.isArray(request)) return 1_800_000;
+  const timeoutMs = (request as Record<string, unknown>).timeoutMs;
+  return typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : 1_800_000;
+}
+
+function readIdleTimeout(request: unknown): number {
+  if (typeof request !== "object" || request === null || Array.isArray(request)) {
+    return 1_800_000;
+  }
+  const value = (request as Record<string, unknown>).idleTimeoutMs;
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0 && Number.isInteger(value)) {
+    return value;
+  }
+  return 1_800_000;
+}
+
 function jobDeadlineExpired(job: JobRecord, now = Date.now()): boolean {
   const startedAt = Date.parse(job.startedAt ?? "");
-  return Number.isFinite(startedAt) && now - startedAt >= readRequestTimeoutMs(job.request);
+  return Number.isFinite(startedAt) && now - startedAt >= readTimeout(job.request);
 }
 
 function requireJob(cwd: string, jobId: string): JobRecord {
   const job = readJob(cwd, jobId);
   if (!job) throw new Error(`Job not found: ${jobId}`);
   return job;
-}
-
-async function captureTerminalArtifactsBestEffort(
-  cwd: string,
-  job: JobRecord,
-  deps: JobWorkerDependencies
-): Promise<{ changedFiles: string[] }> {
-  try {
-    const events = fs.existsSync(job.eventsFile)
-      ? parseMimoJsonLines(fs.readFileSync(job.eventsFile, "utf8"))
-      : [];
-    return await captureTerminalArtifacts(cwd, events, {
-      captureDiff: deps.captureDiff ?? captureGitDiff
-    });
-  } catch {
-    return { changedFiles: [] };
-  }
 }
 
 function stageLabel(stage: WorkerStage): string {
@@ -689,6 +665,10 @@ function stageErrorCode(stage: WorkerStage): string {
   return codes[stage];
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function bestEffortLog(file: string, context: PublicSummaryContext): void {
   try {
     appendJobLogLine(file, context);
@@ -697,13 +677,17 @@ function bestEffortLog(file: string, context: PublicSummaryContext): void {
   }
 }
 
-function bestEffortJobLog(cwd: string, jobId: string): void {
+function bestEffortJobLog(cwd: string, jobId: string, _message: string): void {
   try {
     const job = readJob(cwd, jobId);
     if (job) bestEffortLog(job.logFile, { type: "diagnostic" });
   } catch {
     // Closing an auxiliary callback server must never replace the worker result.
   }
+}
+
+function defaultSleep(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 function withoutRuntimeStatus(status: GitStatusSnapshot): GitStatusSnapshot {

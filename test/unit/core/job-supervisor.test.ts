@@ -15,7 +15,7 @@ import { withProcessLock } from "../../../src/core/process-lock.js";
 import {
   resolveJobWorkerOwnershipKey,
   resolveNotificationWorkerOwnershipKey
-} from "../../../src/core/job-process.js";
+} from "../../../src/core/worker-ownership.js";
 import { readDeliveries } from "../../../src/notify/outbox.js";
 import type { NotificationDelivery } from "../../../src/notify/types.js";
 import { runJobSupervisor } from "../../../src/core/job-supervisor.js";

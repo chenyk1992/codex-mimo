@@ -2,10 +2,11 @@ import type {
   JobNotificationStatus,
   JobRecord,
   JobResult,
-  JobStatusResult
+  JobStatusResult,
+  JobVerification
 } from "./jobs.js";
 import { isNotificationErrorCode } from "../notify/types.js";
-import { publicProgressSummary, toPublicExecutionCallback } from "./public-summary.js";
+import { publicProgressSummary } from "./public-summary.js";
 
 function elapsedMs(job: JobRecord, nowMs = Date.now()): number | null {
   const start = Date.parse(job.startedAt ?? job.createdAt);
@@ -52,7 +53,7 @@ export function renderJobStatus(
     }),
     changedFiles: [...job.changedFiles],
     ...(job.cancellationRequestedAt ? { cancellationRequested: true as const } : {}),
-    ...(job.executionCallback ? { executionCallback: toPublicExecutionCallback(job.executionCallback) } : {}),
+    ...(job.executionCallback ? { executionCallback: publicExecutionCallback(job) } : {}),
     progress: (options.progress ?? []).map(() => publicProgressSummary({
       type: "job",
       status: job.status,
@@ -89,13 +90,8 @@ export function renderJobResult(
     }),
     sessionId: job.sessionId ?? null,
     changedFiles: [...job.changedFiles],
-    verification: job.verification.map(({ command, exitCode, passed, durationMs }) => ({
-      command,
-      exitCode,
-      passed,
-      ...(durationMs === undefined ? {} : { durationMs })
-    })),
-    ...(job.executionCallback ? { executionCallback: toPublicExecutionCallback(job.executionCallback) } : {}),
+    verification: job.verification.map(compactVerification),
+    ...(job.executionCallback ? { executionCallback: publicExecutionCallback(job) } : {}),
     ...(job.error
       ? {
           error: publicProgressSummary({
@@ -114,6 +110,19 @@ export function renderJobResult(
       events: "mimo_events",
       ...(partial ? { resume: "mimo_resume" as const } : {})
     }
+  };
+}
+
+function publicExecutionCallback(job: JobRecord): NonNullable<JobRecord["executionCallback"]> {
+  const callback = job.executionCallback!;
+  return {
+    invocationId: callback.invocationId,
+    outcome: callback.outcome,
+    ...(callback.sessionId !== undefined ? { sessionId: callback.sessionId } : {}),
+    ...(callback.receivedAt !== undefined ? { receivedAt: callback.receivedAt } : {}),
+    ...(callback.error !== undefined
+      ? { error: publicProgressSummary({ type: "callback", outcome: callback.outcome }) }
+      : {})
   };
 }
 
@@ -147,4 +156,13 @@ function statusActions(status: JobRecord["status"]): JobStatusResult["actions"] 
     };
   }
   return { result: "mimo_result", events: "mimo_events" };
+}
+
+function compactVerification(result: JobVerification): JobVerification {
+  return {
+    command: result.command,
+    exitCode: result.exitCode,
+    passed: result.passed,
+    ...(result.durationMs === undefined ? {} : { durationMs: result.durationMs })
+  };
 }

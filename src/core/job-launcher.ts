@@ -6,7 +6,6 @@ import {
 } from "./job-process.js";
 import { transitionJob } from "./job-transition.js";
 import type { JobKind, JobReceipt, JobRecord } from "./jobs.js";
-import { errorMessage } from "../core/errors.js";
 import {
   prepareCodexConnection,
   type PreparedCodexConnection
@@ -64,7 +63,8 @@ export interface LaunchJobInput {
 export interface LaunchJobDependencies {
   env?: NodeJS.ProcessEnv;
   resolveTarget?: (
-    input: NotificationInput | undefined
+    input: NotificationInput | undefined,
+    env: NodeJS.ProcessEnv
   ) => NotificationTarget | undefined;
   prepareCodex?: typeof prepareCodexConnection;
   createJob?: (cwd: string, input: CreateJobInput) => JobRecord;
@@ -83,7 +83,10 @@ export async function launchJob(
   }
   const env = dependencies.env ?? process.env;
   const target = input.notificationTarget === undefined
-    ? (dependencies.resolveTarget ?? resolveNotificationTarget)(input.notify)
+    ? (dependencies.resolveTarget ?? resolveNotificationTarget)(
+        input.notify,
+        env
+      )
     : cloneTarget(input.notificationTarget);
 
   if (target?.type === "codex") {
@@ -118,7 +121,7 @@ export async function launchJob(
       throw new Error("Job supervisor spawn did not return a process ID.");
     }
   } catch (error) {
-    const message = errorMessage(error);
+    const message = error instanceof Error ? error.message : String(error);
     const failed = await (dependencies.transitionJob ?? transitionJob)(input.cwd, job.id, {
       status: "failed",
       summary: `Job supervisor failed to start: ${message}`,

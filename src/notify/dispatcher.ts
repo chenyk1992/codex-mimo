@@ -20,12 +20,10 @@ import {
   type NotificationDelivery
 } from "./types.js";
 import { deliverWebhook } from "./webhook-adapter.js";
-import {
-  DEFAULT_NOTIFICATION_ATTEMPT_TIMEOUT_MS,
-  DEFAULT_NOTIFICATION_RETRY_AGE_MS
-} from "../core/job-timeouts.js";
 
 const DEFAULT_LEASE_MS = 30_000;
+const DEFAULT_ATTEMPT_TIMEOUT_MS = 10_000;
+const MAX_RETRY_AGE_MS = 1_800_000;
 
 export interface DispatcherDependencies {
   now?: () => Date;
@@ -131,7 +129,7 @@ export async function dispatchNextDelivery(
   }
   if (result.outcome === "permanent" ||
       isCodexCallbackRetryExhausted(claimed, result) ||
-      settledAt.getTime() - Date.parse(claimed.createdAt) >= DEFAULT_NOTIFICATION_RETRY_AGE_MS) {
+      settledAt.getTime() - Date.parse(claimed.createdAt) >= MAX_RETRY_AGE_MS) {
     return settleDelivery(outboxFile, claimed, () =>
       failDelivery(
         outboxFile,
@@ -190,7 +188,7 @@ async function deliverByTarget(
 ): Promise<DeliveryAttemptResult> {
   const timeoutMs = dependencies.attemptTimeoutMs ?? Math.max(
     1,
-    Math.min(DEFAULT_NOTIFICATION_ATTEMPT_TIMEOUT_MS, Math.floor(leaseMs / 2))
+    Math.min(DEFAULT_ATTEMPT_TIMEOUT_MS, Math.floor(leaseMs / 2))
   );
   if (delivery.target.type === "webhook") {
     return (dependencies.deliverWebhook ?? deliverWebhook)(

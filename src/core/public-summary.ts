@@ -1,11 +1,10 @@
-import type { ExecutionCallbackSummary, JobPhase, JobStatus } from "./jobs.js";
+import type { JobPhase, JobStatus } from "./jobs.js";
 
 export const MAX_PUBLIC_SUMMARY_LENGTH = 160;
 
 const KNOWN_OPERATOR_ERROR_SUMMARIES: Readonly<Record<string, string>> = {
   stale_queued: "MiMoCode job stayed queued too long.",
-  idle_timeout: "MiMoCode job idle-timed out.",
-  phase_oscillation: "MiMoCode phase oscillation needs caller input."
+  idle_timeout: "MiMoCode job idle-timed out."
 };
 
 export type PublicSummaryContext =
@@ -45,19 +44,6 @@ export function publicProgressSummary(context: PublicSummaryContext): string {
     .slice(0, MAX_PUBLIC_SUMMARY_LENGTH);
 }
 
-/** Sanitize execution callbacks for public surfaces; never leak raw callback errors. */
-export function toPublicExecutionCallback(callback: ExecutionCallbackSummary): ExecutionCallbackSummary {
-  return {
-    invocationId: callback.invocationId,
-    outcome: callback.outcome,
-    ...(callback.sessionId !== undefined ? { sessionId: callback.sessionId } : {}),
-    ...(callback.receivedAt !== undefined ? { receivedAt: callback.receivedAt } : {}),
-    ...(callback.outcome !== "completed"
-      ? { error: publicProgressSummary({ type: "callback", outcome: callback.outcome }) }
-      : {})
-  };
-}
-
 function summaryFor(context: PublicSummaryContext): string {
   if (context.type === "event") {
     if (context.eventType === "tool") return "MiMoCode ran a tool.";
@@ -75,9 +61,6 @@ function summaryFor(context: PublicSummaryContext): string {
     if (context.kind === "verification_finished") return "Verification finished.";
     if (context.kind === "milestone") return "MiMoCode reported progress.";
     if (context.kind === "phase_changed") return runningSummary(context.phase);
-    if (context.kind === "needs_input" || context.kind === "blocked") {
-      return knownOperatorErrorSummary(context.errorCode) ?? statusSummary(context.kind);
-    }
     if (context.kind === "failed") {
       return knownOperatorErrorSummary(context.errorCode) ?? statusSummary("failed");
     }
@@ -89,9 +72,6 @@ function summaryFor(context: PublicSummaryContext): string {
 
   if (context.type === "job") {
     if (context.status === "running") return runningSummary(context.phase);
-    if (context.status === "needs_input" || context.status === "blocked") {
-      return knownOperatorErrorSummary(context.errorCode) ?? statusSummary(context.status);
-    }
     if (context.status === "failed") {
       return knownOperatorErrorSummary(context.errorCode) ?? statusSummary("failed");
     }

@@ -191,20 +191,3 @@ export function buildJobId(
 export function isActiveJobStatus(status: JobStatus): boolean {
   return status === "queued" || status === "running";
 }
-
-export const ATTENTION_JOB_STATUSES = [
-  "needs_input",
-  "blocked",
-  "completed",
-  "failed",
-  "cancelled",
-  "timeout"
-] as const satisfies readonly JobStatus[];
-
-export function isAttentionJobStatus(status: JobStatus): boolean {
-  return (ATTENTION_JOB_STATUSES as readonly string[]).includes(status);
-}
-
-export function isTerminalJobStatus(status: JobStatus): boolean {
-  return isAttentionJobStatus(status);
-}

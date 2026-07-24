@@ -55,7 +55,7 @@ const commonProperties = {
   cwd: string,
   model: string,
   timeoutMs: { type: "integer", exclusiveMinimum: 0, default: 1_800_000 },
-  idleTimeoutMs: { type: "integer", minimum: 0, default: 90_000 },
+  idleTimeoutMs: { type: "integer", minimum: 0, default: 1_800_000 },
   notify
 };
 

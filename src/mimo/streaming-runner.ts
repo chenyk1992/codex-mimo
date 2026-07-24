@@ -4,7 +4,6 @@ import { execa } from "execa";
 import readline from "node:readline";
 import type { Readable } from "node:stream";
 import { withUtf8ProcessEnv } from "../core/encoding.js";
-import { errorMessage } from "../core/errors.js";
 import {
   terminatePosixProcessGroup,
   type AsyncProcessGroupTerminationOptions,
@@ -186,7 +185,7 @@ function probeWindowsProcess(pid: number): ProcessGroupProbe {
     }
     return {
       status: "unconfirmed",
-      evidence: errorMessage(error)
+      evidence: error instanceof Error ? error.message : String(error)
     };
   }
 }
@@ -427,4 +426,8 @@ export async function runMimoCliStreaming(
       child.stderr?.destroy();
     }
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

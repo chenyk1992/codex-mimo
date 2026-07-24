@@ -8,7 +8,7 @@ export function planPrompt(task: string): string {
     "You are being invoked by Codex as a specialist MiMoCode planning agent.",
     "",
     "Rules:",
-    "- Do not modify project files; writes under `.mimocode/` are allowed.",
+    "- Do not edit files.",
     "- Inspect only the code needed for this task.",
     "- Produce a concise implementation plan with touched files, risks, and verification commands.",
     "- Prefer the smallest change that satisfies the request.",
@@ -44,7 +44,7 @@ export function reviewPrompt(diffSummary: string): string {
     "You are being invoked by Codex as a specialist MiMoCode review agent.",
     "",
     "Rules:",
-    "- Do not modify project files; writes under `.mimocode/` are allowed.",
+    "- Do not edit files.",
     "- Prioritize correctness bugs, regressions, security, and missing tests.",
     "- Give file and line references when available.",
     "- If no issues are found, say that clearly and mention residual risk."
@@ -67,7 +67,7 @@ export function resumePrompt(task: string, writesAllowed: boolean): string {
           "- Run the narrowest meaningful verification when practical."
         ]
       : [
-          "- Do not modify project files; writes under `.mimocode/` are allowed.",
+          "- Do not edit files.",
           "- Continue only the parent session's analysis, planning, or review work."
         ]),
     "- Return the result and any remaining risks."

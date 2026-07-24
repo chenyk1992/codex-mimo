@@ -2,12 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  ATTENTION_STATUSES,
   awaitJobAttention,
   computeWaitBudgetMs,
   readJobStatusSnapshot
 } from "./host-wait.js";
-import { isActiveJobStatus, isAttentionJobStatus, type JobStatus } from "../core/jobs.js";
-import { DEFAULT_COMPANION_HOOK_TIMEOUT_MS } from "../core/job-timeouts.js";
+
+export { ATTENTION_STATUSES };
 
 export const WORK_TOOLS = new Set([
   "mimo_plan",
@@ -17,6 +18,8 @@ export const WORK_TOOLS = new Set([
   "mimo_resume",
   "mimo_compose"
 ]);
+
+export const ACTIVE_STATUSES = new Set(["queued", "running"]);
 
 export interface CompanionWatch {
   cwd: string;
@@ -217,7 +220,7 @@ export async function decideStopFollowup(
   for (const watch of next.watches) {
     const job = readJobRecord(watch.cwd, watch.jobId);
     if (!job || typeof job.status !== "string") continue;
-    if (!isAttentionJobStatus(job.status as JobStatus)) continue;
+    if (!ATTENTION_STATUSES.has(job.status)) continue;
     const key = watchKey(watch.cwd, watch.jobId);
     if (next.acked[key]?.status === job.status) continue;
     const now = nowFn();
@@ -234,7 +237,7 @@ export async function decideStopFollowup(
   for (const watch of next.watches) {
     const job = readJobRecord(watch.cwd, watch.jobId);
     if (!job || typeof job.status !== "string") continue;
-    if (isActiveJobStatus(job.status as JobStatus)) activeWatches.push(watch);
+    if (ACTIVE_STATUSES.has(job.status)) activeWatches.push(watch);
   }
   next.watches = activeWatches;
 
@@ -248,7 +251,7 @@ export async function decideStopFollowup(
   const now = nowFn();
   const hookTimeoutMs = typeof options.hookTimeoutMs === "number" && Number.isFinite(options.hookTimeoutMs)
     ? options.hookTimeoutMs
-    : DEFAULT_COMPANION_HOOK_TIMEOUT_MS;
+    : 1_860_000;
   const envWaitSec = typeof options.envWaitSec === "number" && Number.isFinite(options.envWaitSec) && options.envWaitSec > 0
     ? options.envWaitSec
     : defaultEnvWaitSec();
