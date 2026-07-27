@@ -5,6 +5,7 @@ import type {
   JobStatus,
   JobVerification
 } from "./jobs.js";
+import type { JobFailureCause } from "./safety-contracts.js";
 import { publicProgressSummary } from "./public-summary.js";
 
 export interface RunEvidence {
@@ -16,10 +17,14 @@ export interface RunEvidence {
     | "host_abort"
     | "user_cancelled";
   stallErrorCode?: string;
+  /** Authoritative JSONL primary session; preferred over callback session. */
+  runSessionId?: string;
   executionCallback?: ExecutionCallbackSummary;
   verification: JobVerification[];
   finalText: string;
   requireFinalText?: boolean;
+  /** Optional secondary failure causes aggregated after primary classification. */
+  failureCauses?: JobFailureCause[];
 }
 
 export interface JobOutcome {
@@ -33,6 +38,7 @@ export interface JobOutcome {
   reportPaths?: JobReportPaths;
   error?: string;
   errorCode?: string;
+  causes?: JobFailureCause[];
 }
 
 const NEEDS_INPUT_PATTERNS = [

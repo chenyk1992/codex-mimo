@@ -120,6 +120,22 @@ describe("hook callback payload helpers", () => {
     expect(source).not.toMatch(/finalText|trajectory|input\.error/);
     expect(source).not.toContain("export default {");
   });
+
+  it("emits isolation hooks for query hash, primary session, and write scope", () => {
+    const cwd = tempWorkspace();
+    const paths = writeHookConfig({
+      cwd,
+      invocationId: "implement-isolation",
+      endpoint: "http://127.0.0.1:12345/mimo-hook",
+      token: "secret-token"
+    });
+    const source = fs.readFileSync(paths.hookFile, "utf-8");
+    expect(source).toContain("session.pre");
+    expect(source).toContain("session.userQuery.pre");
+    expect(source).toContain("tool.execute.before");
+    expect(source).toContain("CODEX_MIMO_EXPECTED_QUERY_HASH");
+    expect(source).toContain("CODEX_MIMO_ALLOWED_PATHS_JSON");
+  });
 });
 
 describe("hook callback controller", () => {
@@ -440,5 +456,61 @@ describe("hook callback controller", () => {
       socket.destroy();
       await closing;
     }
+  });
+
+  it("ignores child-session callbacks until the bound primary session posts", async () => {
+    const cwd = tempWorkspace();
+    const controller = await createHookCallbackController({
+      cwd,
+      kind: "implement",
+      callbackWaitMs: 500,
+      now: () => 1768040303616,
+      random: () => "bind01"
+    });
+
+    expect(typeof controller.bindRunSession).toBe("function");
+    controller.bindRunSession("ses-primary");
+
+    const childResponse = await fetch(controller.endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [CALLBACK_HEADER]: controller.token
+      },
+      body: JSON.stringify({
+        invocationId: controller.invocationId,
+        event: "session.post",
+        timestamp: "2026-07-27T00:00:00.000Z",
+        sessionID: "ses-child",
+        outcome: "completed"
+      })
+    });
+    expect(childResponse.status).toBe(200);
+
+    const waitPromise = controller.waitForCallback();
+    const raced = await Promise.race([
+      waitPromise.then((value) => ({ kind: "resolved" as const, value })),
+      new Promise<{ kind: "pending" }>((resolve) => setTimeout(() => resolve({ kind: "pending" }), 50))
+    ]);
+    expect(raced.kind).toBe("pending");
+
+    const primaryResponse = await fetch(controller.endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [CALLBACK_HEADER]: controller.token
+      },
+      body: JSON.stringify({
+        invocationId: controller.invocationId,
+        event: "session.post",
+        timestamp: "2026-07-27T00:00:01.000Z",
+        sessionID: "ses-primary",
+        outcome: "completed"
+      })
+    });
+    expect(primaryResponse.status).toBe(200);
+    const summary = await waitPromise;
+    expect(summary?.sessionId).toBe("ses-primary");
+    await controller.close();
   });
 });

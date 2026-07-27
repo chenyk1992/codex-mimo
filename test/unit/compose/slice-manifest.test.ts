@@ -313,6 +313,27 @@ describe("materializeSingleSliceManifest", () => {
     const validation = validateSliceManifest(manifest, { cwd });
     expect(validation.ok).toBe(true);
   });
+
+  it("rejects single mode without bounded allowedPaths and rejects bare **", () => {
+    expect(() =>
+      materializeSingleSliceManifest({
+        chainId: "chain-root",
+        objective: "Unbounded write",
+        repositoryFingerprint: "fp-root",
+        acceptance: validAcceptance()
+      })
+    ).toThrow(/bounded allowedPaths|requires bounded allowedPaths/i);
+
+    expect(() =>
+      materializeSingleSliceManifest({
+        chainId: "chain-root",
+        objective: "Unbounded write",
+        repositoryFingerprint: "fp-root",
+        acceptance: validAcceptance(),
+        allowedPaths: ["**"]
+      })
+    ).toThrow(/\*\*|repository-wide/i);
+  });
 });
 
 describe("isRepositoryRelativePath", () => {

@@ -285,3 +285,44 @@ describe("run outcome classification", () => {
     expect(JSON.stringify(outcome)).not.toContain("PROMPT_ECHO_SECRET");
   });
 });
+
+describe("safety isolation outcome regressions", () => {
+  it("prefers runSessionId over callback sessionId", () => {
+    const outcome = classifyRunOutcome(evidence({
+      runSessionId: "ses-jsonl-primary",
+      executionCallback: {
+        invocationId: "inv-1",
+        outcome: "completed",
+        sessionId: "ses-callback-other"
+      }
+    }));
+    expect(outcome.sessionId).toBe("ses-jsonl-primary");
+  });
+
+  it("classifies prompt_identity_mismatch above callback_cancelled", () => {
+    const outcome = classifyRunOutcome(evidence({
+      exitCode: 0,
+      executionCallback: {
+        invocationId: "inv-1",
+        outcome: "cancelled",
+        sessionId: "ses-1",
+        error: "cancelled"
+      },
+      failureCauses: [{ code: "prompt_identity_mismatch", stage: "prompt" }],
+      finalText: ""
+    }));
+    expect(outcome.errorCode).toBe("prompt_identity_mismatch");
+  });
+
+  it("classifies callback_session_mismatch when run and callback sessions differ", () => {
+    const outcome = classifyRunOutcome(evidence({
+      runSessionId: "ses-a",
+      executionCallback: {
+        invocationId: "inv-1",
+        outcome: "completed",
+        sessionId: "ses-b"
+      }
+    }));
+    expect(outcome.errorCode).toBe("callback_session_mismatch");
+  });
+});

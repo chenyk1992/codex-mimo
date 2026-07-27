@@ -1,4 +1,12 @@
 import type { NotificationErrorCode, NotificationTarget } from "../notify/types.js";
+import type { JobFailureCause, VerificationFailureKind } from "./safety-contracts.js";
+
+export type {
+  JobFailureCause,
+  JobFailureCauseStage,
+  SafetyErrorCode,
+  VerificationFailureKind
+} from "./safety-contracts.js";
 
 export type JobStatus =
   | "queued"
@@ -65,10 +73,14 @@ export interface JobAcceptanceSummary {
 }
 
 export interface JobVerification {
+  /** Actual executed command line. */
   command: string;
+  /** Caller-requested command before wrapper resolution (optional). */
+  requestedCommand?: string;
   exitCode: number | null;
   passed: boolean;
   durationMs?: number;
+  failureKind?: VerificationFailureKind;
 }
 
 export interface JobReportPaths {
@@ -96,6 +108,8 @@ export interface CompactFailure {
   failedCommand?: string;
   failedTests?: string[];
   suggestion?: string;
+  /** Primary cause first; compact surfaces truncate to COMPACT_FAILURE_CAUSE_LIMIT. */
+  causes?: JobFailureCause[];
 }
 
 export interface CompactAttention {
