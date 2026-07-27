@@ -60,8 +60,13 @@ import {
 } from "../mimo/prompt-transport.js";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
 import type { StreamingRunResult } from "../mimo/streaming-runner.js";
+import { preflightVerificationCommand } from "../compose/verify.js";
+import { runScopeCheck } from "./path-scope.js";
+import { isRuntimeArtifactPath } from "./runtime-paths.js";
+import { SCOPE_CHECK_GATE } from "./safety-contracts.js";
+import type { JobFailureCause } from "./jobs.js";
 import { implementPrompt, planPrompt, resumeContinuationPrompt, resumePrompt, reviewPrompt } from "./prompt.js";
-import { classifyRunOutcome, type JobOutcome } from "./job-outcome.js";
+import { classifyRunOutcome, type JobOutcome, type RunEvidence } from "./job-outcome.js";
 import {
   writeJobArtifacts,
   type WriteJobArtifactsInput
@@ -113,7 +118,7 @@ import {
 } from "./job-store.js";
 import { spawnJobSupervisor } from "./job-process.js";
 import { transitionJob, type JobTransition } from "./job-transition.js";
-import { isRuntimeArtifactPath } from "./runtime-paths.js";
+import { execa } from "execa";
 
 const DEFAULT_TIMEOUT_MS = 1_800_000;
 
@@ -257,6 +262,10 @@ export interface JobExecutionFinalizeContext {
   mimoArgs?: string[];
   /** Authoritative JSONL primary session captured by the job worker. */
   runSessionId?: string;
+  /** True when JSONL emitted a different session after the primary was bound. */
+  eventSessionMismatch?: boolean;
+  /** Secondary/guard failure causes collected during the run. */
+  failureCauses?: JobFailureCause[];
   run: StreamingRunResult;
   events: NormalizedMimoEvent[];
   executionCallback?: ExecutionCallbackSummary;
@@ -546,14 +555,10 @@ async function finalizeDirect<Request extends { cwd: string; acceptance?: Develo
     ? toAcceptanceSummary(acceptanceRun.result)
     : undefined;
 
-  let outcome = classifyRunOutcome({
-    exitCode: context.run.exitCode,
-    terminationReason: context.run.terminationReason,
-    executionCallback: context.executionCallback,
+  let outcome = classifyRunOutcome(runEvidenceFromContext(context, {
     verification: compact,
-    finalText: finalTextFrom(context),
     ...(requireFinalText ? { requireFinalText: true } : {})
-  });
+  }));
   outcome = applyAcceptanceFailure(outcome, acceptanceRun?.result, compact, acceptanceSummary);
 
   if (!writesAllowed && hasReadOnlyViolation(context, changedFiles)) {
@@ -639,14 +644,10 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
 
   let outcome = acceptanceMissing
     ? needsInputIfOtherwiseComplete(context, acceptanceMissing, workflow.name === "plan")
-    : classifyRunOutcome({
-        exitCode: context.run.exitCode,
-        terminationReason: context.run.terminationReason,
-        executionCallback: context.executionCallback,
+    : classifyRunOutcome(runEvidenceFromContext(context, {
         verification: compact,
-        finalText: finalTextFrom(context),
         ...(workflow.name === "plan" ? { requireFinalText: true } : {})
-      });
+      }));
   outcome = applyAcceptanceFailure(outcome, acceptanceResult, compact, acceptanceSummary);
 
   const readOnlyError = !workflow.writesAllowed && hasReadOnlyViolation(context, changedFiles)
@@ -690,6 +691,7 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     verification: toVerificationResults(verificationDetails),
     error: outcome.error,
     errorCode: outcome.errorCode,
+    ...(outcome.causes && outcome.causes.length > 0 ? { failureCauses: outcome.causes } : {}),
     reportDir: context.request.reportDir ?? path.join(context.request.cwd, ".codex-mimo", "reports"),
     eventsDir: path.join(context.request.cwd, ".codex-mimo", "events"),
     diffsDir: path.join(context.request.cwd, ".codex-mimo", "diffs")
@@ -751,6 +753,7 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     ...(acceptanceSummary || outcome.acceptance
       ? { acceptance: acceptanceSummary ?? outcome.acceptance }
       : {}),
+    ...(outcome.causes && outcome.causes.length > 0 ? { failureCauses: outcome.causes } : {}),
     reportPaths
   };
 }
@@ -798,12 +801,162 @@ function attributedJobChangedFiles(before: GitStatusSnapshot, after: GitStatusSn
   return detectNewFilesFromStatus(before, after);
 }
 
+async function lookupExecutableOnPath(command: string): Promise<string | undefined> {
+  const lookup = process.platform === "win32" ? "where" : "which";
+  const result = await execa(lookup, [command], { reject: false });
+  if (result.exitCode !== 0) return undefined;
+  const line = result.stdout.trim().split(/\r?\n/).find((entry) => entry.trim().length > 0);
+  return line?.trim();
+}
+
 function hasReadOnlyViolation(context: JobExecutionFinalizeContext, changedFiles: string[]): boolean {
   return changedFiles.length > 0 || gitHeadChanged(context.gitHeadBefore, context.gitHeadAfter);
 }
 
 function finalTextFrom(context: JobExecutionFinalizeContext): string {
   return extractFinalText(context.events);
+}
+
+function runEvidenceFromContext(
+  context: JobExecutionFinalizeContext,
+  patch: Partial<RunEvidence> = {}
+): RunEvidence {
+  const verification = patch.verification ?? [];
+  return {
+    exitCode: context.run.exitCode,
+    terminationReason: context.run.terminationReason,
+    ...(context.runSessionId !== undefined ? { runSessionId: context.runSessionId } : {}),
+    ...(context.eventSessionMismatch ? { eventSessionMismatch: true } : {}),
+    failureCauses: mergeFailureCauses(
+      context.failureCauses,
+      collectVerificationFailureCauses(verification)
+    ),
+    executionCallback: context.executionCallback,
+    verification,
+    finalText: finalTextFrom(context),
+    ...patch
+  };
+}
+
+function mergeFailureCauses(
+  ...groups: Array<JobFailureCause[] | undefined>
+): JobFailureCause[] | undefined {
+  const merged: JobFailureCause[] = [];
+  const seen = new Set<string>();
+  for (const group of groups) {
+    if (!group) continue;
+    for (const cause of group) {
+      const key = `${cause.code}:${cause.stage}:${cause.command ?? ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(cause);
+    }
+  }
+  return merged.length > 0 ? merged : undefined;
+}
+
+function collectVerificationFailureCauses(verification: JobVerification[]): JobFailureCause[] | undefined {
+  const causes: JobFailureCause[] = [];
+  for (const result of verification) {
+    if (result.failureKind !== "command_not_found") continue;
+    causes.push({
+      code: "acceptance_command_unavailable",
+      stage: inferVerificationStage(result.command),
+      command: result.requestedCommand ?? result.command
+    });
+  }
+  return causes.length > 0 ? causes : undefined;
+}
+
+function inferVerificationStage(command: string): JobFailureCause["stage"] {
+  const normalized = command.trim().toLowerCase();
+  if (/\btest\b/.test(normalized)) return "test";
+  return "build";
+}
+
+export async function preflightWriteJobAcceptance(input: {
+  cwd: string;
+  kind: JobKind;
+  request: unknown;
+  signal?: AbortSignal;
+}): Promise<
+  | { ok: true }
+  | {
+      ok: false;
+      message: string;
+      suggestion?: string;
+      stage: "build" | "test";
+    }
+> {
+  input.signal?.throwIfAborted();
+  const acceptance = readAcceptanceFromRequest(input.request);
+  const legacyVerification = readLegacyVerificationFromRequest(input.request);
+  const requiresAcceptance = input.kind === "implement" ||
+    (
+      input.kind === "compose" &&
+      typeof input.request === "object" &&
+      input.request !== null &&
+      "workflow" in input.request &&
+      workflowRequiresDevelopmentAcceptance(
+        (input.request as { workflow: ComposeWorkflowName }).workflow
+      )
+    );
+  if (!requiresAcceptance) return { ok: true };
+
+  const plan = normalizeDevelopmentAcceptancePlan({
+    cwd: input.cwd,
+    acceptance,
+    legacyVerification,
+    requireAcceptance: true
+  });
+  if ("missing" in plan && plan.missing) {
+    return { ok: true };
+  }
+  const acceptancePlan = plan as DevelopmentAcceptancePlan;
+
+  for (const stage of acceptancePlan.stages) {
+    if (stage.stage !== "build" && stage.stage !== "test") continue;
+    for (const command of stage.commands) {
+      input.signal?.throwIfAborted();
+      const result = await preflightVerificationCommand({
+        cwd: input.cwd,
+        command,
+        source: acceptancePlan.source === "explicit" ? "explicit" : "detected",
+        pathLookup: lookupExecutableOnPath
+      });
+      if (!result.ok) {
+        return {
+          ok: false,
+          message: result.message,
+          ...(result.suggestion ? { suggestion: result.suggestion } : {}),
+          stage: stage.stage
+        };
+      }
+    }
+  }
+
+  return { ok: true };
+}
+
+function readAcceptanceFromRequest(request: unknown): DevelopmentAcceptanceInput | undefined {
+  if (typeof request !== "object" || request === null || !("acceptance" in request)) {
+    return undefined;
+  }
+  const value = (request as { acceptance?: unknown }).acceptance;
+  return value && typeof value === "object"
+    ? value as DevelopmentAcceptanceInput
+    : undefined;
+}
+
+function readLegacyVerificationFromRequest(request: unknown): string[] | undefined {
+  if (typeof request !== "object" || request === null || !("verification" in request)) {
+    return undefined;
+  }
+  const value = (request as { verification?: unknown }).verification;
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
+    return undefined;
+  }
+  return value;
 }
 
 function emptyDiff(): GitDiffSnapshot {
@@ -890,14 +1043,10 @@ function needsInputIfOtherwiseComplete(
   missing: { reason: string; code: "acceptance_config_missing" },
   requireFinalText = false
 ): JobOutcome {
-  const base = classifyRunOutcome({
-    exitCode: context.run.exitCode,
-    terminationReason: context.run.terminationReason,
-    executionCallback: context.executionCallback,
+  const base = classifyRunOutcome(runEvidenceFromContext(context, {
     verification: [],
-    finalText: finalTextFrom(context),
     ...(requireFinalText ? { requireFinalText: true } : {})
-  });
+  }));
   if (base.status !== "completed") return base;
   return {
     status: "needs_input",
@@ -926,13 +1075,34 @@ function applyAcceptanceFailure(
   }
   if (
     outcome.errorCode?.startsWith("callback_") ||
+    outcome.errorCode === "prompt_identity_mismatch" ||
+    outcome.errorCode === "callback_session_mismatch" ||
+    outcome.errorCode === "event_session_mismatch" ||
     outcome.status === "cancelled" ||
-    outcome.status === "timeout" ||
     outcome.status === "stalled" ||
     outcome.status === "needs_input" ||
     outcome.status === "blocked"
   ) {
     return { ...outcome, verification: compact, acceptance: acceptanceSummary };
+  }
+  if (outcome.status === "timeout") {
+    const secondaryCode = acceptance.errorCode ?? "verification_failed";
+    const secondaryStage = acceptance.failedStage ?? "build";
+    const causes = [
+      ...(outcome.causes ?? [{ code: outcome.errorCode ?? "timeout", stage: "execution" as const }]),
+      {
+        code: secondaryCode,
+        stage: secondaryStage,
+        ...(acceptance.failedCommand ? { command: acceptance.failedCommand } : {}),
+        ...(acceptance.suggestion ? { suggestion: acceptance.suggestion } : {})
+      }
+    ];
+    return {
+      ...outcome,
+      verification: compact,
+      acceptance: acceptanceSummary,
+      causes
+    };
   }
   if (outcome.status !== "completed" && outcome.errorCode !== "verification_failed") {
     return { ...outcome, verification: compact, acceptance: acceptanceSummary };
@@ -1007,6 +1177,47 @@ async function runAcceptanceForFinalize<Request extends { cwd: string }>(
   }
 
   const acceptancePlan = plan as DevelopmentAcceptancePlan;
+  const allowedPaths = readAllowedPathsFromRequest(context.request);
+  if (input.writesAllowed && allowedPaths && allowedPaths.length > 0) {
+    const scope = runScopeCheck({
+      changedFiles: input.changedFiles,
+      allowedPaths
+    });
+    if (!scope.passed) {
+      const reason = scope.reason ?? "Write scope check failed.";
+      return {
+        result: {
+          passed: false,
+          stages: [{
+            stage: "diff_check",
+            outcome: "failed",
+            command: SCOPE_CHECK_GATE,
+            reason: `${SCOPE_CHECK_GATE}: ${reason}`
+          }],
+          verificationDetails: [{
+            command: SCOPE_CHECK_GATE,
+            exitCode: 1,
+            passed: false,
+            stdout: JSON.stringify({
+              gate: SCOPE_CHECK_GATE,
+              outOfScopePaths: scope.outOfScopePaths
+            }),
+            stderr: reason
+          }],
+          compactTests: [{
+            stage: "diff_check",
+            command: SCOPE_CHECK_GATE,
+            outcome: "failed"
+          }],
+          errorCode: "write_scope_violation",
+          failedStage: "diff_check",
+          failedCommand: SCOPE_CHECK_GATE,
+          suggestion: scope.suggestion
+        }
+      };
+    }
+  }
+
   const diffPath = ensureDiffArtifact(context, input.reportDiff ?? context.diff);
   const runAcceptance = context.deps?.runDevelopmentAcceptance ?? runDevelopmentAcceptance;
   const runDiffCheck = context.deps?.runDiffCheck ??

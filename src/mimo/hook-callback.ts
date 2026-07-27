@@ -9,7 +9,8 @@ import {
   WRITE_PATH_FIELD_PRIORITY,
   WRITE_TOOL_NAMES,
   type HookExecutionGuardInput,
-  type HookGuardFailure
+  type HookGuardFailure,
+  type JobFailureCause
 } from "../core/safety-contracts.js";
 
 export const CALLBACK_HEADER = "x-codex-mimo-callback-token";
@@ -60,6 +61,7 @@ export interface HookCallbackControllerDeps {
 
 export interface ExecutionCallbackEvidence {
   executionCallback: ExecutionCallbackSummary;
+  failureCauses?: JobFailureCause[];
 }
 
 export type { HookExecutionGuardInput };
@@ -101,6 +103,17 @@ export function toExecutionCallbackEvidence(
       }
     };
   }
+  const failureCauses = callback.guardFailure
+    ? [{
+        code: callback.guardFailure.code,
+        stage: callback.guardFailure.code === "prompt_identity_mismatch"
+          ? "prompt" as const
+          : "scope_check" as const,
+        ...(callback.guardFailure.code === "write_scope_violation"
+          ? { suggestion: `Blocked path: ${callback.guardFailure.path}` }
+          : {})
+      }]
+    : undefined;
   return {
     executionCallback: {
       invocationId: callback.invocationId,
@@ -112,7 +125,8 @@ export function toExecutionCallbackEvidence(
         : callback.outcome === "cancelled"
           ? { error: "MiMoCode completion callback reported cancellation." }
           : {})
-    }
+    },
+    ...(failureCauses ? { failureCauses } : {})
   };
 }
 

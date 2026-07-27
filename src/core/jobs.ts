@@ -211,6 +211,7 @@ export interface JobTransitionFields {
   reportPaths?: JobReportPaths;
   error?: string;
   errorCode?: string;
+  failureCauses?: JobFailureCause[];
 }
 
 export interface PendingJobTransition extends JobTransitionFields {
@@ -255,6 +256,7 @@ export interface JobRecord {
   notificationOutboxFile: string;
   error?: string;
   errorCode?: string;
+  failureCauses?: JobFailureCause[];
   lastEventAt?: string;
   lastActivityAt?: string;
   lastProgressAt?: string;

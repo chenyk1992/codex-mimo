@@ -16,6 +16,7 @@ import type {
 } from "./jobs.js";
 import { isNotificationErrorCode } from "../notify/types.js";
 import { publicProgressSummary } from "./public-summary.js";
+import { compactFailureCauses } from "./job-outcome.js";
 import { RESUMABLE_FAILURE_CODES } from "./job-checkpoint.js";
 import { isChainOrchestratorRoot, readJobChain } from "./job-chain.js";
 
@@ -197,6 +198,9 @@ export function renderJobResult(
         }
       : {}),
     ...(job.errorCode ? { errorCode: job.errorCode } : {}),
+    ...(job.failureCauses && job.failureCauses.length > 0
+      ? { failureCauses: [...job.failureCauses] }
+      : {}),
     ...(job.reportPaths ? { reportPaths: { ...job.reportPaths } } : {}),
     ...(options.notification
       ? { notification: publicNotification(options.notification) }
@@ -461,6 +465,9 @@ function compactFailureDetails(
       : {}),
     ...(job.acceptance?.suggestion
       ? { suggestion: compactLine(job.acceptance.suggestion) }
+      : {}),
+    ...(compactFailureCauses(job.failureCauses)
+      ? { causes: compactFailureCauses(job.failureCauses) }
       : {})
   };
 }
@@ -470,7 +477,11 @@ function failedStageFromErrorCode(
 ): CompactJobResult["tests"][number]["stage"] | undefined {
   if (errorCode === "build_failed") return "build";
   if (errorCode === "tests_failed") return "test";
-  if (errorCode === "diff_check_failed" || errorCode === "delivery_contract_missing") {
+  if (
+    errorCode === "diff_check_failed" ||
+    errorCode === "delivery_contract_missing" ||
+    errorCode === "write_scope_violation"
+  ) {
     return "diff_check";
   }
   return undefined;

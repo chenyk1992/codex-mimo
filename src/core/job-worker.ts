@@ -3,6 +3,7 @@ import {
   bootstrapWriteJobChain,
   advanceJobChainAfterChild,
   isChainOrchestratorRoot,
+  preflightWriteJobAcceptance,
   type AdvanceJobChainAfterChildDependencies,
   type BoundJobDefinition,
   type JobExecutionFinalizeContext,
@@ -219,6 +220,33 @@ async function runOwnedJobWorker(
       // Root stays running as orchestrator; child workers execute write slices.
       // Child terminals call advanceJobChainAfterChild via afterTerminalTransition.
       return;
+    }
+
+    if (definition.executionPolicy.writesAllowed) {
+      const preflight = await preflightWriteJobAcceptance({
+        cwd,
+        kind: initial.kind,
+        request: initial.request,
+        signal: executionGuard.signal
+      });
+      if (!preflight.ok) {
+        executionGuard.stop();
+        const result = await transitionRecoverably(cwd, jobId, {
+          status: "failed",
+          summary: preflight.message,
+          error: preflight.message,
+          errorCode: "acceptance_command_unavailable",
+          changedFiles: [],
+          verification: [],
+          failureCauses: [{
+            code: "acceptance_command_unavailable",
+            stage: preflight.stage,
+            ...(preflight.suggestion ? { suggestion: preflight.suggestion } : {})
+          }]
+        }, deps);
+        await afterTerminalTransition(cwd, result, deps);
+        return;
+      }
     }
 
     const prompt = await awaitWithAbort(
@@ -481,6 +509,8 @@ async function runOwnedJobWorker(
       run,
       events,
       ...(runSessionId ? { runSessionId } : {}),
+      ...(eventSessionMismatch ? { eventSessionMismatch: true } : {}),
+      ...(callbackEvidence.failureCauses ? { failureCauses: callbackEvidence.failureCauses } : {}),
       executionCallback: callbackEvidence.executionCallback,
       gitStatusBefore,
       gitStatusAfter,
@@ -494,7 +524,11 @@ async function runOwnedJobWorker(
 
     assertJobActive(cwd, jobId, executionGuard.signal);
     executionGuard.stop();
-    const result = await transition(cwd, jobId, outcome);
+    const { causes, ...transitionFields } = outcome;
+    const result = await transition(cwd, jobId, {
+      ...transitionFields,
+      ...(causes ? { failureCauses: causes } : {})
+    });
     await afterTerminalTransition(cwd, result, deps);
   } catch (error) {
     if (executionGuard) {

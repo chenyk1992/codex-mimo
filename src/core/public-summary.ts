@@ -7,7 +7,12 @@ const KNOWN_OPERATOR_ERROR_SUMMARIES: Readonly<Record<string, string>> = {
   idle_timeout: "MiMoCode job idle-timed out.",
   no_effective_progress: "MiMoCode job stalled without effective progress.",
   slice_plan_invalid: "MiMoCode slice plan was invalid.",
-  slice_failed: "MiMoCode slice chain failed."
+  slice_failed: "MiMoCode slice chain failed.",
+  prompt_identity_mismatch: "MiMoCode prompt identity did not match the job query.",
+  callback_session_mismatch: "MiMoCode completion callback session did not match the run session.",
+  event_session_mismatch: "MiMoCode JSONL session identity changed during the run.",
+  write_scope_violation: "MiMoCode changed files outside the allowed write scope.",
+  acceptance_command_unavailable: "MiMoCode acceptance command is unavailable in this workspace."
 };
 
 export type PublicSummaryContext =

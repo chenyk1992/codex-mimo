@@ -4,7 +4,7 @@ import type { NormalizedMimoEvent } from "./events.js";
 import type { ComposeWorkflowName } from "./workflow.js";
 import type { VerificationResult } from "./verify.js";
 import type { GitDiffSnapshot, GitHeadSnapshot, GitStatusSnapshot } from "../git/diff.js";
-import type { ExecutionCallbackSummary, JobReportPaths, JobVerification } from "../core/jobs.js";
+import type { ExecutionCallbackSummary, JobFailureCause, JobReportPaths, JobVerification } from "../core/jobs.js";
 import type { TerminationReason } from "../mimo/streaming-runner.js";
 import { publicProgressSummary } from "../core/public-summary.js";
 import { redactDiagnosticText } from "../core/job-output.js";
@@ -37,6 +37,7 @@ export interface ComposeReport {
   verification: JobVerification[];
   error?: string;
   errorCode?: string;
+  failureCauses?: JobFailureCause[];
   reportPaths: ComposeReportPaths;
 }
 
@@ -60,6 +61,7 @@ export interface CreateComposeReportInput {
   verification: VerificationResult[];
   error?: string;
   errorCode?: string;
+  failureCauses?: JobFailureCause[];
   reportDir: string;
   eventsDir: string;
   diffsDir: string;
@@ -120,6 +122,9 @@ export function createComposeReport(input: CreateComposeReportInput): ComposeRep
         })
       : undefined,
     errorCode: input.errorCode,
+    ...(input.failureCauses && input.failureCauses.length > 0
+      ? { failureCauses: input.failureCauses }
+      : {}),
     reportPaths: {
       json: path.join(input.reportDir, `${input.id}.json`),
       markdown: path.join(input.reportDir, `${input.id}.md`),

@@ -661,8 +661,14 @@ describe("job finalization", () => {
       run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 10 },
       events: [{ type: "message", text: "done", raw: { type: "message", text: "done" } }],
       executionCallback: { invocationId: "inv-1", outcome: "completed", sessionId: "ses-1" },
-      gitStatusBefore: { short: "", dirty: false },
-      gitStatusAfter: { short: " M src/app.ts", dirty: true },
+      gitStatusBefore: { short: "", dirty: false, fingerprints: {} },
+      gitStatusAfter: {
+        short: " M src/app.ts",
+        dirty: true,
+        fingerprints: {
+          "src/app.ts": { status: " M", contentHash: "hash-after" }
+        }
+      },
       diff: { changedFiles: ["src/app.ts"], diffStat: "1 file changed", diff: "diff" },
       commitChanges: { commits: [], changedFiles: [] },
       verification: [],
@@ -957,7 +963,8 @@ describe("write chain bootstrap (Task 5)", () => {
         task: "Implement feature",
         allowWrite: true,
         acceptance,
-        batchMode
+        batchMode,
+        ...(batchMode === "single" ? { allowedPaths: ["src/**"] } : {})
       },
       notificationTarget: { type: "codex", threadId: "thread-root" }
     });

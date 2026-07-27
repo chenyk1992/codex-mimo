@@ -52,7 +52,7 @@ export interface AcceptanceStageResult {
 export interface DevelopmentAcceptanceResult {
   stages: AcceptanceStageResult[];
   passed: boolean;
-  errorCode?: "build_failed" | "tests_failed" | "diff_check_failed" | "delivery_contract_missing";
+  errorCode?: "build_failed" | "tests_failed" | "diff_check_failed" | "delivery_contract_missing" | "write_scope_violation";
   failedStage?: "build" | "test" | "diff_check";
   failedCommand?: string;
   failedTests?: string[];
