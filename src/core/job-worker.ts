@@ -35,6 +35,7 @@ import {
   type GitDiffSnapshot,
   type GitStatusSnapshot
 } from "../git/diff.js";
+import crypto from "node:crypto";
 import {
   createHookCallbackController,
   toExecutionCallbackEvidence,
@@ -226,6 +227,8 @@ async function runOwnedJobWorker(
     );
     assertJobActive(cwd, jobId, executionGuard.signal);
     const mimoArgs = definition.buildMimoArgs(prompt);
+    const expectedQueryHash = crypto.createHash("sha256").update(prompt.message, "utf8").digest("hex");
+    const allowedPaths = readAllowedPathsFromJobRequest(initial.request);
     const captureStatus = deps.captureStatus ?? captureGitStatus;
     const captureHead = deps.captureHead ?? captureGitHead;
     const gitStatusBefore = withoutRuntimeStatus(
@@ -245,7 +248,9 @@ async function runOwnedJobWorker(
     hook = await awaitWithAbort(
       (deps.createHookCallbackController ?? createHookCallbackController)({
         cwd,
-        kind: initial.kind
+        kind: initial.kind,
+        expectedQueryHash,
+        ...(allowedPaths ? { allowedPaths } : {})
       }),
       executionGuard.signal,
       {
@@ -278,6 +283,8 @@ async function runOwnedJobWorker(
 
     stage = "run";
     let run: StreamingRunResult;
+    let runSessionId: string | undefined;
+    let eventSessionMismatch = false;
     let processTerminationConfirmed = false;
     let lastProgressFingerprint: string | undefined;
     let lastCheckpointAt = 0;
@@ -334,6 +341,14 @@ async function runOwnedJobWorker(
             const persistObservation = deps.updateRunningJobObservation ?? updateRunningJobObservation;
             const timestamp = isoNow();
             const sessionId = extractSessionIdFromRawLine(line);
+            if (sessionId) {
+              if (!runSessionId) {
+                runSessionId = sessionId;
+                hook?.bindRunSession(sessionId);
+              } else if (sessionId !== runSessionId) {
+                eventSessionMismatch = true;
+              }
+            }
             const toolName = extractToolNameFromRawLine(line);
             const event = parseProgressEventInput(line);
             let progressPatch: Parameters<typeof updateRunningJobObservation>[2] = {};
@@ -368,7 +383,7 @@ async function runOwnedJobWorker(
             void persistObservation(cwd, jobId, {
               lastEventAt: timestamp,
               lastActivityAt: timestamp,
-              ...(sessionId ? { sessionId } : {}),
+              ...(runSessionId ? { sessionId: runSessionId } : {}),
               ...(toolName ? { lastTool: toolName } : {}),
               ...progressPatch
             }).catch(() => undefined);
@@ -411,10 +426,15 @@ async function runOwnedJobWorker(
     assertJobActive(cwd, jobId, executionGuard.signal);
 
     stage = "callback";
+    const callbackSummary = await waitForExecutionCallback(hook, executionGuard.signal);
     const callbackEvidence = toExecutionCallbackEvidence(
       hook.invocationId,
-      await waitForExecutionCallback(hook, executionGuard.signal)
+      callbackSummary,
+      hook.getDiagnostics()
     );
+    if (eventSessionMismatch) {
+      bestEffortJobLog(cwd, jobId, "JSONL event session mismatch detected.");
+    }
     const completedHook = hook;
     hook = undefined;
     try {
@@ -460,6 +480,7 @@ async function runOwnedJobWorker(
       mimoArgs,
       run,
       events,
+      ...(runSessionId ? { runSessionId } : {}),
       executionCallback: callbackEvidence.executionCallback,
       gitStatusBefore,
       gitStatusAfter,
@@ -1054,6 +1075,17 @@ function bestEffortJobLog(cwd: string, jobId: string, _message: string): void {
 
 function defaultSleep(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+function readAllowedPathsFromJobRequest(request: unknown): string[] | undefined {
+  if (typeof request !== "object" || request === null || !("allowedPaths" in request)) {
+    return undefined;
+  }
+  const value = (request as { allowedPaths?: unknown }).allowedPaths;
+  if (!Array.isArray(value) || value.length === 0 || !value.every((entry) => typeof entry === "string")) {
+    return undefined;
+  }
+  return value;
 }
 
 function withoutRuntimeStatus(status: GitStatusSnapshot): GitStatusSnapshot {
