@@ -19,7 +19,7 @@ import {
   ComposeInput,
   FixCiInput,
   HealthcheckInput,
-  ImplementInput,
+  ImplementInputBase,
   JobCancelInput,
   JobEventsInput,
   JobListInput,
@@ -87,7 +87,7 @@ export function createMcpServer(overrides: Partial<McpToolHandlers> = {}): McpSe
   }, handle("mimo_plan", handlers.mimoPlan));
   server.registerTool("mimo_implement", {
     description: "Implement code changes in a background job. Requires ordered development acceptance (acceptance.build/test/diffCheck); cannot complete without it. Optional batchMode auto|single|sliced runs a sequential slice chain with root-only notifications; slice_failed is resumable on the root, while slice_plan_invalid requires a new job after re-planning.",
-    inputSchema: ImplementInput
+    inputSchema: ImplementInputBase
   }, handle("mimo_implement", handlers.mimoImplement));
   server.registerTool("mimo_review", {
     description: "Review the current diff in a background job", inputSchema: ReviewInput
