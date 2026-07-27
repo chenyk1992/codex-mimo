@@ -36,6 +36,8 @@ The nine statuses are `queued`, `running`, `needs_input`, `blocked`, `stalled`, 
 
 Write roots may set `batchMode` to `auto` (default), `single`, or `sliced`. The orchestrator plans a slice manifest (`.codex-mimo/reports/<rootJobId>.slices.json`), persists `.codex-mimo/jobs/<chainId>.chain.json`, and runs slices sequentially — one at a time. Slice children are created without `notificationTarget`; only the root enqueues notification deliveries (including stall/failure attention and final completion). Invalid planning finalizes the root as `failed` with `slice_plan_invalid` (not resumable — re-launch after fixing the plan); a terminal failed slice finalizes the root as `failed` with `slice_failed` (resumable via `mimo_resume`). Crash recovery and `mimo_resume` on the root continue the current attention slice and skip completed slices. Standard `mimo_result` reports `completedSlices` / `remainingSlices` for chain roots.
 
+`batchMode=single` requires bounded `allowedPaths`; bare repository-wide `**` is rejected at launch. Supported patterns are repository-relative: exact file (`src/app.ts`), directory prefix (`src/components`), or trailing `/**` only (`src/components/**`).
+
 ### Idle stop-loss
 
 Every work request may include optional `idleTimeoutMs` (default 30 minutes; `0` disables idle stop-loss). Absolute `timeoutMs` is unchanged; whichever budget fires first wins. The idle clock measures silence since the last stdout JSONL line; `lastEventAt` is set on run start so boot is not immediately idle.
@@ -54,7 +56,7 @@ Setting `progressTimeoutMs: 0` disables effective-progress stop-loss and weakens
 
 Distinguish wakeup paths:
 
-- MiMo `session.post` — execution evidence inside the job worker; missing/error/cancelled callbacks can fail the job even with exit code 0.
+- MiMo `session.post` — execution evidence inside the job worker; missing/error/cancelled callbacks can fail the job even with exit code 0. Only callbacks from the JSONL primary session (first `sessionID` in stdout) are accepted; child-session callbacks are ignored.
 - Codex Desktop heartbeat — native in-chat scheduled follow-up that calls `mimo_status` / `mimo_result` in the same Desktop chat; this is the recommended Desktop visibility path. Omit `notify` and delete/cancel/stop the heartbeat schedule after `needs_input`, `blocked`, `stalled`, `completed`, `failed`, `cancelled`, or `timeout`.
 - Codex App Server notification — optional compatibility history writeback through a frozen Codex target on an independent App Server connection. Outbox `delivered` does not mean the Desktop UI refreshed.
 - Cursor companion — host stop-hook wakeup without Codex `notify`.
@@ -157,7 +159,7 @@ Notification state is auxiliary. Delivery failure records `failed`, attempts, an
 
 ## Controls
 
-`mimo_result` defaults to a compact delivery record: status, changed files, compact verification/acceptance stage results, failure, report path, and a bounded plan/review summary when applicable. Complete final text is not returned by default. `reportPath` is repository-relative when the artifact is inside the requested workspace. Default compact `mimo_result` JSON must not exceed 6,000 UTF-8 bytes. Acceptance failures include compact fields such as `failedStage`, failed command/tests, and a shortest-fix `suggestion`.
+`mimo_result` defaults to a compact delivery record: status, changed files, compact verification/acceptance stage results, failure, report path, and a bounded plan/review summary when applicable. Complete final text is not returned by default. `reportPath` is repository-relative when the artifact is inside the requested workspace. Default compact `mimo_result` JSON must not exceed 6,000 UTF-8 bytes. Acceptance failures include compact fields such as `failedStage`, failed command/tests, and a shortest-fix `suggestion`. When multiple failures occur, compact `failure.causes` keeps at most three entries; `standard` and `full` retain the complete list in `failureCauses`.
 
 Use `level: "standard"` for bounded operator diagnostics and `level: "full"` only for explicit manual troubleshooting. `full` reads complete semantic and verification artifacts; normal Desktop heartbeat and automatic callback delivery remain compact.
 
@@ -196,7 +198,7 @@ The gated real-Codex smoke (`RUN_LOCAL_CODEX_NOTIFY_SMOKE=1`) proves App Server 
 
 ## Parent-Job Continuation
 
-Call `mimo_resume` with a `needs_input`, `blocked`, `stalled`, eligible `timeout`, or resumable-failure parent `jobId`. Resumable failure codes include `build_failed`, `tests_failed`, `diff_check_failed`, `delivery_contract_missing`, and `slice_failed`. `slice_plan_invalid` is not resumable — start a new job after correcting the objective or `batchMode`. For `needs_input` (including `acceptance_config_missing`) and `blocked`, supply additional `task` text. For `stalled`, checkpoint-backed `timeout`, and resumable acceptance failures, `task` is optional and defaults to the first remaining checklist item. The parent must have a saved `sessionId` and/or durable checkpoint at `.codex-mimo/reports/<jobId>.checkpoint.json`. Checkpoint-only resume prompts forbid broad repository scans and repeat only checkpoint context.
+Call `mimo_resume` with a `needs_input`, `blocked`, `stalled`, eligible `timeout`, or resumable-failure parent `jobId`. Resumable failure codes include `build_failed`, `tests_failed`, `diff_check_failed`, `delivery_contract_missing`, and `slice_failed`. Safety isolation codes (`prompt_identity_mismatch`, `callback_session_mismatch`, `event_session_mismatch`, `write_scope_violation`, `acceptance_command_unavailable`) are not resumable — restart with a corrected objective, `allowedPaths`, or `acceptance`. `slice_plan_invalid` is not resumable — start a new job after correcting the objective or `batchMode`. For `needs_input` (including `acceptance_config_missing`) and `blocked`, supply additional `task` text. For `stalled`, checkpoint-backed `timeout`, and resumable acceptance failures, `task` is optional and defaults to the first remaining checklist item. The parent must have a saved `sessionId` and/or durable checkpoint at `.codex-mimo/reports/<jobId>.checkpoint.json`. Checkpoint-only resume prompts forbid broad repository scans and repeat only checkpoint context.
 
 The launcher creates a new `resume` child job, copies the parent session when present, and inherits the parent target unless the request explicitly supplies another target. For slice-chain roots (or an attention slice child), resume continues the current unfinished slice with a null notification target and never relaunches completed slices. Parent and child records remain independently auditable. Never resume while `stalled_process_alive` is set.
 
@@ -227,6 +229,38 @@ The notification worker scans unfinished outbox entries. It reclaims expired `de
 
 The internal callback endpoint is temporary and authenticated. Callback files contain only invocation/event/time/session/outcome fields; final text, raw metadata, unknown fields, and callback error strings are never persisted there. Missing, error, or cancelled `session.post` evidence affects execution success; it is separate from caller delivery.
 
+## Execution isolation and safety
+
+### Prompt identity
+
+The bridge hashes the final MiMo prompt and passes it to the internal hook. On the primary session's first user query, a mismatch cancels before any model step with `prompt_identity_mismatch`. This failure is not resumable — restart with the correct objective; do not call `mimo_resume`.
+
+### Session binding
+
+The first JSONL `sessionID` becomes the run session. The hook binds the first `session.pre` session as primary; child sessions are ignored for completion. The worker calls `bindRunSession` when JSONL arrives; only matching `session.post` callbacks resolve the job. Child-session callbacks are staged then dropped. JSONL/callback session mismatch yields `callback_session_mismatch`; JSONL session drift mid-run yields `event_session_mismatch`.
+
+### Write scope (`allowedPaths`)
+
+Write jobs may declare `allowedPaths`. Patterns must be repository-relative: exact file, directory prefix, or trailing `/**` only. Rejected: bare `**`, absolute paths, `..`, UNC paths, and unsupported globs. `batchMode=single` requires bounded `allowedPaths` at launch. Known `write`/`edit` tools are blocked at the hook when out of scope; a mandatory post-run audit can also finish `failed` with `write_scope_violation` (`failedStage: diff_check`).
+
+### Build wrapper resolution
+
+For detected `mvn` / `gradle` acceptance commands, the bridge resolves repository wrappers before preflight and execution: Windows prefers `mvnw.cmd` / `gradlew.bat`; POSIX prefers `./mvnw` / `./gradlew`. Explicit path entries are not rewritten. Write jobs preflight build/test commands before edits; missing or non-executable entries fail with `acceptance_command_unavailable`.
+
+### Safety error codes
+
+| Error code | Meaning | Recovery |
+| --- | --- | --- |
+| `prompt_identity_mismatch` | MiMo user query did not match the job prompt | Restart with the correct `task`; not resumable |
+| `callback_session_mismatch` | `session.post` session differed from the JSONL run session | Inspect events and callback diagnostics; restart |
+| `event_session_mismatch` | JSONL session identity changed during the run | Restart the job |
+| `write_scope_violation` | Out-of-scope write or changed file | Tighten `allowedPaths`; relaunch with narrower scope |
+| `acceptance_command_unavailable` | Build/test command missing or not executable before edits | Supply explicit `acceptance`, fix wrapper permissions, or install the tool |
+
+### Multi-cause failures
+
+When timeout, scope, callback, and acceptance failures coexist, structured results preserve all causes. Compact `mimo_result` truncates `failure.causes` to three entries (primary first). `standard` and `full` expose the complete `failureCauses` list.
+
 ## Troubleshooting
 
 | Symptom | Action |
@@ -246,6 +280,10 @@ The internal callback endpoint is temporary and authenticated. Callback files co
 | Job silent but `running` | Check `mimo_status` for `idleMs`, `lastEventAt`, `lastProgressAt`, `quietSince`, and `processAlive`; raise `idleTimeoutMs` for long `parallel` runs if needed |
 | Job ended `stalled` | Read compact `mimo_result.attention` for `lastCommand`, reason, and `resume`; call `mimo_resume` to create a child from the checkpoint |
 | Job failed with `build_failed` / `tests_failed` / `diff_check_failed` / `delivery_contract_missing` | Read compact `failedStage`, failed command/tests, and `suggestion`; call `mimo_resume` with the parent `jobId` (Phase 2 checkpoint resume) |
+| Job failed with `prompt_identity_mismatch` | MiMo received the wrong query; restart with the correct objective — do not `mimo_resume` |
+| Job failed with `callback_session_mismatch` or `event_session_mismatch` | Session binding broke; inspect `jobs/<jobId>.events.jsonl` and callback diagnostics; restart |
+| Job failed with `write_scope_violation` | Out-of-scope write or audit failure; relaunch with tighter `allowedPaths` |
+| Job failed with `acceptance_command_unavailable` | Command missing before edits; add explicit `acceptance` with repo wrapper path or install the tool |
 | Job paused with `acceptance_config_missing` | Supply `acceptance.build` / `acceptance.test` (or detectable project commands) via `mimo_resume` `task` / relaunch with explicit `acceptance` |
 | Job ended `timeout` / `idle_timeout` | On Desktop heartbeat: next beat calls `mimo_result` once and deletes the schedule; resume with `mimo_resume` when a checkpoint exists; for explicit App Server notify, wait for the compatibility callback (prefetched public result, no tools), or use `mimo_result` for explicit user diagnostics; re-run with a narrower task or larger idle budget if appropriate |
 | Terminal job but no Desktop answer | Confirm a Desktop heartbeat was created and cleaned up; App Server `delivered` alone is not Desktop UI proof — without heartbeat or an explicit user request, state is on disk only (`mimo_result` / `mimo_jobs`) |

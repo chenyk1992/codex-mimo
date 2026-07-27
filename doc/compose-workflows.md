@@ -40,6 +40,20 @@ Instructions require focused changes, action/verification/risk reporting, and Po
 
 Write Compose workflows (`dev`, `fix`, `fix-ci`, `execute-plan`, `parallel`, `worktree`, `merge`, `new-skill`) accept optional `batchMode`: `auto` (default), `single`, or `sliced`. Read-only workflows strip `batchMode`. When enabled, the bridge plans `.codex-mimo/reports/<rootJobId>.slices.json`, records `.codex-mimo/jobs/<chainId>.chain.json`, and runs one slice at a time under the public root job. Slice children never notify; only the root delivers. Planning failure uses `slice_plan_invalid` (re-launch after re-planning; not resumable); a failed slice uses `slice_failed` (resumable). Resume the root to continue the attention slice while skipping completed slices.
 
+`batchMode=single` requires bounded `allowedPaths`; bare repository-wide `**` is rejected at launch. Each slice declares its own `allowedPaths` in the manifest.
+
+## Write scope (`allowedPaths`)
+
+Write workflows enforce repository-relative scope when `allowedPaths` is present:
+
+| Pattern | Matches |
+| --- | --- |
+| `src/app.ts` | Exact file |
+| `src/components` | Directory and descendants |
+| `src/components/**` | Directory and descendants (trailing `/**` only) |
+
+Rejected: bare `**`, absolute paths, `..`, UNC paths, and mid-path globs such as `src/*.ts`. Known `write`/`edit` tools are blocked at the internal hook when out of scope; a mandatory post-run audit can finish `failed` with `write_scope_violation` even when build or test stages fail first.
+
 ## Execution and Status
 
 The common worker validates the stored request, builds `mimo run --format json --agent compose` arguments, captures Git evidence, creates the internal `session.post` controller, streams events, runs finalization, and transitions the job.
@@ -74,8 +88,10 @@ When neither explicit `acceptance.test` / `verification` nor workflow defaults e
 | `Cargo.toml` | `cargo test` |
 | `go.mod` | `go test ./...` |
 | `package.json` | `npm test` |
+| Maven (`pom.xml`) | `mvn test` (resolved to `mvnw.cmd` on Windows or `./mvnw` on POSIX when present) |
+| Gradle (`build.gradle`, `build.gradle.kts`) | `gradle test` (resolved to `gradlew.bat` on Windows or `./gradlew` on POSIX when present) |
 
-Commands are split into executable and arguments and run without a shell. Missing build disposition or targeted tests at finalize pauses as `needs_input` with `acceptance_config_missing`. A failed stage finishes `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing` while retaining execution callback evidence. Compact `mimo_result` includes the first failed stage, failed command/tests, and a shortest-fix `suggestion`; call `mimo_resume` for `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing` via Phase 2 checkpoint resume at `.codex-mimo/reports/<jobId>.checkpoint.json`. Non-acceptance workflows may still use legacy `verification_failed` for required command failures.
+Commands are split into executable and arguments and run without a shell. Build and test stages share the same wrapper resolver; explicit path entries are not rewritten. Write jobs preflight commands before edits — missing or non-executable entries fail with `acceptance_command_unavailable`. Missing build disposition or targeted tests at finalize pauses as `needs_input` with `acceptance_config_missing`. A failed stage finishes `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing` while retaining execution callback evidence. Compact `mimo_result` includes the first failed stage, failed command/tests, and a shortest-fix `suggestion`; call `mimo_resume` for `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing` via Phase 2 checkpoint resume at `.codex-mimo/reports/<jobId>.checkpoint.json`. Non-acceptance workflows may still use legacy `verification_failed` for required command failures.
 
 ## Plan workflow
 
@@ -101,6 +117,18 @@ Structural reports omit model output and verification stdout/stderr; they contai
 ## Read-Only Enforcement
 
 `brainstorm`, `plan`, and `review` are checked after execution using Git status, diff, untracked-file fingerprints, and HEAD identity. Any change becomes `failed` with `read_only_violation`, even if MiMoCode exited successfully.
+
+## Session isolation and safety errors
+
+Compose jobs share the same isolation contracts as other work kinds:
+
+- Prompt hash mismatch before the first model step → `prompt_identity_mismatch` (not resumable; restart with correct `task`).
+- JSONL primary session binds completion; child-session `session.post` callbacks are ignored.
+- JSONL/callback session mismatch → `callback_session_mismatch`; JSONL session drift → `event_session_mismatch`.
+- Out-of-scope writes or audit failures → `write_scope_violation`.
+- Missing build/test command before edits → `acceptance_command_unavailable`.
+
+When multiple failures coexist, compact `mimo_result` keeps at most three `failure.causes`; `standard` and `full` retain the complete list.
 
 ## Paused Workflow Continuation
 

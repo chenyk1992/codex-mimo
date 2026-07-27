@@ -47,8 +47,10 @@ Job status is one of:
 Write entries (`implement` and write Compose workflows) accept `batchMode`: `auto` (default), `single`, or `sliced`.
 
 - `auto` — bounded read-only planning returns one or more slices.
-- `single` — caller asserts one narrow deliverable (materialized as a one-slice chain).
+- `single` — caller asserts one narrow deliverable (materialized as a one-slice chain). Requires bounded `allowedPaths`; bare repository-wide `**` is rejected at launch.
 - `sliced` — require at least two slices; planning fails with `slice_plan_invalid` if the objective cannot be decomposed safely.
+
+`allowedPaths` patterns are repository-relative: exact file (`src/app.ts`), directory prefix (`src/components`), or trailing `/**` only (`src/components/**`). Rejected: bare `**`, absolute paths, `..`, UNC paths, and mid-path globs such as `src/*.ts`.
 
 The bridge saves the manifest at `.codex-mimo/reports/<rootJobId>.slices.json` and the durable chain at `.codex-mimo/jobs/<chainId>.chain.json`, then executes **one slice at a time**. Internal slice children omit notification targets; only the public root enqueues outbox deliveries. A failed slice finalizes the root with `slice_failed`. Standard `mimo_result` on a chain root includes `completedSlices` and `remainingSlices`.
 
@@ -76,6 +78,7 @@ Whichever budget fires first wins. Effective-progress stop-loss is distinct from
 | `stalled` | Yes | Yes when present | Checkpoint-only prompt forbids broad repository scans |
 | `timeout` | Yes when no session | Checkpoint when no `sessionId` | `idle_timeout` and absolute `timeout` |
 | `failed` with resumable code | Per error | Per error | `build_failed`, `tests_failed`, `diff_check_failed`, `delivery_contract_missing`, `slice_failed` (`slice_plan_invalid` requires a new job) |
+| `failed` with safety code | No | No | `prompt_identity_mismatch`, `callback_session_mismatch`, `event_session_mismatch`, `write_scope_violation`, `acceptance_command_unavailable` — restart with a corrected objective, scope, or acceptance; do not resume |
 
 Never call `mimo_resume` while `stalled_process_alive` is set on a `blocked` parent.
 
@@ -119,7 +122,7 @@ The default Codex Desktop flow omits `notify` and uses a native in-chat schedule
 
 ## Result delivery and artifacts
 
-`mimo_result` defaults to a compact delivery record: status, changed files, compact verification/acceptance stage results, failure, report path, and a bounded plan/review summary when applicable. Complete final text is not returned by default. `reportPath` is repository-relative when the artifact is inside the requested workspace. Default compact `mimo_result` JSON must not exceed 6,000 UTF-8 bytes. Acceptance failures include compact fields such as `failedStage`, failed command/tests, and a shortest-fix `suggestion`.
+`mimo_result` defaults to a compact delivery record: status, changed files, compact verification/acceptance stage results, failure, report path, and a bounded plan/review summary when applicable. Complete final text is not returned by default. `reportPath` is repository-relative when the artifact is inside the requested workspace. Default compact `mimo_result` JSON must not exceed 6,000 UTF-8 bytes. Acceptance failures include compact fields such as `failedStage`, failed command/tests, and a shortest-fix `suggestion`. When multiple failures occur, compact `failure.causes` keeps at most three entries (primary first); `standard` and `full` retain the complete list in `failureCauses`.
 
 Use `level: "standard"` for bounded operator diagnostics and `level: "full"` only for explicit manual troubleshooting. `full` reads complete semantic and verification artifacts; normal Desktop heartbeat and automatic callback delivery remain compact.
 
@@ -246,7 +249,7 @@ CLI exit codes are: `0` success; `2` command, input, or schema error; and `1` ru
 
 Registered workflows are `brainstorm`, `plan`, `dev`, `fix`, `fix-ci`, `execute-plan`, `review`, `parallel`, `worktree`, `merge`, and `new-skill`. Compose uses the same worker and job lifecycle as every other kind; only its prompt, workflow rules, verification, and report finalization differ. See [Compose workflows](doc/compose-workflows.md).
 
-Prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck` for write acceptance. Stages run fail-fast: build → test → diffCheck (deterministic self-check plus read-only MiMo review). Legacy `verification[]` remains accepted and maps to the **test stage only** — it does not satisfy build. Put scope or state prose in `task`. `dev`, `execute-plan`, and `implement` cannot complete without acceptance: missing build/test disposition at finalize pauses as `needs_input` with `acceptance_config_missing`; stage failures finish `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing`. Resume those codes (and checkpoint-backed stalls/timeouts) via Phase 2 `mimo_resume`. The `plan` workflow is read-only; MiMoCode returns the plan in its final response and does not write project files. The bridge saves the complete plan to `.codex-mimo/reports/<jobId>.plan.md`; default `mimo_result` returns only a bounded summary and `reportPath`. Asking it to write a plan file ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
+Prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck` for write acceptance. Stages run fail-fast: build → test → diffCheck (deterministic self-check plus read-only MiMo review). Legacy `verification[]` remains accepted and maps to the **test stage only** — it does not satisfy build. Put scope or state prose in `task`. `dev`, `execute-plan`, and `implement` cannot complete without acceptance: missing build/test disposition at finalize pauses as `needs_input` with `acceptance_config_missing`; stage failures finish `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing`. Resume those codes (and checkpoint-backed stalls/timeouts) via Phase 2 `mimo_resume`. For Maven/Gradle projects, detected `mvn` / `gradle` commands resolve to repository wrappers before execution and preflight: on Windows prefer `mvnw.cmd` / `gradlew.bat`; on POSIX prefer `./mvnw` / `./gradlew`. Explicit path entries are not rewritten. Missing or non-executable commands fail before edits with `acceptance_command_unavailable`. The `plan` workflow is read-only; MiMoCode returns the plan in its final response and does not write project files. The bridge saves the complete plan to `.codex-mimo/reports/<jobId>.plan.md`; default `mimo_result` returns only a bounded summary and `reportPath`. Asking it to write a plan file ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
 
 ```json
 { "workflow": "plan", "task": "Plan the feature; return the plan only" }
@@ -277,6 +280,22 @@ The per-job JSON file is authoritative; `jobs/state.json` is a rebuildable cache
 - Read-only jobs are checked against Git status, diff, untracked-file fingerprints, and HEAD changes.
 - Webhook secret values are removed from the MiMoCode child environment and are not written to job, signal, report, callback, audit, or notification payload files.
 - Large or non-ASCII prompts use UTF-8 attachment transport below `.codex-mimo/inputs/`.
+
+### Execution isolation
+
+Before the first model step, an internal hook compares the MiMoCode user query hash to the bridge prompt. On mismatch the run stops with `prompt_identity_mismatch` — not resumable; restart with the correct objective.
+
+The JSONL primary session (first `sessionID` in stdout) binds completion. Child sessions are ignored: their `session.post` callbacks are dropped, and only the bound session can finish the job. Mismatch between JSONL and callback session yields `callback_session_mismatch`; mid-run JSONL session drift yields `event_session_mismatch`.
+
+Write jobs with `allowedPaths` enforce scope at the hook (`write`/`edit` tools) and in a mandatory post-run audit. Out-of-scope writes or changed files finish `failed` with `write_scope_violation` (`failedStage: diff_check`). `batchMode=single` requires bounded `allowedPaths` at launch.
+
+| Error code | Recovery |
+| --- | --- |
+| `prompt_identity_mismatch` | MiMo received a different query than the job objective. Restart with the correct `task`; do not `mimo_resume`. |
+| `callback_session_mismatch` | Completion callback session differed from the JSONL run session. Inspect events/callback diagnostics; restart the job. |
+| `event_session_mismatch` | JSONL session identity changed during the run. Restart the job. |
+| `write_scope_violation` | A write or post-run audit found files outside `allowedPaths`. Tighten scope and relaunch with narrower `allowedPaths`. |
+| `acceptance_command_unavailable` | Build/test command missing or not executable before edits. Supply explicit `acceptance` with a repo wrapper path, fix wrapper permissions, or install the tool on PATH. |
 
 ## Development
 

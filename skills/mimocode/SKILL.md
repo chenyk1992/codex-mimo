@@ -83,17 +83,17 @@ A queued receipt alone does not prove a Codex notification target exists unless 
 Work tools:
 
 - `mimo_plan`: plan a clear task without writing files. Required: `cwd`, `task`.
-- `mimo_implement`: implement a narrow task. Required: `cwd`, `task`, `allowWrite: true`. Optional `batchMode`: `auto` (default), `single`, or `sliced`.
+- `mimo_implement`: implement a narrow task. Required: `cwd`, `task`, `allowWrite: true`. Optional `batchMode`: `auto` (default), `single`, or `sliced`. Optional `allowedPaths` (required when `batchMode=single`; bare `**` rejected).
 - `mimo_review`: review the current diff. Required: `cwd`; optional `base` defaults to `HEAD`.
 - `mimo_fix_ci`: repair failures from a log. Required: `cwd`, `file`; optional `task`.
 - `mimo_resume`: create a child job from a `needs_input`, `blocked`, `stalled`, eligible `timeout`, or resumable-failure parent (`build_failed`, `tests_failed`, `diff_check_failed`, `delivery_contract_missing`, `slice_failed`). Required: `cwd`, parent `jobId`. `task` is required for `needs_input`/`blocked` and optional for checkpoint-backed `stalled`/`timeout`/resumable failures. For slice-chain roots, resume continues the current attention slice and skips completed slices. `slice_plan_invalid` is not resumable — re-launch with a corrected objective/`batchMode`.
-- `mimo_compose`: run a registered workflow. Required for every request: `cwd`, `workflow`. `brainstorm`, `plan`, `dev`, `fix`, `parallel`, `worktree`, `merge`, and `new-skill` also require `task`; `fix-ci` and `execute-plan` require `file`; `review` requires neither. `fix-ci` may additionally include `task`. Optional fields where valid are `since`, `acceptance`, `verification`, `reportDir`, and write-workflow `batchMode`.
+- `mimo_compose`: run a registered workflow. Required for every request: `cwd`, `workflow`. `brainstorm`, `plan`, `dev`, `fix`, `parallel`, `worktree`, `merge`, and `new-skill` also require `task`; `fix-ci` and `execute-plan` require `file`; `review` requires neither. `fix-ci` may additionally include `task`. Optional fields where valid are `since`, `acceptance`, `verification`, `reportDir`, write-workflow `batchMode`, and write-workflow `allowedPaths` (required when `batchMode=single`).
 
 `acceptance` is the preferred write-acceptance contract: `acceptance.build` (build commands), `acceptance.test` (targeted tests), and `acceptance.diffCheck` (deterministic diff self-check plus read-only MiMo review; default true). Legacy `verification[]` remains accepted and maps to the **test stage only** — it does not satisfy build. Put acceptance prose in `task`, not in `verification` or `acceptance` command arrays.
 
-`dev`, `execute-plan`, and `implement` cannot complete without host development acceptance. Stages run fail-fast: build → test → diffCheck. Missing build disposition or targeted tests at finalize pause as `needs_input` with `acceptance_config_missing`. Stage failures finish `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing`. Compact `mimo_result` exposes stage outcomes plus failure fields (`failedStage`, failed command/tests, `suggestion`); resume those codes via Phase 2 `mimo_resume` and the parent checkpoint.
+`dev`, `execute-plan`, and `implement` cannot complete without host development acceptance. Stages run fail-fast: build → test → diffCheck. Missing build disposition or targeted tests at finalize pause as `needs_input` with `acceptance_config_missing`. Stage failures finish `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing`. Compact `mimo_result` exposes stage outcomes plus failure fields (`failedStage`, failed command/tests, `suggestion`); resume those codes via Phase 2 `mimo_resume` and the parent checkpoint. For Maven/Gradle projects, detected `mvn` / `gradle` commands resolve to repository wrappers (`mvnw.cmd` / `./mvnw`, `gradlew.bat` / `./gradlew`) before preflight and execution; missing commands fail before edits with `acceptance_command_unavailable`.
 
-Write workflows may set `batchMode` to `auto` (default bounded planning), `single` (one narrow deliverable), or `sliced` (require at least two slices). The bridge plans a slice manifest, persists `.codex-mimo/reports/<rootJobId>.slices.json` and `.codex-mimo/jobs/<chainId>.chain.json`, and runs **one slice at a time**. Slice children omit notification targets — only the root job notifies. Planning failure finishes the root as `failed` with `slice_plan_invalid` (not resumable; re-launch after re-planning); a failed slice finishes the root as `failed` with `slice_failed` (resumable). `mimo_resume` on the root (or attention slice) continues the current slice and never relaunches completed slices. Standard `mimo_result` exposes `completedSlices` / `remainingSlices` for chain roots.
+Write workflows may set `batchMode` to `auto` (default bounded planning), `single` (one narrow deliverable), or `sliced` (require at least two slices). `batchMode=single` requires bounded `allowedPaths`; bare repository-wide `**` is rejected. Supported patterns: exact file (`src/app.ts`), directory prefix (`src/components`), or trailing `/**` only (`src/components/**`). The bridge plans a slice manifest, persists `.codex-mimo/reports/<rootJobId>.slices.json` and `.codex-mimo/jobs/<chainId>.chain.json`, and runs **one slice at a time**. Slice children omit notification targets — only the root job notifies. Planning failure finishes the root as `failed` with `slice_plan_invalid` (not resumable; re-launch after re-planning); a failed slice finishes the root as `failed` with `slice_failed` (resumable). `mimo_resume` on the root (or attention slice) continues the current slice and never relaunches completed slices. Standard `mimo_result` exposes `completedSlices` / `remainingSlices` for chain roots.
 
 The `plan` workflow is read-only: MiMoCode must return the plan in its final response and must not write a project plan file. The bridge saves that final response to `.codex-mimo/reports/<jobId>.plan.md`; compact callers consume only the bounded summary and report path. Asking it to save a file ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
 
@@ -172,6 +172,24 @@ Effective-progress stop-loss is separate from transport idle timeout. JSONL may 
 Distinguish wakeup paths: MiMo `session.post` is execution evidence; Codex Desktop recommended wakeup is the in-chat heartbeat; Codex App Server notification is compatibility history writeback on an independent connection and does not prove Desktop UI visibility; Cursor companion uses the host stop hook. A work receipt alone does not prove a Codex notification target exists unless the explicit Codex notification launch succeeded. Without a frozen Codex target, the terminal state is on disk only — discover it via Desktop heartbeat, `mimo_jobs`, or an explicit user request.
 
 For stall diagnosis only, an occasional `mimo_status` may read `idleMs`, `lastEventAt`, `lastProgressAt`, `quietSince`, and `processAlive` while a job is `running`. Never poll or loop on control tools inside a single Desktop turn; the heartbeat schedule owns revisits.
+
+## Execution isolation and safety
+
+Before the first model step, an internal hook verifies the MiMo user query matches the bridge prompt. On mismatch the job fails with `prompt_identity_mismatch` — **not resumable**; restart with the correct objective.
+
+The JSONL primary session (first `sessionID` in stdout) binds job completion. Child-session `session.post` callbacks are ignored. Session mismatch errors: `callback_session_mismatch` (callback vs JSONL), `event_session_mismatch` (JSONL drift mid-run).
+
+Write jobs with `allowedPaths` block out-of-scope `write`/`edit` at the hook and in a mandatory post-run audit (`write_scope_violation`). Tighten scope and relaunch rather than resuming.
+
+| Error code | Action |
+| --- | --- |
+| `prompt_identity_mismatch` | Restart with correct `task`; do not `mimo_resume` |
+| `callback_session_mismatch` | Inspect events/callback diagnostics; restart |
+| `event_session_mismatch` | Restart the job |
+| `write_scope_violation` | Relaunch with narrower `allowedPaths` |
+| `acceptance_command_unavailable` | Supply explicit `acceptance` with repo wrapper path or install the tool |
+
+When multiple failures coexist, compact `mimo_result` keeps at most three `failure.causes`; use `level: "standard"` or `level: "full"` for the complete list.
 
 ## Acceptance and Context Budget
 
