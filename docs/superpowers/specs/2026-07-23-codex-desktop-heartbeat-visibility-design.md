@@ -20,7 +20,7 @@ Existing smoke coverage only reads the persisted session rollout after the callb
 
 ## Goals
 
-1. Make Codex Desktop's default MiMoCode wait path use a native in-chat scheduled follow-up (minute heartbeat) that calls `mimo_status` until attention, then one `mimo_result`, then deletes the schedule and answers the user.
+1. Make Codex Desktop's default MiMoCode wait path use a native in-chat scheduled follow-up (5-minute heartbeat) that calls `mimo_status` until attention, then one `mimo_result`, then deletes the schedule and answers the user.
 2. Stop teaching Desktop to pass `notify: { type: "codex" }` by default.
 3. Keep the App Server notify pipeline for CLI and explicit compatibility launches, but document `delivered` as history-write completion on an independent App Server connection — never as Desktop renderer refresh.
 4. Update skill, README, operations guide, Compose docs, plugin description, release-contract tests, and smoke wording so they cannot reintroduce the false equivalence.
@@ -46,7 +46,7 @@ Existing smoke coverage only reads the persisted session rollout after the callb
 ```text
 Codex Desktop (default)
   work tool (no notify) -> queued receipt + jobId
-  -> create in-chat scheduled follow-up (~1 minute)
+  -> create in-chat scheduled follow-up (every 5 minutes)
   -> each beat: mimo_status(jobId)
      still queued/running -> stop quietly
      needs_input|blocked|terminal -> mimo_result once
@@ -75,7 +75,7 @@ CLI / explicit compatibility
 Desktop section must:
 
 1. Omit `notify` by default.
-2. Require creating an in-chat scheduled follow-up / heartbeat about once per minute.
+2. Require creating an in-chat scheduled follow-up / heartbeat every 5 minutes.
 3. Restrict each beat to at most one `mimo_status` while non-terminal.
 4. On attention or terminal: at most one `mimo_result`, delete the schedule, answer the user.
 5. Explicitly forbid treating App Server `delivered` as Desktop visibility.

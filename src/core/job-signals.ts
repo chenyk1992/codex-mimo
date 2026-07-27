@@ -10,6 +10,7 @@ export type JobSignalKind =
   | "milestone"
   | "needs_input"
   | "blocked"
+  | "stalled"
   | "verification_started"
   | "verification_finished"
   | "completed"
@@ -20,6 +21,7 @@ export type JobSignalKind =
 export const ATTENTION_SIGNAL_KINDS = [
   "needs_input",
   "blocked",
+  "stalled",
   "completed",
   "failed",
   "cancelled",

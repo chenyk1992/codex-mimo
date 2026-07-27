@@ -36,6 +36,29 @@ const VERIFICATION_SCHEMA = {
   items: VERIFICATION_ITEM_SCHEMA,
   description: "Executable verification commands, not natural-language acceptance criteria"
 };
+const ACCEPTANCE_SCHEMA = {
+  type: "object",
+  properties: {
+    build: {
+      type: "array",
+      items: STRING_SCHEMA
+    },
+    test: {
+      type: "array",
+      items: STRING_SCHEMA
+    },
+    diffCheck: { type: "boolean" }
+  },
+  additionalProperties: false
+};
+const BATCH_MODE_SCHEMA = {
+  type: "string",
+  enum: ["auto", "single", "sliced"]
+};
+const BATCH_MODE_WITH_DEFAULT_SCHEMA = {
+  ...BATCH_MODE_SCHEMA,
+  default: "auto"
+};
 const NOTIFY_SCHEMA = {
   anyOf: [
     {
@@ -64,6 +87,8 @@ const COMMON_JOB_PROPERTIES = {
   model: STRING_SCHEMA,
   timeoutMs: { type: "integer", exclusiveMinimum: 0, default: 1_800_000 },
   idleTimeoutMs: { type: "integer", minimum: 0, default: 1_800_000 },
+  progressWarningMs: { type: "integer", minimum: 0, default: 120_000 },
+  progressTimeoutMs: { type: "integer", minimum: 0, default: 300_000 },
   notify: NOTIFY_SCHEMA
 };
 
@@ -80,7 +105,12 @@ function canonicalWorkSchema(properties, required) {
 const CANONICAL_WORK_TOOL_SCHEMAS = {
   mimo_plan: canonicalWorkSchema({ task: STRING_SCHEMA }, ["cwd", "task"]),
   mimo_implement: canonicalWorkSchema(
-    { task: STRING_SCHEMA, allowWrite: { type: "boolean" } },
+    {
+      task: STRING_SCHEMA,
+      allowWrite: { type: "boolean" },
+      acceptance: ACCEPTANCE_SCHEMA,
+      batchMode: BATCH_MODE_WITH_DEFAULT_SCHEMA
+    },
     ["cwd", "task", "allowWrite"]
   ),
   mimo_review: canonicalWorkSchema({ base: { ...STRING_SCHEMA, default: "HEAD" } }, ["cwd"]),
@@ -90,7 +120,7 @@ const CANONICAL_WORK_TOOL_SCHEMAS = {
   ),
   mimo_resume: canonicalWorkSchema(
     { jobId: STRING_SCHEMA, task: STRING_SCHEMA },
-    ["cwd", "jobId", "task"]
+    ["cwd", "jobId"]
   ),
   mimo_compose: canonicalWorkSchema({
     workflow: {
@@ -103,9 +133,36 @@ const CANONICAL_WORK_TOOL_SCHEMAS = {
     task: STRING_SCHEMA,
     file: STRING_SCHEMA,
     since: STRING_SCHEMA,
+    acceptance: ACCEPTANCE_SCHEMA,
     verification: VERIFICATION_SCHEMA,
-    reportDir: STRING_SCHEMA
+    reportDir: STRING_SCHEMA,
+    batchMode: BATCH_MODE_SCHEMA
   }, ["cwd", "workflow"])
+};
+
+const OUTPUT_LEVEL_SCHEMA = {
+  type: "string",
+  enum: ["compact", "standard", "full"],
+  default: "compact"
+};
+
+function canonicalControlSchema() {
+  return {
+    type: "object",
+    properties: {
+      cwd: STRING_SCHEMA,
+      jobId: { type: "string" },
+      level: OUTPUT_LEVEL_SCHEMA
+    },
+    required: ["cwd"],
+    additionalProperties: false,
+    $schema: "http://json-schema.org/draft-07/schema#"
+  };
+}
+
+const CANONICAL_LEVEL_CONTROL_SCHEMAS = {
+  mimo_status: canonicalControlSchema(),
+  mimo_result: canonicalControlSchema()
 };
 
 function usage() {
@@ -453,7 +510,10 @@ async function validateBuiltTools(root, errors) {
     if (JSON.stringify(names) !== JSON.stringify(EXPECTED_TOOL_NAMES)) {
       errors.push(`built MCP server must expose exactly the 13 supported tools in canonical order; found: ${names.join(", ")}`);
     }
-    for (const [name, expectedSchema] of Object.entries(CANONICAL_WORK_TOOL_SCHEMAS)) {
+    for (const [name, expectedSchema] of Object.entries({
+      ...CANONICAL_WORK_TOOL_SCHEMAS,
+      ...CANONICAL_LEVEL_CONTROL_SCHEMAS
+    })) {
       const tool = tools.find((candidate) => candidate?.name === name);
       if (stableJson(tool?.inputSchema) !== stableJson(expectedSchema)) {
         errors.push(`${name} input schema must match the canonical contract`);

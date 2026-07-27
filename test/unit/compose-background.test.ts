@@ -42,7 +42,10 @@ describe("mimo_compose", () => {
       task: "Build it",
       verification: ["npm test"],
       timeoutMs: 1_800_000,
-      idleTimeoutMs: 1_800_000
+      idleTimeoutMs: 1_800_000,
+      progressWarningMs: 120_000,
+      progressTimeoutMs: 300_000,
+      batchMode: "auto"
     });
     expect(spawnJobSupervisor).toHaveBeenCalledWith(cwd);
   });

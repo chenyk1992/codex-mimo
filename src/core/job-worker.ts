@@ -1,7 +1,12 @@
 import {
   bindJobDefinition,
+  bootstrapWriteJobChain,
+  advanceJobChainAfterChild,
+  isChainOrchestratorRoot,
+  type AdvanceJobChainAfterChildDependencies,
   type BoundJobDefinition,
-  type JobExecutionFinalizeContext
+  type JobExecutionFinalizeContext,
+  type WriteChainBootstrapDependencies
 } from "./job-definitions.js";
 import { appendJobLogLine, appendRawAndNormalizedEvent } from "./job-log.js";
 import { listWebhookSecretEnvironmentNames, readJob } from "./job-store.js";
@@ -14,6 +19,13 @@ import {
   type JobTransitionResult
 } from "./job-transition.js";
 import { nowIso, type JobRecord, type JobStatus } from "./jobs.js";
+import {
+  classifyEffectiveProgress,
+  classifyStallReason,
+  parseProgressEventInput,
+  progressIdleMs
+} from "./job-progress.js";
+import { publicProgressSummary, type PublicSummaryContext } from "./public-summary.js";
 import {
   captureGitCommitChanges,
   captureGitDiff,
@@ -30,7 +42,8 @@ import {
 } from "../mimo/hook-callback.js";
 import {
   runMimoCliStreaming,
-  type StreamingRunResult
+  type StreamingRunResult,
+  type TerminationReason
 } from "../mimo/streaming-runner.js";
 import {
   captureProcessIdentity,
@@ -51,10 +64,14 @@ import {
 } from "./process-lock.js";
 import { resolveJobWorkerOwnershipKey } from "./worker-ownership.js";
 import { isRuntimeArtifactPath } from "./runtime-paths.js";
-import type { PublicSummaryContext } from "./public-summary.js";
+import { persistJobCheckpoint } from "./job-checkpoint.js";
 
 export interface JobWorkerDependencies {
   bindJobDefinition?: (job: JobRecord) => BoundJobDefinition;
+  bootstrapWriteJobChain?: typeof bootstrapWriteJobChain;
+  chainBootstrap?: WriteChainBootstrapDependencies;
+  advanceJobChainAfterChild?: typeof advanceJobChainAfterChild;
+  chainAdvance?: AdvanceJobChainAfterChildDependencies;
   createHookCallbackController?: typeof createHookCallbackController;
   runMimoStreaming?: typeof runMimoCliStreaming;
   captureStatus?: typeof captureGitStatus;
@@ -69,8 +86,12 @@ export interface JobWorkerDependencies {
   spawnNotificationWorker?: typeof spawnNotificationWorker;
   captureProcessIdentity?: typeof captureProcessIdentity;
   terminateOwnedProcess?: typeof terminateOwnedJobProcess;
+  writeCheckpoint?: (cwd: string, jobId: string, job: JobRecord) => Promise<void> | void;
+  onProgressMonitorTick?: (tick: () => Promise<void>) => void;
   statusPollMs?: number;
   recoveryRetryMs?: number;
+  progressMonitorPollMs?: number;
+  nowMs?: () => number;
   sleep?: (delayMs: number) => Promise<void>;
 }
 
@@ -79,6 +100,7 @@ type WorkerStage = "starting" | "prompt" | "hook" | "run" | "callback" | "finali
 const TERMINAL_STATUSES = new Set<JobStatus>([
   "needs_input",
   "blocked",
+  "stalled",
   "completed",
   "failed",
   "cancelled",
@@ -114,12 +136,18 @@ async function runOwnedJobWorker(
   const recover = deps.recoverPendingTransition ?? recoverPendingTransition;
   const recovered = await recover(cwd, jobId);
   if (recovered?.deliveryCreated) startNotificationWorker(cwd, recovered.job, deps);
+  if (recovered && TERMINAL_STATUSES.has(recovered.job.status)) {
+    await maybeAdvanceJobChainAfterChild(cwd, recovered.job, deps);
+  }
 
   const initial = requireJob(cwd, jobId);
   if (TERMINAL_STATUSES.has(initial.status)) return;
 
   const transition = deps.transitionJob ?? transitionJob;
   if (initial.status === "running") {
+    if (isChainOrchestratorRoot(initial)) {
+      return;
+    }
     const recovered = await recoverOwnedProcess(cwd, jobId, deps);
     if (!recovered) return;
     if (recovered.job.cancellationRequestedAt) {
@@ -128,7 +156,7 @@ async function runOwnedJobWorker(
         summary: `Cancelled ${jobId}.`,
         errorCode: "cancelled"
       }, deps);
-      if (cancelled.deliveryCreated) startNotificationWorker(cwd, cancelled.job, deps);
+      await afterTerminalTransition(cwd, cancelled, deps);
       return;
     }
     const timedOut = jobDeadlineExpired(recovered.job);
@@ -139,8 +167,7 @@ async function runOwnedJobWorker(
       ? { status: "timeout", summary, error: summary, errorCode: "timeout" }
       : { status: "failed", summary, error: summary, errorCode: "worker_restarted" };
     const result = await transitionRecoverably(cwd, jobId, failure, deps);
-    bestEffortLog(result.job.logFile, { type: "job", status: result.job.status });
-    if (result.deliveryCreated) startNotificationWorker(cwd, result.job, deps);
+    await afterTerminalTransition(cwd, result, deps);
     return;
   }
   if (initial.status !== "queued") return;
@@ -161,7 +188,38 @@ async function runOwnedJobWorker(
     executionGuard = startJobExecutionGuard(cwd, jobId, deps.statusPollMs ?? 25);
     assertJobActive(cwd, jobId, executionGuard.signal);
 
+    // Task 5/7: write roots with batchMode auto|single|sliced become orchestrators —
+    // plan slices, spawn first child with null notify, skip root write MiMo.
     stage = "prompt";
+    const bootstrap = await awaitWithAbort(
+      (deps.bootstrapWriteJobChain ?? bootstrapWriteJobChain)(
+        requireJob(cwd, jobId),
+        deps.chainBootstrap ?? {},
+        executionGuard.signal
+      ),
+      executionGuard.signal
+    );
+    if (bootstrap.status === "failed") {
+      const failed = await transitionRecoverably(cwd, jobId, {
+        status: "failed",
+        summary: bootstrap.reason,
+        error: bootstrap.reason,
+        errorCode: bootstrap.errorCode
+      }, deps);
+      await afterTerminalTransition(cwd, failed, deps);
+      return;
+    }
+    if (bootstrap.status === "bootstrapped") {
+      bestEffortLog(bootstrap.root.logFile, {
+        type: "job",
+        status: "running",
+        phase: bootstrap.root.phase
+      });
+      // Root stays running as orchestrator; child workers execute write slices.
+      // Child terminals call advanceJobChainAfterChild via afterTerminalTransition.
+      return;
+    }
+
     const prompt = await awaitWithAbort(
       definition.buildPrompt(executionGuard.signal),
       executionGuard.signal
@@ -221,6 +279,11 @@ async function runOwnedJobWorker(
     stage = "run";
     let run: StreamingRunResult;
     let processTerminationConfirmed = false;
+    let lastProgressFingerprint: string | undefined;
+    let lastCheckpointAt = 0;
+    const nowMs = deps.nowMs ?? (() => Date.now());
+    const isoNow = () => new Date(nowMs()).toISOString();
+    let progressMonitor: { stop: () => void } | undefined;
     try {
       run = await (deps.runMimoStreaming ?? runMimoCliStreaming)(cwd, mimoArgs, {
           timeoutMs: readTimeout(initial.request),
@@ -228,10 +291,25 @@ async function runOwnedJobWorker(
           env: hook.env,
           omitEnv: listWebhookSecretEnvironmentNames(cwd),
           signal: executionGuard.signal,
+          onTerminationControl: ({ requestTermination }) => {
+            progressMonitor = startProgressMonitor({
+              cwd,
+              jobId,
+              deps,
+              nowMs,
+              isoNow,
+              requestTermination
+            });
+          },
           onStart: async (pid) => {
             const persistProcess = deps.updateRunningJobProcess ?? updateRunningJobProcess;
             const persistObservation = deps.updateRunningJobObservation ?? updateRunningJobObservation;
-            await persistObservation(cwd, jobId, { lastEventAt: nowIso() });
+            const startedAt = isoNow();
+            await persistObservation(cwd, jobId, {
+              lastEventAt: startedAt,
+              lastActivityAt: startedAt,
+              lastProgressAt: startedAt
+            });
             const provisional = await awaitWithAbort(
               persistProcess(cwd, jobId, pid, null),
               executionGuard!.signal
@@ -254,20 +332,68 @@ async function runOwnedJobWorker(
             queueEventWrite(async () =>
               (deps.appendRawAndNormalizedEvent ?? appendRawAndNormalizedEvent)(cwd, jobId, line));
             const persistObservation = deps.updateRunningJobObservation ?? updateRunningJobObservation;
+            const timestamp = isoNow();
             const sessionId = extractSessionIdFromRawLine(line);
             const toolName = extractToolNameFromRawLine(line);
+            const event = parseProgressEventInput(line);
+            let progressPatch: Parameters<typeof updateRunningJobObservation>[2] = {};
+            if (event) {
+              const classified = classifyEffectiveProgress({
+                previousFingerprint: lastProgressFingerprint,
+                event
+              });
+              if (classified.progressed) {
+                lastProgressFingerprint = classified.fingerprint;
+                progressPatch = {
+                  lastProgressAt: timestamp,
+                  lastProgressKind: classified.kind,
+                  lastProgressFingerprint: classified.fingerprint,
+                  quietSince: null,
+                  ...(classified.lastCommand ? { lastCommand: classified.lastCommand } : {})
+                };
+                const checkpointWriter = deps.writeCheckpoint ?? defaultWriteCheckpoint;
+                const checkpointNow = nowMs();
+                if (checkpointNow - lastCheckpointAt >= 1_000) {
+                  lastCheckpointAt = checkpointNow;
+                  void Promise.resolve(checkpointWriter(cwd, jobId, {
+                    ...requireJob(cwd, jobId),
+                    lastProgressAt: timestamp,
+                    lastProgressKind: classified.kind,
+                    lastProgressFingerprint: classified.fingerprint,
+                    ...(classified.lastCommand ? { lastCommand: classified.lastCommand } : {})
+                  })).catch(() => undefined);
+                }
+              }
+            }
             void persistObservation(cwd, jobId, {
-              lastEventAt: nowIso(),
+              lastEventAt: timestamp,
+              lastActivityAt: timestamp,
               ...(sessionId ? { sessionId } : {}),
-              ...(toolName ? { lastTool: toolName } : {})
+              ...(toolName ? { lastTool: toolName } : {}),
+              ...progressPatch
             }).catch(() => undefined);
           }
         });
       processTerminationConfirmed = true;
     } finally {
+      progressMonitor?.stop();
       if (processTerminationConfirmed) {
         await (deps.updateRunningJobProcess ?? updateRunningJobProcess)(cwd, jobId, null, null);
       }
+    }
+    if (run.terminationReason === "progress_timeout") {
+      await waitForTerminalJobStatus(cwd, jobId, deps);
+      executionGuard.stop();
+      const recovered = await (deps.recoverPendingTransition ?? recoverPendingTransition)(cwd, jobId);
+      if (recovered?.deliveryCreated) startNotificationWorker(cwd, recovered.job, deps);
+      return;
+    }
+    const postRun = requireJob(cwd, jobId);
+    if (TERMINAL_STATUSES.has(postRun.status)) {
+      executionGuard.stop();
+      const recovered = await (deps.recoverPendingTransition ?? recoverPendingTransition)(cwd, jobId);
+      if (recovered?.deliveryCreated) startNotificationWorker(cwd, recovered.job, deps);
+      return;
     }
     if (requireJob(cwd, jobId).cancellationRequestedAt) {
       executionGuard.stop();
@@ -276,7 +402,7 @@ async function runOwnedJobWorker(
         summary: `Cancelled ${jobId}.`,
         errorCode: "cancelled"
       }, deps);
-      if (cancelled.deliveryCreated) startNotificationWorker(cwd, cancelled.job, deps);
+      await afterTerminalTransition(cwd, cancelled, deps);
       return;
     }
     await awaitWithAbort(eventWrites, executionGuard.signal);
@@ -348,8 +474,7 @@ async function runOwnedJobWorker(
     assertJobActive(cwd, jobId, executionGuard.signal);
     executionGuard.stop();
     const result = await transition(cwd, jobId, outcome);
-    bestEffortLog(result.job.logFile, { type: "job", status: result.job.status });
-    if (result.deliveryCreated) startNotificationWorker(cwd, result.job, deps);
+    await afterTerminalTransition(cwd, result, deps);
   } catch (error) {
     if (executionGuard) {
       try {
@@ -482,6 +607,13 @@ async function transitionRecoverably(
   request: JobTransition,
   deps: JobWorkerDependencies
 ): Promise<JobTransitionResult> {
+  if (TERMINAL_STATUSES.has(request.status)) {
+    const latest = readJob(cwd, jobId);
+    if (latest) {
+      const writeCheckpoint = deps.writeCheckpoint ?? defaultWriteCheckpoint;
+      await writeCheckpoint(cwd, jobId, latest);
+    }
+  }
   try {
     return await (deps.transitionJob ?? transitionJob)(cwd, jobId, request);
   } catch (error) {
@@ -489,6 +621,31 @@ async function transitionRecoverably(
     if (!recovered) throw error;
     return recovered;
   }
+}
+
+async function defaultWriteCheckpoint(
+  cwd: string,
+  jobId: string,
+  job: JobRecord
+): Promise<void> {
+  await persistJobCheckpoint(cwd, job);
+}
+
+async function waitForTerminalJobStatus(
+  cwd: string,
+  jobId: string,
+  deps: JobWorkerDependencies,
+  timeoutMs = 30_000
+): Promise<JobRecord> {
+  const sleep = deps.sleep ?? ((delayMs: number) => new Promise((resolve) => setTimeout(resolve, delayMs)));
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const job = readJob(cwd, jobId);
+    if (!job) throw new Error(`Job not found: ${jobId}`);
+    if (TERMINAL_STATUSES.has(job.status)) return job;
+    await sleep(10);
+  }
+  throw new Error(`Timed out waiting for terminal job status: ${jobId}`);
 }
 
 async function failWorker(
@@ -517,7 +674,7 @@ async function failWorker(
       summary: `Cancelled ${jobId}.`,
       errorCode: "cancelled"
     }, deps);
-    if (cancelled.deliveryCreated) startNotificationWorker(cwd, cancelled.job, deps);
+    await afterTerminalTransition(cwd, cancelled, deps);
     return;
   }
 
@@ -528,7 +685,7 @@ async function failWorker(
       error: "MiMoCode job timed out.",
       errorCode: "timeout"
     }, deps);
-    if (timedOut.deliveryCreated) startNotificationWorker(cwd, timedOut.job, deps);
+    await afterTerminalTransition(cwd, timedOut, deps);
     return;
   }
 
@@ -541,14 +698,13 @@ async function failWorker(
   };
   let result: JobTransitionResult;
   try {
-    result = await (deps.transitionJob ?? transitionJob)(cwd, jobId, failure);
+    result = await transitionRecoverably(cwd, jobId, failure, deps);
   } catch {
     const recovered = await (deps.recoverPendingTransition ?? recoverPendingTransition)(cwd, jobId);
     if (!recovered) throw error;
     result = recovered;
   }
-  bestEffortLog(result.job.logFile, { type: "job", status: result.job.status });
-  if (result.deliveryCreated) startNotificationWorker(cwd, result.job, deps);
+  await afterTerminalTransition(cwd, result, deps);
 }
 
 function startNotificationWorker(
@@ -563,6 +719,42 @@ function startNotificationWorker(
       { type: "notification" }
     )
   });
+}
+
+async function afterTerminalTransition(
+  cwd: string,
+  result: JobTransitionResult,
+  deps: JobWorkerDependencies
+): Promise<void> {
+  bestEffortLog(result.job.logFile, { type: "job", status: result.job.status });
+  // Children launch with null notificationTarget — only root deliveries are enqueued.
+  if (result.deliveryCreated) startNotificationWorker(cwd, result.job, deps);
+  await maybeAdvanceJobChainAfterChild(cwd, result.job, deps);
+}
+
+async function maybeAdvanceJobChainAfterChild(
+  cwd: string,
+  job: JobRecord,
+  deps: JobWorkerDependencies
+): Promise<void> {
+  if (!TERMINAL_STATUSES.has(job.status)) return;
+  if (!job.chainId || !job.sliceId || !job.parentJobId) return;
+  try {
+    const advanced = await (deps.advanceJobChainAfterChild ?? advanceJobChainAfterChild)(
+      { cwd, child: job },
+      deps.chainAdvance ?? {}
+    );
+    if (advanced.ignored) return;
+    if (advanced.deliveryCreated) {
+      startNotificationWorker(cwd, advanced.root, deps);
+    }
+  } catch (error) {
+    bestEffortJobLog(
+      cwd,
+      job.id,
+      `Failed to advance job chain after child terminal: ${errorMessage(error)}`
+    );
+  }
 }
 
 async function recoverOwnedProcess(
@@ -628,6 +820,180 @@ function readIdleTimeout(request: unknown): number {
     return value;
   }
   return 1_800_000;
+}
+
+function readProgressTimeout(job: JobRecord): number {
+  if (typeof job.progressTimeoutMs === "number") return job.progressTimeoutMs;
+  return readNonNegativeIntFromRequest(job.request, "progressTimeoutMs", 300_000);
+}
+
+function readProgressWarning(job: JobRecord): number {
+  if (typeof job.progressWarningMs === "number") return job.progressWarningMs;
+  return readNonNegativeIntFromRequest(job.request, "progressWarningMs", 120_000);
+}
+
+function readNonNegativeIntFromRequest(
+  request: unknown,
+  field: string,
+  fallback: number
+): number {
+  if (typeof request !== "object" || request === null || Array.isArray(request)) return fallback;
+  const value = (request as Record<string, unknown>)[field];
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && Number.isInteger(value)
+    ? value
+    : fallback;
+}
+
+interface ProgressMonitorOptions {
+  cwd: string;
+  jobId: string;
+  deps: JobWorkerDependencies;
+  nowMs: () => number;
+  isoNow: () => string;
+  requestTermination: (reason: TerminationReason) => Promise<void>;
+}
+
+function startProgressMonitor(options: ProgressMonitorOptions): { stop: () => void } {
+  const pollMs = Math.max(1, options.deps.progressMonitorPollMs ?? 1_000);
+  const writeCheckpoint = options.deps.writeCheckpoint ?? defaultWriteCheckpoint;
+  let stopped = false;
+  let warningHandled = false;
+  let timeoutHandled = false;
+  let timeoutInFlight = false;
+
+  const tick = async () => {
+    if (stopped || timeoutHandled || timeoutInFlight) return;
+    try {
+      const job = readJob(options.cwd, options.jobId);
+      if (!job || job.status !== "running") return;
+
+      const progressTimeoutMs = readProgressTimeout(job);
+      if (progressTimeoutMs <= 0) return;
+
+      const progressWarningMs = readProgressWarning(job);
+      const idle = progressIdleMs(job.lastProgressAt ?? job.startedAt, options.nowMs());
+      if (idle === null) return;
+
+      if (idle >= progressTimeoutMs) {
+        timeoutInFlight = true;
+        try {
+          const latest = requireJob(options.cwd, options.jobId);
+          const latestIdle = progressIdleMs(latest.lastProgressAt ?? latest.startedAt, options.nowMs());
+          if (latest.status !== "running") {
+            timeoutHandled = true;
+            return;
+          }
+          if (latestIdle === null || latestIdle < progressTimeoutMs) return;
+
+          await writeCheckpoint(options.cwd, options.jobId, latest);
+          await options.requestTermination("progress_timeout");
+          const stallErrorCode = classifyStallReasonForJob(latest, options.deps);
+          const confirmed = confirmProcessTerminated(latest, options.deps);
+          if (confirmed) {
+            const summary = publicProgressSummary({
+              type: "job",
+              status: "stalled",
+              errorCode: stallErrorCode
+            });
+            const result = await transitionRecoverably(options.cwd, options.jobId, {
+              status: "stalled",
+              summary,
+              error: summary,
+              errorCode: stallErrorCode
+            }, options.deps);
+            await afterTerminalTransition(options.cwd, result, options.deps);
+          } else {
+            const summary = publicProgressSummary({
+              type: "job",
+              status: "blocked",
+              errorCode: "stalled_process_alive"
+            });
+            const result = await transitionRecoverably(options.cwd, options.jobId, {
+              status: "blocked",
+              summary,
+              error: summary,
+              errorCode: "stalled_process_alive"
+            }, options.deps);
+            await afterTerminalTransition(options.cwd, result, options.deps);
+          }
+          const after = readJob(options.cwd, options.jobId);
+          if (after && after.status !== "running") timeoutHandled = true;
+        } finally {
+          timeoutInFlight = false;
+        }
+        return;
+      }
+
+      if (idle >= progressWarningMs && !warningHandled) {
+        warningHandled = true;
+        const latest = requireJob(options.cwd, options.jobId);
+        classifyStallReasonForJob(latest, options.deps);
+        const persistObservation = options.deps.updateRunningJobObservation ?? updateRunningJobObservation;
+        await persistObservation(options.cwd, options.jobId, {
+          quietSince: options.isoNow()
+        });
+      }
+    } catch {
+      // Progress monitoring is best-effort and must not replace the worker outcome.
+    }
+  };
+
+  const timer = setInterval(() => void tick(), pollMs);
+  timer.unref?.();
+  options.deps.onProgressMonitorTick?.(tick);
+  void tick();
+  return {
+    stop: () => {
+      stopped = true;
+      clearInterval(timer);
+    }
+  };
+}
+
+function classifyStallReasonForJob(job: JobRecord, deps: JobWorkerDependencies): string {
+  const processAlive = probeProcessAlive(job, deps);
+  const activityAnchor = Date.parse(job.lastActivityAt ?? "");
+  const progressAnchor = Date.parse(job.lastProgressAt ?? job.startedAt ?? "");
+  const hasRecentActivity = Number.isFinite(activityAnchor) &&
+    Number.isFinite(progressAnchor) &&
+    activityAnchor > progressAnchor;
+  return classifyStallReason({
+    lastProgressKind: job.lastProgressKind,
+    lastTool: job.lastTool,
+    processAlive,
+    hasRecentActivity
+  });
+}
+
+function probeProcessAlive(job: JobRecord, deps: JobWorkerDependencies): boolean {
+  if (job.pid === null) return false;
+  const captureIdentity = deps.captureProcessIdentity ?? captureProcessIdentity;
+  try {
+    const probe = captureIdentity(job.pid);
+    return probe.status === "running" || probe.status === "unconfirmed";
+  } catch {
+    return false;
+  }
+}
+
+function confirmProcessTerminated(job: JobRecord, deps: JobWorkerDependencies): boolean {
+  if (job.pid === null) return true;
+  const terminate = deps.terminateOwnedProcess ?? terminateOwnedJobProcess;
+  const captureIdentity = deps.captureProcessIdentity ?? captureProcessIdentity;
+  if (job.processIdentity === null) {
+    try {
+      const probe = captureIdentity(job.pid);
+      return probe.status === "not_running";
+    } catch {
+      return false;
+    }
+  }
+  try {
+    const result = terminate(job.pid, job.processIdentity);
+    return result.status === "not_running" || result.status === "terminated";
+  } catch {
+    return false;
+  }
 }
 
 function jobDeadlineExpired(job: JobRecord, now = Date.now()): boolean {

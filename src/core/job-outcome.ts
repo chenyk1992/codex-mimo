@@ -1,13 +1,21 @@
 import type {
   ExecutionCallbackSummary,
+  JobAcceptanceSummary,
   JobReportPaths,
   JobStatus,
   JobVerification
 } from "./jobs.js";
+import { publicProgressSummary } from "./public-summary.js";
 
 export interface RunEvidence {
   exitCode: number;
-  terminationReason?: "process_timeout" | "idle_timeout" | "host_abort" | "user_cancelled";
+  terminationReason?:
+    | "process_timeout"
+    | "idle_timeout"
+    | "progress_timeout"
+    | "host_abort"
+    | "user_cancelled";
+  stallErrorCode?: string;
   executionCallback?: ExecutionCallbackSummary;
   verification: JobVerification[];
   finalText: string;
@@ -20,6 +28,7 @@ export interface JobOutcome {
   sessionId?: string | null;
   changedFiles?: string[];
   verification?: JobVerification[];
+  acceptance?: JobAcceptanceSummary;
   executionCallback?: ExecutionCallbackSummary;
   reportPaths?: JobReportPaths;
   error?: string;
@@ -72,6 +81,21 @@ export function classifyRunOutcome(evidence: RunEvidence): JobOutcome {
 
   if (evidence.terminationReason === "user_cancelled") {
     return failureOutcome("cancelled", "MiMoCode job was cancelled.", "cancelled", common);
+  }
+  if (evidence.terminationReason === "progress_timeout") {
+    const errorCode = evidence.stallErrorCode ?? "no_effective_progress";
+    const summary = publicProgressSummary({
+      type: "job",
+      status: "stalled",
+      errorCode
+    });
+    return {
+      status: "stalled",
+      summary,
+      errorCode,
+      error: summary,
+      ...common
+    };
   }
   if (evidence.terminationReason === "idle_timeout") {
     return failureOutcome(

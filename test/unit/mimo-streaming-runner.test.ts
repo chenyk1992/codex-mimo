@@ -276,6 +276,43 @@ describe("streaming MiMo CLI runner", () => {
     expect(child.listenerCount("close")).toBe(0);
   });
 
+  it("terminates the process when progress_timeout is requested externally", async () => {
+    let requestTermination: ((reason: string) => Promise<void>) | undefined;
+    let killedPid: number | null | undefined;
+    const runPromise = runMimoCliStreaming("E:/project/app", ["run"], {
+      onTerminationControl: (control) => {
+        requestTermination = control.requestTermination;
+      },
+      spawnProcess: () => {
+        const child = new EventEmitter() as EventEmitter & {
+          stdout: Readable;
+          stderr: Readable;
+          pid: number;
+          kill: () => boolean;
+        };
+        child.pid = 5252;
+        child.stdout = new Readable({ read() {} });
+        child.stderr = new Readable({ read() {} });
+        child.kill = () => true;
+        return child;
+      },
+      terminateProcessTree: (pid, child) => {
+        killedPid = pid;
+        queueMicrotask(() => child.emit("close", null));
+      }
+    });
+
+    await vi.waitFor(() => {
+      expect(requestTermination).toBeDefined();
+    });
+    await requestTermination!("progress_timeout");
+
+    const result = await runPromise;
+    expect(killedPid).toBe(5252);
+    expect(result.exitCode).toBe(124);
+    expect(result.terminationReason).toBe("progress_timeout");
+  });
+
   it("terminates the process when idleTimeoutMs elapses without stdout lines", async () => {
     let killedPid: number | null | undefined;
     const result = await runMimoCliStreaming("E:/project/app", ["run"], {

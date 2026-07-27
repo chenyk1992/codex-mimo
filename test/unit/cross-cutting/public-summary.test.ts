@@ -60,11 +60,11 @@ describe("public progress summary boundary", () => {
         error: marker
       }
     });
-    const result = await mimoResult({ cwd, jobId: job.id });
-    expect(result.output).toBe(marker);
-    const resultWithoutOutput = { ...result };
-    delete resultWithoutOutput.output;
-    expect(JSON.stringify(resultWithoutOutput)).not.toContain(marker);
+    const compact = await mimoResult({ cwd, jobId: job.id });
+    expect(JSON.stringify(compact)).not.toContain(marker);
+
+    const full = await mimoResult({ cwd, jobId: job.id, level: "full" });
+    expect(full).toMatchObject({ output: marker });
 
     const report = createComposeReport({
       id: job.id,
@@ -115,10 +115,9 @@ describe("public progress summary boundary", () => {
       status: "blocked",
       summary: marker
     });
-    expect(prompt).toContain("<mimo_callback_result>");
-    expect(prompt).toContain(`"output":"${marker}"`);
-    expect(prompt).toContain("Do not call mimo_result, mimo_status, mimo_events, mimo_wait, or any other tool.");
-    expect(prompt).not.toContain("Call mimo_result");
+    expect(prompt).toContain("MIMO_CALLBACK_RESULT_V2");
+    expect(prompt).not.toContain(marker);
+    expect(prompt).not.toContain('"output"');
 
     const webhookPayload = buildNotificationPayload(
       {

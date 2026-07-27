@@ -91,28 +91,28 @@ describe("public release contract", () => {
     }
   });
 
-  it("documents mimo_result.output as the explicit final assistant output boundary", () => {
+  it("documents compact default results and explicit full diagnostics", () => {
     for (const file of ALL_DOCS) {
       const contents = readDoc(file);
-      expect(contents).toMatch(/mimo_result\.output/);
-    }
-
-    for (const file of USER_DOCS) {
-      const contents = readDoc(file);
-      expect(contents).toMatch(/explicit(?:ly)?[\s\S]{0,80}mimo_result/i);
+      expect(contents).toMatch(/mimo_result[\s\S]{0,120}(?:compact|default)/i);
+      expect(contents).toMatch(/(?:level|output level)[\s\S]{0,120}full/i);
+      expect(contents).toMatch(/report path|saved plan|plan artifact/i);
+      expect(contents).not.toMatch(/answer from `?mimo_result\.output`? when present/i);
     }
   });
 
-  it("documents structural reports that intentionally omit model output", () => {
+  it("documents structural reports plus separate semantic artifacts", () => {
     for (const file of USER_DOCS) {
       const contents = readDoc(file);
       expect(contents).toMatch(/structural/i);
-      expect(contents).toMatch(/omit(?:s|ted)?[\s\S]{0,80}(?:model output|final (?:text|output|assistant))/i);
+      expect(contents).toMatch(/\.result\.md/);
+      expect(contents).toMatch(/\.plan\.md/);
+      expect(contents).toMatch(/\.verification\.json/);
+      expect(contents).toMatch(/(?:do not|omit)[\s\S]{0,100}(?:inline|model output|stdout|stderr)/i);
     }
-
-    const readme = readDoc("README.md");
-    expect(readme).toMatch(/reports\/\*\.md/);
-    expect(readme).toMatch(/events\.jsonl[\s\S]{0,120}diagnostic/i);
+    for (const file of ["README.md", "doc/operations-guide.md"]) {
+      expect(readDoc(file)).toMatch(/artifact_too_large/);
+    }
   });
 
   it("documents result_missing as a planning run with no readable final result", () => {
@@ -145,10 +145,11 @@ describe("public release contract", () => {
     }
   });
 
-  it("documents Desktop heartbeat consumption of mimo_result.output in the skill", () => {
+  it("documents compact heartbeat consumption in the skill", () => {
     const skill = readDoc(SKILL);
-    expect(skill).toMatch(/mimo_result[\s\S]{0,120}output/i);
-    expect(skill).toMatch(/(?:heartbeat|follow-up|scheduled)[\s\S]{0,200}mimo_result/i);
+    expect(skill).toMatch(/heartbeat[\s\S]{0,220}mimo_status[\s\S]{0,120}compact/i);
+    expect(skill).toMatch(/mimo_result[\s\S]{0,120}reportPath|report path/i);
+    expect(skill).toMatch(/manual|diagnos|troubleshoot[\s\S]{0,160}full/i);
   });
 
   it("documents resolved Execa spawn failures and protected WindowsApps recovery", () => {
@@ -185,11 +186,90 @@ describe("public release contract", () => {
     }
   });
 
-  it("covers heartbeat cleanup for failure timeout cancel and needs_input", () => {
+  it("covers heartbeat cleanup for failure timeout cancel needs_input and stalled", () => {
     const skill = readDoc(SKILL);
-    for (const token of ["needs_input", "cancelled", "timeout", "failed"]) {
+    for (const token of ["needs_input", "stalled", "cancelled", "timeout", "failed"]) {
       expect(skill).toMatch(new RegExp(token));
     }
     expect(skill).toMatch(/(?:delete|cancel|remove|stop)[\s\S]{0,120}(?:heartbeat|schedule|follow-up)/i);
+  });
+
+  it("documents effective-progress stop-loss and stalled attention", () => {
+    for (const file of ALL_DOCS) {
+      const contents = readDoc(file);
+      expect(contents).toMatch(/stalled/);
+      expect(contents).toMatch(/progressTimeoutMs/);
+      expect(contents).toMatch(/effective.?progress|no effective progress/i);
+    }
+    for (const file of USER_DOCS) {
+      const contents = readDoc(file);
+      expect(contents).toMatch(/progressWarningMs|2.?minute|120[_,]?000/i);
+      expect(contents).toMatch(/5.?minute|300[_,]?000/i);
+      expect(contents).toMatch(/idleTimeoutMs/);
+      expect(contents).toMatch(/30.?minute|1[_,]?800[_,]?000/i);
+    }
+  });
+
+  it("documents checkpoint artifact path and mimo_resume for stalled or timeout", () => {
+    for (const file of USER_DOCS) {
+      const contents = readDoc(file);
+      expect(contents).toMatch(/\.checkpoint\.json/);
+      expect(contents).toMatch(/mimo_resume[\s\S]{0,240}(?:stalled|timeout)/i);
+    }
+    const skill = readDoc(SKILL);
+    expect(skill).toMatch(/mimo_resume[\s\S]{0,280}(?:stalled|timeout|needs_input|blocked)/i);
+    expect(skill).toMatch(/\.checkpoint\.json/);
+  });
+
+  it("warns that progressTimeoutMs 0 weakens deliverability", () => {
+    for (const file of USER_DOCS) {
+      const contents = readDoc(file);
+      expect(contents).toMatch(/progressTimeoutMs:\s*0|progressTimeoutMs[^\n]{0,80}\b0\b/i);
+      expect(contents).toMatch(/weakens|disables[^\n]{0,120}(?:effective|progress|stop-loss|deliverability)/i);
+    }
+  });
+
+  it("documents ordered development acceptance for write workflows", () => {
+    for (const file of ALL_DOCS) {
+      const contents = readDoc(file);
+      expect(contents).toMatch(/acceptance\.build|acceptance:\s*\{[\s\S]{0,80}build/);
+      expect(contents).toMatch(/acceptance\.test|["']test["']\s*:/);
+      expect(contents).toMatch(/diffCheck/);
+      expect(contents).toMatch(/build_failed/);
+      expect(contents).toMatch(/tests_failed/);
+      expect(contents).toMatch(/diff_check_failed/);
+      expect(contents).toMatch(/acceptance_config_missing/);
+      expect(contents).toMatch(/delivery_contract_missing/);
+      expect(contents).toMatch(/fail-?fast|ordered[\s\S]{0,80}(?:stage|acceptance)/i);
+      expect(contents).toMatch(/verification[\s\S]{0,120}(?:test stage|maps to(?: the)? test)/i);
+      expect(contents).toMatch(/`?dev`?[\s\S]{0,200}`?execute-plan`?[\s\S]{0,200}`?implement`?|`?implement`?[\s\S]{0,200}`?dev`?/i);
+      expect(contents).toMatch(/(?:cannot|must not|never)[\s\S]{0,80}complet[\s\S]{0,120}acceptance|without acceptance[\s\S]{0,80}complet/i);
+    }
+
+    for (const file of USER_DOCS) {
+      const contents = readDoc(file);
+      expect(contents).toMatch(/failedStage|failed stage|first failed stage/i);
+      expect(contents).toMatch(/suggestion|shortest[\s\S]{0,40}(?:fix|next)/i);
+      expect(contents).toMatch(
+        /mimo_resume[\s\S]{0,280}(?:build_failed|tests_failed|diff_check_failed|delivery_contract_missing)/i
+      );
+    }
+  });
+
+  it("documents batchMode slice chains, root-only notify, and slice failure codes", () => {
+    for (const file of ALL_DOCS) {
+      const contents = readDoc(file);
+      expect(contents).toMatch(/batchMode/);
+      expect(contents).toMatch(/auto/);
+      expect(contents).toMatch(/single/);
+      expect(contents).toMatch(/sliced/);
+      expect(contents).toMatch(/slice_plan_invalid/);
+      expect(contents).toMatch(/slice_failed/);
+      expect(contents).toMatch(/\.slices\.json/);
+      expect(contents).toMatch(/\.chain\.json|jobs\/<chainId>\.chain\.json/);
+      expect(contents).toMatch(/one slice at a time|sequential(?:ly)?|one-slice-at-a-time/i);
+      expect(contents).toMatch(/root-only|only the (?:public )?root|children (?:omit|never) notify|null notification/i);
+      expect(contents).toMatch(/skip(?:s|ping)? completed slices|never relaunches completed/i);
+    }
   });
 });

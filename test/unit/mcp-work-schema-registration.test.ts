@@ -68,6 +68,11 @@ describe("MCP work schema registration", () => {
     const description = compose?.[1]?.description ?? "";
     expect(description.toLowerCase()).toMatch(/plan/);
     expect(description.toLowerCase()).toMatch(/read-only|read only/);
-    expect(description.toLowerCase()).toMatch(/job result|mimo_result/);
+    expect(description.toLowerCase()).toMatch(/summary/);
+    expect(description.toLowerCase()).toMatch(/saved plan path/);
+    const result = mocks.registerTool.mock.calls.find((call) => call[0] === "mimo_result");
+    const resultDescription = result?.[1]?.description ?? "";
+    expect(resultDescription.toLowerCase()).toMatch(/compact/);
+    expect(resultDescription.toLowerCase()).toMatch(/full/);
   });
 });

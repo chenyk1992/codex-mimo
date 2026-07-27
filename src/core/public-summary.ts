@@ -4,7 +4,10 @@ export const MAX_PUBLIC_SUMMARY_LENGTH = 160;
 
 const KNOWN_OPERATOR_ERROR_SUMMARIES: Readonly<Record<string, string>> = {
   stale_queued: "MiMoCode job stayed queued too long.",
-  idle_timeout: "MiMoCode job idle-timed out."
+  idle_timeout: "MiMoCode job idle-timed out.",
+  no_effective_progress: "MiMoCode job stalled without effective progress.",
+  slice_plan_invalid: "MiMoCode slice plan was invalid.",
+  slice_failed: "MiMoCode slice chain failed."
 };
 
 export type PublicSummaryContext =
@@ -16,6 +19,7 @@ export type PublicSummaryContext =
         | "milestone"
         | "needs_input"
         | "blocked"
+        | "stalled"
         | "verification_started"
         | "verification_finished"
         | "completed"
@@ -67,6 +71,9 @@ function summaryFor(context: PublicSummaryContext): string {
     if (context.kind === "timeout") {
       return knownOperatorErrorSummary(context.errorCode) ?? statusSummary("timeout");
     }
+    if (context.kind === "stalled") {
+      return knownOperatorErrorSummary(context.errorCode) ?? statusSummary("stalled");
+    }
     return statusSummary(context.kind);
   }
 
@@ -77,6 +84,9 @@ function summaryFor(context: PublicSummaryContext): string {
     }
     if (context.status === "timeout") {
       return knownOperatorErrorSummary(context.errorCode) ?? statusSummary("timeout");
+    }
+    if (context.status === "stalled") {
+      return knownOperatorErrorSummary(context.errorCode) ?? statusSummary("stalled");
     }
     return statusSummary(context.status);
   }
@@ -107,6 +117,7 @@ function statusSummary(status: JobStatus): string {
     running: "MiMoCode job is running.",
     needs_input: "MiMoCode needs additional input.",
     blocked: "MiMoCode is blocked by an external condition.",
+    stalled: "MiMoCode job stalled without effective progress.",
     completed: "MiMoCode completed the job.",
     failed: "MiMoCode job failed.",
     cancelled: "MiMoCode job was cancelled.",

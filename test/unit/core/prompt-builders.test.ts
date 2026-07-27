@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planPrompt, implementPrompt, reviewPrompt } from "../../../src/core/prompt.js";
+import { planPrompt, implementPrompt, reviewPrompt, slicePlanningPrompt } from "../../../src/core/prompt.js";
 
 describe("prompt builders", () => {
   it("5.13: planPrompt starts with Objective:", () => {
@@ -38,5 +38,14 @@ describe("prompt builders", () => {
     const prompt = reviewPrompt(diffSummary);
     expect(prompt).toContain("Prioritize correctness bugs");
     expect(prompt).toContain("file and line references");
+  });
+
+  it("slicePlanningPrompt starts with Objective and requires a SliceManifest envelope", () => {
+    const prompt = slicePlanningPrompt("Implement callback wiring");
+    expect(prompt.startsWith("Objective:")).toBe(true);
+    expect(prompt).toContain("Implement callback wiring");
+    expect(prompt).toContain("Do not edit files");
+    expect(prompt).toContain('"version": 1');
+    expect(prompt).toContain("SliceManifest envelope");
   });
 });

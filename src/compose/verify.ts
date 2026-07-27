@@ -33,7 +33,7 @@ export type VerificationCommandExecutor = (
   stderr: string;
 }>;
 
-function detectVerificationCommands(cwd: string): string[] {
+export function detectVerificationCommands(cwd: string): string[] {
   if (fs.existsSync(path.join(cwd, "pyproject.toml"))) return ["python -m pytest"];
   if (fs.existsSync(path.join(cwd, "Cargo.toml"))) return ["cargo test"];
   if (fs.existsSync(path.join(cwd, "go.mod"))) return ["go test ./..."];

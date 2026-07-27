@@ -4,9 +4,16 @@ import type { NormalizedMimoEvent } from "./events.js";
 import type { ComposeWorkflowName } from "./workflow.js";
 import type { VerificationResult } from "./verify.js";
 import type { GitDiffSnapshot, GitHeadSnapshot, GitStatusSnapshot } from "../git/diff.js";
-import type { ExecutionCallbackSummary } from "../core/jobs.js";
+import type { ExecutionCallbackSummary, JobReportPaths, JobVerification } from "../core/jobs.js";
 import type { TerminationReason } from "../mimo/streaming-runner.js";
 import { publicProgressSummary } from "../core/public-summary.js";
+import { redactDiagnosticText } from "../core/job-output.js";
+
+export interface ComposeReportPaths extends JobReportPaths {
+  json: string;
+  markdown: string;
+  eventsJsonl: string;
+}
 
 export interface ComposeReport {
   id: string;
@@ -27,14 +34,10 @@ export interface ComposeReport {
   gitHeadBefore?: GitHeadSnapshot;
   gitHeadAfter?: GitHeadSnapshot;
   gitCommits?: string[];
-  verification: VerificationResult[];
+  verification: JobVerification[];
   error?: string;
   errorCode?: string;
-  reportPaths: {
-    json: string;
-    markdown: string;
-    eventsJsonl: string;
-  };
+  reportPaths: ComposeReportPaths;
 }
 
 export interface CreateComposeReportInput {
@@ -98,7 +101,14 @@ export function createComposeReport(input: CreateComposeReportInput): ComposeRep
     gitHeadBefore: input.gitHeadBefore,
     gitHeadAfter: input.gitHeadAfter,
     gitCommits: input.gitCommits,
-    verification: input.verification,
+    verification: input.verification.map(
+      ({ command, exitCode, passed, durationMs }) => ({
+        command: redactDiagnosticText(command).slice(0, 240),
+        exitCode,
+        passed,
+        ...(durationMs === undefined ? {} : { durationMs })
+      })
+    ),
     error: input.error
       ? publicProgressSummary({
           type: "job",
@@ -293,6 +303,11 @@ export function renderMarkdownReport(report: ComposeReport): string {
     `- JSON: \`${report.reportPaths.json}\``,
     `- Markdown: \`${report.reportPaths.markdown}\``,
     `- Events JSONL: \`${report.reportPaths.eventsJsonl}\``,
+    ...(report.reportPaths.result ? [`- Result: \`${report.reportPaths.result}\``] : []),
+    ...(report.reportPaths.plan ? [`- Plan: \`${report.reportPaths.plan}\``] : []),
+    ...(report.reportPaths.verification
+      ? [`- Verification: \`${report.reportPaths.verification}\``]
+      : []),
     ""
   );
 

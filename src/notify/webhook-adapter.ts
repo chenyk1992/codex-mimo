@@ -9,6 +9,7 @@ import type {
 } from "../core/jobs.js";
 import type { DeliveryAttemptResult, NotificationDelivery } from "./types.js";
 import { publicProgressSummary } from "../core/public-summary.js";
+import { redactDiagnosticText } from "../core/job-output.js";
 
 export interface NotificationPayload {
   version: 1;
@@ -60,7 +61,10 @@ export function buildNotificationPayload(
     },
     result: {
       changedFiles: [...job.changedFiles],
-      verification: job.verification.map((verification) => ({ ...verification })),
+      verification: job.verification.map((verification) => ({
+        ...verification,
+        command: redactDiagnosticText(verification.command).slice(0, 240)
+      })),
       reportPaths: { ...job.reportPaths }
     }
   };

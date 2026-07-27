@@ -110,6 +110,49 @@ describe("compose report", () => {
     }
   });
 
+  it("keeps full verification output only in the verification artifact", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-report-verification-"));
+    try {
+      const report = createComposeReport({
+        id: "verification-report",
+        createdAt: "2026-07-26T00:00:00.000Z",
+        workflow: "dev",
+        cwd: root,
+        requestedSkills: ["compose:verify"],
+        status: "failed",
+        events: [],
+        diff: { changedFiles: [], diffStat: "", diff: "" },
+        verification: [{
+          command: "npm test",
+          exitCode: 1,
+          passed: false,
+          durationMs: 10,
+          stdout: "FULL_STDOUT",
+          stderr: "FULL_STDERR"
+        }],
+        reportDir: path.join(root, "reports"),
+        eventsDir: path.join(root, "events"),
+        diffsDir: path.join(root, "diffs")
+      });
+      writeComposeReport(report);
+
+      expect(report.verification).toEqual([{
+        command: "npm test",
+        exitCode: 1,
+        passed: false,
+        durationMs: 10
+      }]);
+      expect(fs.readFileSync(report.reportPaths.json, "utf8")).not.toMatch(
+        /FULL_STDOUT|FULL_STDERR/
+      );
+      expect(fs.readFileSync(report.reportPaths.markdown, "utf8")).not.toMatch(
+        /FULL_STDOUT|FULL_STDERR/
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("renders workflow, status, changed files, and verification", () => {
     const markdown = renderMarkdownReport({
       id: "run_1",
@@ -125,8 +168,6 @@ describe("compose report", () => {
         {
           command: "npm test",
           exitCode: 0,
-          stdout: "ok",
-          stderr: "",
           passed: true,
           durationMs: 100
         }

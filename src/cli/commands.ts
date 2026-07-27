@@ -19,6 +19,7 @@ import { formatZodError, InputValidationError } from "../core/input-validation.j
 import { runNotificationWorker as defaultRunNotificationWorker } from "../notify/worker.js";
 import type { NotificationInput } from "../notify/types.js";
 import { parseComposeInput } from "../codex/tool-schemas.js";
+import type { JobOutputLevel } from "../core/jobs.js";
 import { ZodError } from "zod";
 import {
   formatDoctorReport as defaultFormatDoctorReport,
@@ -67,7 +68,7 @@ const BOOLEAN_FLAGS = new Set(["--allow-write", "--all", "--json"]);
 const VALUE_FLAGS = new Set([
   "--cwd", "--model", "--timeout-ms", "--idle-timeout-ms", "--notify", "--thread-id", "--url", "--secret-env",
   "--base", "--file", "--job-id", "--workflow", "--since", "--verify", "--report-dir",
-  "--since-cursor", "--limit", "--min-level"
+  "--since-cursor", "--limit", "--min-level", "--level"
 ]);
 
 export async function runCli(args: readonly string[], dependencies: CliDependencies = {}): Promise<number> {
@@ -198,12 +199,22 @@ async function runControl(
 
   const jobId = parsed.takeValue("--job-id");
   if (command === "status") {
+    const level = takeOutputLevel(parsed, "standard");
     parsed.assertConsumed();
-    return (dependencies.mimoStatus ?? defaultMimoStatus)({ cwd, ...(jobId ? { jobId } : {}) });
+    return (dependencies.mimoStatus ?? defaultMimoStatus)({
+      cwd,
+      ...(jobId ? { jobId } : {}),
+      level
+    });
   }
   if (command === "result") {
+    const level = takeOutputLevel(parsed, "compact");
     parsed.assertConsumed();
-    return (dependencies.mimoResult ?? defaultMimoResult)({ cwd, ...(jobId ? { jobId } : {}) });
+    return (dependencies.mimoResult ?? defaultMimoResult)({
+      cwd,
+      ...(jobId ? { jobId } : {}),
+      level
+    });
   }
   if (command === "cancel") {
     if (!jobId) throw new CliInputError("codex-mimo cancel requires --job-id.");
@@ -253,6 +264,17 @@ async function runInternal(
   }
   parsed.assertConsumed();
   await (dependencies.runNotificationWorker ?? defaultRunNotificationWorker)(cwd);
+}
+
+function takeOutputLevel(
+  parsed: ParsedArguments,
+  fallback: JobOutputLevel
+): JobOutputLevel {
+  const value = parsed.takeValue("--level") ?? fallback;
+  if (value !== "compact" && value !== "standard" && value !== "full") {
+    throw new CliInputError("--level must be compact, standard, or full.");
+  }
+  return value;
 }
 
 function parseJobOptions(cwd: string, parsed: ParsedArguments) {

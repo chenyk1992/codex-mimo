@@ -1,7 +1,10 @@
-import { readFinalJobOutput } from "../core/job-output.js";
-import { renderJobResult } from "../core/job-render.js";
+import { readSavedJobOutput } from "../core/job-output.js";
+import {
+  isSemanticResultJob,
+  renderCompactJobResult
+} from "../core/job-render.js";
+import type { CompactJobResult, JobRecord } from "../core/jobs.js";
 import type { JobSignal } from "../core/job-signals.js";
-import type { JobRecord, JobResult } from "../core/jobs.js";
 import {
   CodexAppServerError
 } from "./codex-app-server.js";
@@ -12,12 +15,14 @@ import type {
   NotificationErrorCode
 } from "./types.js";
 
-export type CodexCallbackResult = Omit<JobResult, "actions" | "notification">;
+export type CodexCallbackResult = CompactJobResult;
 
 export function buildCodexCallbackResult(job: JobRecord): CodexCallbackResult {
-  const rendered = renderJobResult(job, undefined, readFinalJobOutput(job.eventsFile));
-  const { actions: _actions, notification: _notification, ...result } = rendered;
-  return result;
+  return renderCompactJobResult(job, {
+    ...(isSemanticResultJob(job)
+      ? { output: readSavedJobOutput(job) }
+      : {})
+  });
 }
 
 export function buildCodexNotificationPrompt(
@@ -27,7 +32,7 @@ export function buildCodexNotificationPrompt(
 ): string {
   const result = buildCodexCallbackResult(job);
   return [
-    "MIMO_CALLBACK_RESULT_V1",
+    "MIMO_CALLBACK_RESULT_V2",
     "MiMoCode notification event " + JSON.stringify(singleLine(delivery.eventId)) +
       " emitted " + signal.kind + " and may be a retry.",
     "The public job result is already attached below. Continue handling the original user request using only that result.",

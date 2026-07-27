@@ -157,4 +157,86 @@ describe("mimo_cancel", () => {
     await expect(mimoCancel({ cwd, jobId: job.id })).rejects.toThrow("cannot be cancelled");
     await expect(mimoCancel({ cwd, jobId: "missing" })).rejects.toThrow("No job found");
   });
+
+  it("cascades cancel from a chain root to the live slice child and pending slices", async () => {
+    const cwd = tempWorkspace();
+    const { bootstrapWriteJobChain } = await import("../../../src/core/job-definitions.js");
+    const { readJobChain } = await import("../../../src/core/job-chain.js");
+    const { updateJobAuthoritative } = await import("../../../src/core/job-store.js");
+    const { transitionJob } = await import("../../../src/core/job-transition.js");
+
+    const acceptance = {
+      build: ["npm run build"],
+      test: ["npm test -- focused.test.ts"]
+    };
+    const root = createJobStore(cwd).create({
+      kind: "implement",
+      task: "Implement feature",
+      request: {
+        cwd,
+        task: "Implement feature",
+        allowWrite: true,
+        acceptance,
+        batchMode: "sliced"
+      },
+      notificationTarget: { type: "codex", threadId: "thread-root" }
+    });
+    await updateJobAuthoritative(cwd, root.id, { status: "running", phase: "editing" });
+    const boot = await bootstrapWriteJobChain(readJob(cwd, root.id)!, {
+      spawnJobSupervisor: () => 1,
+      captureRepositoryFingerprint: async () => "fp-test",
+      planSliceManifest: async (input) => ({
+        ok: true,
+        manifest: {
+          version: 1 as const,
+          chainId: input.chainId,
+          objective: "Implement feature",
+          repositoryFingerprint: "fp-test",
+          slices: [
+            {
+              id: "slice-1",
+              title: "Slice 1",
+              objective: "Do work for slice-1",
+              dependsOn: [],
+              contextFiles: [],
+              allowedPaths: ["src/**"],
+              acceptance
+            },
+            {
+              id: "slice-2",
+              title: "Slice 2",
+              objective: "Do work for slice-2",
+              dependsOn: ["slice-1"],
+              contextFiles: [],
+              allowedPaths: ["src/**"],
+              acceptance
+            }
+          ]
+        }
+      })
+    });
+    expect(boot.status).toBe("bootstrapped");
+    if (boot.status !== "bootstrapped") throw new Error("bootstrap failed");
+
+    await transitionJob(cwd, boot.childJobId, {
+      status: "running",
+      summary: "running slice 1",
+      phase: "editing",
+      pid: 777,
+      processIdentity: "win32:777"
+    });
+
+    const terminateProcess = vi.fn().mockReturnValue({ status: "terminated", evidence: "done" });
+    const result = await mimoCancel(
+      { cwd, jobId: boot.root.id },
+      { terminateProcess, spawnNotificationWorker: vi.fn() }
+    );
+
+    expect(result.status).toBe("cancelled");
+    expect(readJob(cwd, boot.childJobId)?.status).toBe("cancelled");
+    expect(terminateProcess).toHaveBeenCalledWith(777, "win32:777");
+    const chain = readJobChain(cwd, boot.chainId)!;
+    expect(chain.sliceStates["slice-1"]).toBe("cancelled");
+    expect(chain.sliceStates["slice-2"]).toBe("cancelled");
+  });
 });

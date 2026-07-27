@@ -24,6 +24,7 @@ describe("error propagation", () => {
     enoent.code = "ENOENT";
 
     await runJobWorker(cwd, job.id, {
+      bootstrapWriteJobChain: async () => ({ status: "skipped" }),
       captureStatus: async () => ({ short: "", dirty: false, fingerprints: {} }),
       captureHead: async () => ({ oid: "abc", short: "abc", subject: "base" }),
       createHookCallbackController: async () => ({

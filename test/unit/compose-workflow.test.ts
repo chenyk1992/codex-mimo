@@ -1,7 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { buildComposePrompt, getComposeWorkflow, listComposeWorkflows } from "../../src/compose/workflow.js";
+import {
+  buildComposePrompt,
+  getComposeWorkflow,
+  listComposeWorkflows,
+  workflowRequiresDevelopmentAcceptance
+} from "../../src/compose/workflow.js";
 
 describe("compose workflows", () => {
+  it.each([
+    ["dev", true],
+    ["execute-plan", true],
+    ["plan", false],
+    ["fix", false],
+    ["review", false]
+  ] as const)("workflowRequiresDevelopmentAcceptance(%s) is %s", (workflow, expected) => {
+    expect(workflowRequiresDevelopmentAcceptance(workflow)).toBe(expected);
+  });
+
   it("returns dev workflow with expected Compose skill chain", () => {
     const workflow = getComposeWorkflow("dev");
     expect(workflow.skillChain).toEqual([

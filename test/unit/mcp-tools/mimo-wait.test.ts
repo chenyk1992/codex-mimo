@@ -162,6 +162,24 @@ describe("mimo_wait", () => {
     expect(second.nextCursor).toBe(3);
   });
 
+  it("returns stalled attention signals like other attention kinds", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "implement", task: "Implement", request: {} });
+    appendJobSignal(job.signalsFile, {
+      jobId: job.id,
+      kind: "stalled",
+      level: "warn",
+      status: "stalled",
+      summary: "No effective progress for five minutes."
+    });
+
+    const result = await mimoWait({ cwd, jobId: job.id, timeoutMs: 10 });
+
+    expect(result.timedOut).toBe(false);
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]).toMatchObject({ kind: "stalled", status: "stalled" });
+  });
+
   it("advances across ordinary signals before an attention page", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({ kind: "plan", task: "Plan", request: {} });

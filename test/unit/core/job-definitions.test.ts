@@ -6,10 +6,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   JOB_DEFINITIONS,
   bindJobDefinition,
+  bootstrapWriteJobChain,
   getJobDefinition,
+  shouldBootstrapWriteJobChain,
   type JobRequestByKind
 } from "../../../src/core/job-definitions.js";
 import type { ExecutionCallbackSummary, JobKind, JobRecord } from "../../../src/core/jobs.js";
+import { createJobStore, listJobs, readJob } from "../../../src/core/job-store.js";
+import { readJobChain } from "../../../src/core/job-chain.js";
+import type { SliceManifest } from "../../../src/compose/slices.js";
 import { isRuntimeArtifactPath } from "../../../src/core/runtime-paths.js";
 import { captureGitDiff } from "../../../src/git/diff.js";
 
@@ -54,6 +59,42 @@ function makeJob<Kind extends JobKind>(kind: Kind, request: JobRequestByKind[Kin
     eventsFile: path.join(cwd, `${kind}.events.jsonl`),
     signalsFile: path.join(cwd, `${kind}.signals.jsonl`),
     notificationOutboxFile: path.join(cwd, `${kind}.outbox.jsonl`)
+  };
+}
+
+function passingAcceptanceResult(overrides: {
+  stdout?: string;
+  verificationCommand?: string;
+} = {}) {
+  const command = overrides.verificationCommand ?? "npm test";
+  return {
+    stages: [
+      { stage: "build" as const, outcome: "passed" as const, command: "npm run build" },
+      { stage: "test" as const, outcome: "passed" as const, command },
+      { stage: "diff_check" as const, outcome: "passed" as const }
+    ],
+    passed: true,
+    compactTests: [
+      { stage: "build" as const, command: "npm run build", outcome: "passed" as const },
+      { stage: "test" as const, command, outcome: "passed" as const },
+      { stage: "diff_check" as const, command: "", outcome: "passed" as const }
+    ],
+    verificationDetails: [{
+      command,
+      exitCode: 0,
+      passed: true,
+      durationMs: 5,
+      stdout: overrides.stdout ?? "ok",
+      stderr: ""
+    }]
+  };
+}
+
+function acceptanceDeps(extra: Record<string, unknown> = {}) {
+  return {
+    runDevelopmentAcceptance: async () => passingAcceptanceResult(),
+    writeComposeReport: () => undefined,
+    ...extra
   };
 }
 
@@ -247,12 +288,265 @@ describe("job definition registry", () => {
 
     expect(() => bindJobDefinition(job)).toThrow(/plan job request/i);
   });
+
+  it.each([
+    ["compose", {
+      cwd: "E:/project",
+      workflow: "dev" as const,
+      task: "build it",
+      acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: true }
+    }],
+    ["implement", {
+      cwd: "E:/project",
+      task: "build it",
+      allowWrite: true as const,
+      acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
+    }]
+  ] as const)("bindJobDefinition accepts stored %s request with acceptance", (kind, request) => {
+    const bound = bindJobDefinition(makeJob(kind, request));
+    expect(bound.kind).toBe(kind);
+  });
 });
 
 describe("job finalization", () => {
+  it("does not complete compose dev with zero acceptance commands", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "build it" };
+    const outcome = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("compose", request),
+      request,
+      run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      verification: [],
+      deps: { writeComposeReport: () => undefined }
+    });
+
+    expect(outcome).toMatchObject({
+      status: "needs_input",
+      errorCode: "acceptance_config_missing"
+    });
+  });
+
+  it("fails finalize on build stage and skips tests", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "dev",
+      task: "build it",
+      acceptance: {
+        build: ["node -e process.exit(1)"],
+        test: ["node -e process.exit(0)"],
+        diffCheck: true
+      }
+    };
+    const execute = vi.fn(async (file: string, args: string[]) => {
+      const command = [file, ...args].join(" ");
+      if (command.includes("process.exit(1)")) {
+        return { exitCode: 1, stdout: "", stderr: "build exploded" };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const runDiffCheck = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const
+    }));
+
+    const outcome = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("compose", request),
+      request,
+      run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      verification: [],
+      deps: {
+        executeVerification: execute,
+        runDiffCheck,
+        writeComposeReport: () => undefined
+      }
+    });
+
+    expect(outcome).toMatchObject({
+      status: "failed",
+      errorCode: "build_failed",
+      acceptance: {
+        failedStage: "build",
+        stages: expect.arrayContaining([
+          expect.objectContaining({ stage: "build", outcome: "failed" }),
+          expect.objectContaining({ stage: "test", outcome: "pending" }),
+          expect.objectContaining({ stage: "diff_check", outcome: "pending" })
+        ])
+      }
+    });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(runDiffCheck).not.toHaveBeenCalled();
+    expect(fs.readFileSync(outcome.reportPaths!.verification!, "utf8")).toContain("build exploded");
+  });
+
+  it("completes only after build, test, and diff checks pass", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "dev",
+      task: "build it",
+      acceptance: {
+        build: ["node -e process.exit(0)"],
+        test: ["node -e process.exit(0)"],
+        diffCheck: true
+      }
+    };
+    const execute = vi.fn(async () => ({ exitCode: 0, stdout: "ok", stderr: "" }));
+    const runDiffCheck = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const
+    }));
+
+    const outcome = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("compose", request),
+      request,
+      run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      diff: { changedFiles: ["src/app.ts"], diffStat: "1 file", diff: "diff --git a/src/app.ts" },
+      verification: [],
+      deps: {
+        executeVerification: execute,
+        runDiffCheck,
+        writeComposeReport: () => undefined
+      }
+    });
+
+    expect(outcome).toMatchObject({
+      status: "completed",
+      acceptance: {
+        stages: [
+          expect.objectContaining({ stage: "build", outcome: "passed" }),
+          expect.objectContaining({ stage: "test", outcome: "passed" }),
+          expect.objectContaining({ stage: "diff_check", outcome: "passed" })
+        ]
+      }
+    });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(runDiffCheck).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes diff and invokes review when self-check finds changes without initial diffPath", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "dev",
+      task: "build it",
+      acceptance: {
+        build: ["node -e process.exit(0)"],
+        test: ["node -e process.exit(0)"],
+        diffCheck: true
+      }
+    };
+    const execute = vi.fn(async () => ({ exitCode: 0, stdout: "ok", stderr: "" }));
+    const runDiffAcceptanceSelfCheck = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const,
+      summary: { changedFileCount: 1, samplePaths: ["src/app.ts"] }
+    }));
+    const captureDiff = vi.fn(async () => ({
+      changedFiles: ["src/app.ts"],
+      diffStat: "1 file changed",
+      diff: "diff --git a/src/app.ts\n+++ b/src/app.ts\n+hello\n"
+    }));
+    const runReadOnlyDiffReview = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const
+    }));
+
+    const outcome = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("compose", request),
+      request,
+      run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed", sessionId: "ses-1" },
+      // Intentionally omit context.diff so initial ensureDiffArtifact yields no path.
+      verification: [],
+      deps: {
+        executeVerification: execute,
+        runDiffAcceptanceSelfCheck,
+        captureDiff,
+        runReadOnlyDiffReview,
+        writeComposeReport: () => undefined
+      }
+    });
+
+    expect(runDiffAcceptanceSelfCheck).toHaveBeenCalledOnce();
+    expect(captureDiff).toHaveBeenCalledOnce();
+    expect(runReadOnlyDiffReview).toHaveBeenCalledOnce();
+    expect(runReadOnlyDiffReview.mock.calls[0][0].diffPath).toMatch(/compose-1\.diff$/);
+    expect(fs.readFileSync(runReadOnlyDiffReview.mock.calls[0][0].diffPath, "utf8")).toContain("+hello");
+    expect(outcome).toMatchObject({ status: "completed" });
+  });
+
+  it("fails diff_check when workspace changes exist but no usable diff artifact can be produced", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "dev",
+      task: "build it",
+      acceptance: {
+        build: ["node -e process.exit(0)"],
+        test: ["node -e process.exit(0)"],
+        diffCheck: true
+      }
+    };
+    const execute = vi.fn(async () => ({ exitCode: 0, stdout: "ok", stderr: "" }));
+    const runDiffAcceptanceSelfCheck = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const,
+      summary: { changedFileCount: 2, samplePaths: ["src/a.ts", "src/b.ts"] }
+    }));
+    const captureDiff = vi.fn(async () => ({
+      changedFiles: ["src/a.ts"],
+      diffStat: "",
+      diff: ""
+    }));
+    const runReadOnlyDiffReview = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const
+    }));
+
+    const outcome = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("compose", request),
+      request,
+      run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      verification: [],
+      deps: {
+        executeVerification: execute,
+        runDiffAcceptanceSelfCheck,
+        captureDiff,
+        runReadOnlyDiffReview,
+        writeComposeReport: () => undefined
+      }
+    });
+
+    expect(runReadOnlyDiffReview).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({
+      status: "failed",
+      errorCode: "delivery_contract_missing"
+    });
+  });
+
   it("uses the shared classifier and returns an outcome without mutating the job", async () => {
     const cwd = tempDir();
-    const job = makeJob("implement", { cwd, task: "implement it", allowWrite: true });
+    const job = makeJob("implement", {
+      cwd,
+      task: "implement it",
+      allowWrite: true,
+      acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
+    });
     const before = structuredClone(job);
     const callback: ExecutionCallbackSummary = {
       invocationId: "inv-1",
@@ -267,9 +561,10 @@ describe("job finalization", () => {
       run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 10 },
       events: [{ type: "message", text: "done", raw: { type: "message", text: "done" } }],
       executionCallback: callback,
-      diff: { changedFiles: ["src/app.ts"], diffStat: "", diff: "" },
+      diff: { changedFiles: ["src/app.ts"], diffStat: "", diff: "diff" },
       commitChanges: { commits: [], changedFiles: [] },
-      verification: []
+      verification: [],
+      deps: acceptanceDeps()
     });
 
     expect(outcome).toMatchObject({
@@ -279,22 +574,84 @@ describe("job finalization", () => {
       changedFiles: ["src/app.ts"],
       executionCallback: callback
     });
+    expect(outcome.reportPaths).toMatchObject({
+      result: expect.any(String),
+      diff: expect.any(String)
+    });
+    expect(fs.readFileSync(outcome.reportPaths!.diff!, "utf8")).toBe("diff");
     expect(job).toEqual(before);
+  });
+
+  it("writes direct plan artifacts after outcome classification", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["plan"] = { cwd, task: "plan it" };
+    const outcome = await getJobDefinition("plan").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("plan", request),
+      request,
+      run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "# Plan\n\nFirst step.", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      verification: []
+    });
+
+    expect(outcome.reportPaths).toMatchObject({
+      json: expect.any(String),
+      markdown: expect.any(String),
+      result: expect.any(String),
+      plan: expect.any(String)
+    });
+    expect(fs.readFileSync(outcome.reportPaths!.plan!, "utf8")).toBe("# Plan\n\nFirst step.");
+    expect(fs.readFileSync(outcome.reportPaths!.markdown!, "utf8")).not.toContain("First step.");
+  });
+
+  it("persists full Compose verification separately from the compact job record", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "dev",
+      task: "build it",
+      acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
+    };
+    const outcome = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("compose", request),
+      request,
+      run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      verification: [],
+      deps: {
+        runDevelopmentAcceptance: async () => passingAcceptanceResult({ stdout: "FULL_STDOUT" })
+      }
+    });
+
+    expect(outcome.verification).toEqual([{
+      command: "npm test",
+      exitCode: 0,
+      passed: true,
+      durationMs: 5
+    }]);
+    expect(fs.readFileSync(outcome.reportPaths!.verification!, "utf8")).toContain("FULL_STDOUT");
+    const structural = fs.readFileSync(outcome.reportPaths!.json!, "utf8");
+    expect(structural).not.toContain("FULL_STDOUT");
+    expect(structural).toContain(outcome.reportPaths!.verification!);
   });
 
   it("runs Compose verification and report writing during finalization", async () => {
     const cwd = tempDir();
-    const request: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "build it" };
+    const request: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "dev",
+      task: "build it",
+      acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
+    };
     const job = makeJob("compose", request);
     const writeReport = vi.fn();
-    const runVerification = vi.fn(async () => [{
-      command: "npm test",
-      exitCode: 0,
+    const runDevelopmentAcceptance = vi.fn(async () => passingAcceptanceResult({
       stdout: "ok",
-      stderr: "",
-      passed: true,
-      durationMs: 12
-    }]);
+      verificationCommand: "npm test"
+    }));
 
     const outcome = await getJobDefinition("compose").finalize({
       signal: ACTIVE_SIGNAL,
@@ -309,10 +666,10 @@ describe("job finalization", () => {
       diff: { changedFiles: ["src/app.ts"], diffStat: "1 file changed", diff: "diff" },
       commitChanges: { commits: [], changedFiles: [] },
       verification: [],
-      deps: { runVerification, writeComposeReport: writeReport }
+      deps: { runDevelopmentAcceptance, writeComposeReport: writeReport }
     });
 
-    expect(runVerification).toHaveBeenCalledWith(cwd, [], { signal: ACTIVE_SIGNAL });
+    expect(runDevelopmentAcceptance).toHaveBeenCalledOnce();
     expect(writeReport).toHaveBeenCalledOnce();
     const report = writeReport.mock.calls[0][0];
     expect(report.executionCallback).toMatchObject({
@@ -357,7 +714,12 @@ describe("job finalization", () => {
 
   it("reports only business files for writable Compose after worker filters the cron lock", async () => {
     const cwd = tempDir();
-    const request: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "build it" };
+    const request: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "dev",
+      task: "build it",
+      acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
+    };
     const rawChanged = [".mimocode/.cron-lock", "src/app.ts"];
     const changedFiles = rawChanged.filter((file) => !isRuntimeArtifactPath(file));
 
@@ -379,7 +741,7 @@ describe("job finalization", () => {
       diff: { changedFiles, diffStat: "1 file changed", diff: "diff" },
       commitChanges: { commits: [], changedFiles: [] },
       verification: [],
-      deps: { runVerification: async () => [], writeComposeReport: () => undefined }
+      deps: acceptanceDeps()
     });
 
     expect(outcome).toMatchObject({ status: "completed", changedFiles: ["src/app.ts"] });
@@ -404,16 +766,28 @@ describe("job finalization", () => {
     const executionCallback: ExecutionCallbackSummary = { invocationId: "inv", outcome: "completed" };
     const run = { stdout: `${JSON.stringify({ type: "message", text: finalText })}\n`, stderr: "", exitCode: 0, pid: 1 };
     const events = [{ type: "message" as const, text: finalText, raw: { type: "message", text: finalText } }];
-    const directRequest: JobRequestByKind["implement"] = { cwd, task: "implement", allowWrite: true };
-    const composeRequest: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "implement" };
+    const directRequest: JobRequestByKind["implement"] = {
+      cwd,
+      task: "implement",
+      allowWrite: true,
+      acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
+    };
+    const composeRequest: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "dev",
+      task: "implement",
+      acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
+    };
     const direct = await getJobDefinition("implement").finalize({
       signal: ACTIVE_SIGNAL,
-      job: makeJob("implement", directRequest), request: directRequest, run, events, executionCallback, verification: []
+      job: makeJob("implement", directRequest), request: directRequest, run, events, executionCallback,
+      verification: [],
+      deps: acceptanceDeps()
     });
     const compose = await getJobDefinition("compose").finalize({
       signal: ACTIVE_SIGNAL,
       job: makeJob("compose", composeRequest), request: composeRequest, run, events, executionCallback,
-      verification: [], deps: { runVerification: async () => [], writeComposeReport: () => undefined }
+      verification: [], deps: acceptanceDeps()
     });
 
     expect([direct.status, direct.errorCode]).toEqual([status, errorCode]);
@@ -446,7 +820,12 @@ describe("job finalization", () => {
       const cwd = kind === "review" ? initGitRepo() : tempDir();
       const requests: JobRequestByKind = {
         plan: { cwd, task: "plan" },
-        implement: { cwd, task: "implement", allowWrite: true },
+        implement: {
+          cwd,
+          task: "implement",
+          allowWrite: true,
+          acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
+        },
         review: { cwd, base: "HEAD" },
         "fix-ci": { cwd, file: "ci.log", task: "fix" },
         resume: {
@@ -456,7 +835,12 @@ describe("job finalization", () => {
           sessionId: "ses-parent",
           executionPolicy: { agent: "build", writesAllowed: true }
         },
-        compose: { cwd, workflow: "dev", task: "compose" }
+        compose: {
+          cwd,
+          workflow: "dev",
+          task: "compose",
+          acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
+        }
       };
       const request = requests[kind];
       const job = makeJob(kind, request);
@@ -468,10 +852,15 @@ describe("job finalization", () => {
         events: [{ type: "message", text: "done", raw: {} }],
         executionCallback: { invocationId: "inv", outcome: "completed" },
         verification: [],
-        deps: { runVerification: async () => [], writeComposeReport: () => undefined }
+        deps: acceptanceDeps({ runVerification: async () => [] })
       });
 
       expect(outcome.status).toBe("completed");
+      expect(outcome.reportPaths).toMatchObject({
+        json: expect.any(String),
+        markdown: expect.any(String),
+        result: expect.any(String)
+      });
       expect(job).toEqual(before);
     }
   );
@@ -479,11 +868,18 @@ describe("job finalization", () => {
   it.each([
     ["direct plan", "plan", { task: "plan it" }, true],
     ["compose plan", "compose", { workflow: "plan" as const, task: "plan it" }, true],
-    ["direct implement", "implement", { task: "build it", allowWrite: true as const }, false],
+    ["direct implement", "implement", {
+      task: "build it",
+      allowWrite: true as const,
+      acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
+    }, false],
     ["compose review", "compose", { workflow: "review" as const, task: "review it" }, false]
   ] as const)("requires final text only for planning entry points: %s", async (_label, kind, requestPatch, requires) => {
     const cwd = tempDir();
     const request = { cwd, ...requestPatch } as JobRequestByKind[typeof kind];
+    const deps = kind === "implement" || (kind === "compose" && (request as { workflow?: string }).workflow === "dev")
+      ? acceptanceDeps()
+      : { runVerification: async () => [], writeComposeReport: () => undefined };
     const empty = await getJobDefinition(kind).finalize({
       signal: ACTIVE_SIGNAL,
       job: makeJob(kind, request),
@@ -492,7 +888,7 @@ describe("job finalization", () => {
       events: [],
       executionCallback: { invocationId: "inv", outcome: "completed" },
       verification: [],
-      deps: { runVerification: async () => [], writeComposeReport: () => undefined }
+      deps
     });
     const filled = await getJobDefinition(kind).finalize({
       signal: ACTIVE_SIGNAL,
@@ -502,7 +898,7 @@ describe("job finalization", () => {
       events: [{ type: "message", text: "# Plan", raw: {} }],
       executionCallback: { invocationId: "inv", outcome: "completed" },
       verification: [],
-      deps: { runVerification: async () => [], writeComposeReport: () => undefined }
+      deps
     });
 
     if (requires) {
@@ -521,7 +917,12 @@ describe("job finalization", () => {
 
   it.each(["verification", "report"] as const)("propagates Compose %s writer failures", async (failure) => {
     const cwd = tempDir();
-    const request: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "compose" };
+    const request: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "dev",
+      task: "compose",
+      acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
+    };
     const bound = bindJobDefinition(makeJob("compose", request));
     const error = new Error(`${failure} exploded`);
 
@@ -532,9 +933,145 @@ describe("job finalization", () => {
       executionCallback: { invocationId: "inv", outcome: "completed" },
       verification: [],
       deps: {
-        runVerification: failure === "verification" ? async () => { throw error; } : async () => [],
+        runDevelopmentAcceptance: failure === "verification"
+          ? async () => { throw error; }
+          : async () => passingAcceptanceResult(),
         writeComposeReport: failure === "report" ? () => { throw error; } : () => undefined
       }
     })).rejects.toThrow(`${failure} exploded`);
+  });
+});
+
+describe("write chain bootstrap (Task 5)", () => {
+  const acceptance = {
+    build: ["npm run build"],
+    test: ["npm test -- focused.test.ts"]
+  };
+
+  function seedImplementRoot(cwd: string, batchMode: "auto" | "single" | "sliced"): JobRecord {
+    return createJobStore(cwd).create({
+      kind: "implement",
+      task: "Implement feature",
+      request: {
+        cwd,
+        task: "Implement feature",
+        allowWrite: true,
+        acceptance,
+        batchMode
+      },
+      notificationTarget: { type: "codex", threadId: "thread-root" }
+    });
+  }
+
+  function fakeManifest(cwd: string, chainId: string, slices = 1): SliceManifest {
+    const entries = Array.from({ length: slices }, (_, index) => {
+      const id = `slice-${index + 1}`;
+      return {
+        id,
+        title: `Slice ${index + 1}`,
+        objective: `Do work for ${id}`,
+        dependsOn: index === 0 ? [] : [`slice-${index}`],
+        contextFiles: [],
+        allowedPaths: ["src/**"],
+        acceptance
+      };
+    });
+    return {
+      version: 1,
+      chainId,
+      objective: "Implement feature",
+      repositoryFingerprint: "fp-test",
+      slices: entries
+    };
+  }
+
+  it("bootstraps batchMode auto on the same orchestrator path as single/sliced", () => {
+    const cwd = tempDir();
+    const root = seedImplementRoot(cwd, "auto");
+    expect(shouldBootstrapWriteJobChain(root)).toBe(true);
+  });
+
+  it("single mode creates one child with null notify, parentJobId, and sliceId", async () => {
+    const cwd = tempDir();
+    fs.writeFileSync(path.join(cwd, "package.json"), JSON.stringify({
+      scripts: { build: "tsc", test: "vitest run" }
+    }), "utf8");
+    const root = seedImplementRoot(cwd, "single");
+
+    const result = await bootstrapWriteJobChain(root, {
+      spawnJobSupervisor: () => 1,
+      captureRepositoryFingerprint: async () => "fp-test"
+    });
+
+    expect(result.status).toBe("bootstrapped");
+    if (result.status !== "bootstrapped") return;
+
+    expect(result.child.notificationTarget).toBeUndefined();
+    expect(result.child.parentJobId).toBe(root.id);
+    expect(result.child.sliceId).toBe("slice-1");
+    expect(result.child.chainId).toBe(result.chainId);
+    expect(result.child.kind).toBe("implement");
+    expect(result.root.chainId).toBe(result.chainId);
+    expect(result.root.summary).toMatch(/Executing slice 1\/1:/);
+    expect(result.root.reportPaths?.slices).toMatch(/\.slices\.json$/);
+    expect(result.root.notificationTarget).toEqual({ type: "codex", threadId: "thread-root" });
+
+    const chain = readJobChain(cwd, result.chainId);
+    expect(chain?.sliceStates["slice-1"]).toBe("running");
+    expect(chain?.childJobIds["slice-1"]).toBe(result.childJobId);
+
+    const persistedChild = readJob(cwd, result.childJobId);
+    expect(persistedChild?.notificationTarget).toBeUndefined();
+    expect(persistedChild?.parentJobId).toBe(root.id);
+    expect(persistedChild?.sliceId).toBe("slice-1");
+  });
+
+  it("invalid plan fails root with slice_plan_invalid before any child", async () => {
+    const cwd = tempDir();
+    const root = seedImplementRoot(cwd, "sliced");
+
+    const result = await bootstrapWriteJobChain(root, {
+      spawnJobSupervisor: () => 1,
+      captureRepositoryFingerprint: async () => "fp-test",
+      planSliceManifest: async () => ({
+        ok: false,
+        code: "slice_plan_invalid",
+        reason: "Planner returned an empty slice list."
+      })
+    });
+
+    expect(result).toEqual({
+      status: "failed",
+      errorCode: "slice_plan_invalid",
+      reason: "Planner returned an empty slice list."
+    });
+    expect(listJobs(cwd).filter((job) => job.parentJobId === root.id)).toHaveLength(0);
+    expect(readJob(cwd, root.id)?.status).toBe("queued");
+    expect(readJob(cwd, root.id)?.chainId == null).toBe(true);
+  });
+
+  it("first child from sliced plan has parentJobId and sliceId", async () => {
+    const cwd = tempDir();
+    const root = seedImplementRoot(cwd, "sliced");
+
+    const result = await bootstrapWriteJobChain(root, {
+      spawnJobSupervisor: () => 1,
+      captureRepositoryFingerprint: async () => "fp-test",
+      planSliceManifest: async (input) => ({
+        ok: true,
+        manifest: fakeManifest(cwd, input.chainId, 2)
+      })
+    });
+
+    expect(result.status).toBe("bootstrapped");
+    if (result.status !== "bootstrapped") return;
+
+    expect(result.sliceId).toBe("slice-1");
+    expect(result.child.parentJobId).toBe(root.id);
+    expect(result.child.sliceId).toBe("slice-1");
+    expect(result.child.notificationTarget == null).toBe(true);
+    expect(result.root.summary).toBe("Executing slice 1/2: Slice 1");
+    expect((result.child.request as { batchMode?: string }).batchMode).toBe("single");
+    expect((result.child.request as { allowedPaths?: string[] }).allowedPaths).toEqual(["src/**"]);
   });
 });

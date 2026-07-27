@@ -53,6 +53,29 @@ describe("run outcome classification", () => {
     expect(outcome).toMatchObject({ status: "timeout", errorCode: "timeout" });
   });
 
+  it("maps progress_timeout to stalled without colliding with idle_timeout", () => {
+    expect(classifyRunOutcome({
+      exitCode: 124,
+      terminationReason: "progress_timeout",
+      verification: [],
+      finalText: "",
+      stallErrorCode: "command_silent"
+    })).toMatchObject({
+      status: "stalled",
+      errorCode: "command_silent"
+    });
+
+    expect(classifyRunOutcome({
+      exitCode: 124,
+      terminationReason: "idle_timeout",
+      verification: [],
+      finalText: ""
+    })).toMatchObject({
+      status: "timeout",
+      errorCode: "idle_timeout"
+    });
+  });
+
   it("maps idle_timeout termination to a distinct timeout outcome", () => {
     expect(classifyRunOutcome({
       exitCode: 124,

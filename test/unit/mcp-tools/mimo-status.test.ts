@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createJobStore, updateJob } from "../../../src/core/job-store.js";
+import type { JobStatusResult } from "../../../src/core/jobs.js";
 import { mimoStatus } from "../../../src/codex/tools.js";
 import { enqueueDelivery, retryDelivery, claimDueDelivery } from "../../../src/notify/outbox.js";
 
@@ -13,20 +14,65 @@ function tempWorkspace(): string {
   return cwd;
 }
 
+function requireStandardStatus(
+  result: Awaited<ReturnType<typeof mimoStatus>>
+): asserts result is JobStatusResult {
+  if (!("jobId" in result)) throw new Error("Expected a standard job status.");
+}
+
 afterEach(() => {
   for (const d of tempDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
 });
 
 describe("mimo_status", () => {
+  it("returns only the heartbeat state by default", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
+    updateJob(cwd, job.id, {
+      status: "running",
+      phase: "investigating",
+      pid: 100,
+      processIdentity: "start-100"
+    });
+
+    const verifyProcess = vi.fn();
+    expect(await mimoStatus(
+      { cwd, jobId: job.id },
+      { verifyProcess }
+    )).toEqual({ status: "running" });
+    expect(verifyProcess).not.toHaveBeenCalled();
+  });
+
+  it("returns live diagnostics only at standard level", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
+    updateJob(cwd, job.id, {
+      status: "running",
+      phase: "investigating",
+      pid: 100,
+      processIdentity: "start-100"
+    });
+    const result = await mimoStatus({ cwd, jobId: job.id, level: "standard" }, {
+      verifyProcess: () => ({ status: "match" as const, evidence: "matched" })
+    });
+    expect(result).toMatchObject({
+      jobId: job.id,
+      status: "running",
+      phase: "investigating",
+      processAlive: true
+    });
+  });
+
   it("returns status for a specific jobId", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
     updateJob(cwd, job.id, {
       status: "running", phase: "investigating", pid: 100, processIdentity: "start-100"
     });
-    const result = await mimoStatus({ cwd, jobId: job.id }, {
+    const result = await mimoStatus({ cwd, jobId: job.id, level: "standard" }, {
       verifyProcess: () => ({ status: "match" as const, evidence: "matched" })
     });
+    requireStandardStatus(result);
     expect(result.jobId).toBe(job.id);
     expect(result.status).toBe("running");
     expect(result.phase).toBe("investigating");
@@ -53,7 +99,8 @@ describe("mimo_status", () => {
     const claimed = await claimDueDelivery(job.notificationOutboxFile, new Date("2026-07-16T00:00:01.000Z"), 30_000);
     await retryDelivery(job.notificationOutboxFile, claimed!.id, claimed!.attempts, new Date("2026-07-16T00:01:00.000Z"), "busy", "codex_thread_busy");
 
-    const result = await mimoStatus({ cwd, jobId: job.id });
+    const result = await mimoStatus({ cwd, jobId: job.id, level: "standard" });
+    requireStandardStatus(result);
     expect(result.executionCallback).toMatchObject({
       invocationId: "compose-dev-1",
       outcome: "completed",
@@ -75,7 +122,8 @@ describe("mimo_status", () => {
     const job1 = store.create({ kind: "compose", task: "First", request: {} });
     const job2 = store.create({ kind: "compose", task: "Second", request: {} });
     updateJob(cwd, job2.id, { status: "completed", summary: "Done" });
-    const result = await mimoStatus({ cwd });
+    const result = await mimoStatus({ cwd, level: "standard" });
+    requireStandardStatus(result);
     expect(result.jobId).toBe(job2.id);
   });
 
@@ -93,7 +141,8 @@ describe("mimo_status processAlive probe", () => {
       status: "running", pid: 4242, processIdentity: "win32:abc"
     });
     const verify = vi.fn(() => ({ status: "match" as const, evidence: "matched" }));
-    const result = await mimoStatus({ cwd, jobId: job.id }, { verifyProcess: verify });
+    const result = await mimoStatus({ cwd, jobId: job.id, level: "standard" }, { verifyProcess: verify });
+    requireStandardStatus(result);
     expect(verify).toHaveBeenCalledWith(4242, "win32:abc");
     expect(result.processAlive).toBe(true);
   });
@@ -104,9 +153,10 @@ describe("mimo_status processAlive probe", () => {
     updateJob(cwd, job.id, {
       status: "running", pid: 4242, processIdentity: "win32:abc"
     });
-    const result = await mimoStatus({ cwd, jobId: job.id }, {
+    const result = await mimoStatus({ cwd, jobId: job.id, level: "standard" }, {
       verifyProcess: () => ({ status: "not_running" as const, evidence: "gone" })
     });
+    requireStandardStatus(result);
     expect(result.processAlive).toBe(false);
   });
 
@@ -116,13 +166,14 @@ describe("mimo_status processAlive probe", () => {
     updateJob(cwd, job.id, {
       status: "running", pid: 4242, processIdentity: "win32:abc"
     });
-    const result = await mimoStatus({ cwd, jobId: job.id }, {
+    const result = await mimoStatus({ cwd, jobId: job.id, level: "standard" }, {
       verifyProcess: () => ({
         status: "identity_mismatch" as const,
         actualIdentity: "win32:xyz",
         evidence: "pid reused"
       })
     });
+    requireStandardStatus(result);
     expect(result.processAlive).toBe(false);
   });
 
@@ -132,9 +183,10 @@ describe("mimo_status processAlive probe", () => {
     updateJob(cwd, job.id, {
       status: "running", pid: 4242, processIdentity: "win32:abc"
     });
-    const result = await mimoStatus({ cwd, jobId: job.id }, {
+    const result = await mimoStatus({ cwd, jobId: job.id, level: "standard" }, {
       verifyProcess: () => ({ status: "unconfirmed" as const, evidence: "?" })
     });
+    requireStandardStatus(result);
     expect(result.processAlive).toBe("unknown");
   });
 
@@ -144,9 +196,10 @@ describe("mimo_status processAlive probe", () => {
     updateJob(cwd, job.id, {
       status: "running", pid: 4242, processIdentity: "win32:abc"
     });
-    const result = await mimoStatus({ cwd, jobId: job.id }, {
+    const result = await mimoStatus({ cwd, jobId: job.id, level: "standard" }, {
       verifyProcess: () => { throw new Error("boom"); }
     });
+    requireStandardStatus(result);
     expect(result.processAlive).toBe("unknown");
   });
 
@@ -155,7 +208,8 @@ describe("mimo_status processAlive probe", () => {
     const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
     updateJob(cwd, job.id, { status: "completed", pid: null, processIdentity: null });
     const verify = vi.fn();
-    const result = await mimoStatus({ cwd, jobId: job.id }, { verifyProcess: verify });
+    const result = await mimoStatus({ cwd, jobId: job.id, level: "standard" }, { verifyProcess: verify });
+    requireStandardStatus(result);
     expect(verify).not.toHaveBeenCalled();
     expect(result).not.toHaveProperty("processAlive");
   });
@@ -165,9 +219,18 @@ describe("mimo_status processAlive probe", () => {
     const job = createJobStore(cwd).create({ kind: "compose", task: "Run dev", request: {} });
     updateJob(cwd, job.id, { status: "running", pid: null, processIdentity: null });
     const verify = vi.fn();
-    const result = await mimoStatus({ cwd, jobId: job.id }, { verifyProcess: verify });
+    const result = await mimoStatus({ cwd, jobId: job.id, level: "standard" }, { verifyProcess: verify });
+    requireStandardStatus(result);
     expect(verify).not.toHaveBeenCalled();
     expect(result).not.toHaveProperty("processAlive");
+  });
+
+  it("returns compact stalled status for heartbeat polling", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "implement", task: "Implement", request: {} });
+    updateJob(cwd, job.id, { status: "stalled", summary: "No effective progress." });
+
+    expect(await mimoStatus({ cwd, jobId: job.id })).toMatchObject({ status: "stalled", resultAvailable: true });
   });
 
   it("surfaces idleMs, lastEventAt, lastTool, idleTimeoutMs from the persisted record", async () => {
@@ -181,9 +244,10 @@ describe("mimo_status processAlive probe", () => {
       lastTool: "write",
       idleTimeoutMs: 1_800_000
     });
-    const result = await mimoStatus({ cwd, jobId: job.id }, {
+    const result = await mimoStatus({ cwd, jobId: job.id, level: "standard" }, {
       verifyProcess: () => ({ status: "match" as const, evidence: "ok" })
     });
+    requireStandardStatus(result);
     expect(result.lastEventAt).toBe("2026-07-21T07:12:34.000Z");
     expect(result.lastTool).toBe("write");
     expect(result.idleTimeoutMs).toBe(1_800_000);

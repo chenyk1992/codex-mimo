@@ -81,6 +81,7 @@ describe("job signals", () => {
     expect(ATTENTION_SIGNAL_KINDS).toEqual([
       "needs_input",
       "blocked",
+      "stalled",
       "completed",
       "failed",
       "cancelled",

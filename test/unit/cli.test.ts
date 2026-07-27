@@ -77,7 +77,7 @@ describe("unified CLI work commands", () => {
     ["resume", ["resume", "--cwd", cwd, "--job-id", "parent-1", "Continue implementation"], "mimoResume",
       { cwd, jobId: "parent-1", task: "Continue implementation" }],
     ["compose", ["compose", "--cwd", cwd, "--workflow", "dev", "Build authentication"], "mimoCompose",
-      { cwd, workflow: "dev", task: "Build authentication", timeoutMs: 1_800_000, idleTimeoutMs: 1_800_000 }]
+      { cwd, workflow: "dev", task: "Build authentication", timeoutMs: 1_800_000, idleTimeoutMs: 1_800_000, progressWarningMs: 120_000, progressTimeoutMs: 300_000, batchMode: "auto" }]
   ] as const;
 
   it.each(cases)("%s prints a queued receipt", async (kind, args, dependency, expectedInput) => {
@@ -188,6 +188,35 @@ describe("public CLI controls", () => {
       minLevel: "error",
       timeoutMs: 12000
     });
+  });
+
+  it("uses standard CLI status and compact CLI result defaults", async () => {
+    const status = await invoke(["status", "--job-id", jobId]);
+    const result = await invoke(["result", "--job-id", jobId]);
+
+    expect(status.deps.mimoStatus).toHaveBeenCalledWith({
+      cwd,
+      jobId,
+      level: "standard"
+    });
+    expect(result.deps.mimoResult).toHaveBeenCalledWith({
+      cwd,
+      jobId,
+      level: "compact"
+    });
+  });
+
+  it("forwards an explicit output level and rejects unknown levels", async () => {
+    const full = await invoke(["result", "--job-id", jobId, "--level", "full"]);
+    expect(full.deps.mimoResult).toHaveBeenCalledWith({
+      cwd,
+      jobId,
+      level: "full"
+    });
+
+    const invalid = await invoke(["result", "--job-id", jobId, "--level", "verbose"]);
+    expect(invalid.exitCode).toBe(2);
+    expect(invalid.stderr).toContain("--level must be compact, standard, or full");
   });
 });
 
