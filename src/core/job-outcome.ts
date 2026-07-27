@@ -6,6 +6,7 @@ import type {
   JobVerification
 } from "./jobs.js";
 import type { JobFailureCause } from "./safety-contracts.js";
+import { COMPACT_FAILURE_CAUSE_LIMIT } from "./safety-contracts.js";
 import { publicProgressSummary } from "./public-summary.js";
 
 export interface RunEvidence {
@@ -25,6 +26,8 @@ export interface RunEvidence {
   requireFinalText?: boolean;
   /** Optional secondary failure causes aggregated after primary classification. */
   failureCauses?: JobFailureCause[];
+  /** Explicit session drift observed in JSONL (do not overwrite runSessionId). */
+  eventSessionMismatch?: boolean;
 }
 
 export interface JobOutcome {
@@ -84,10 +87,56 @@ const UNACCEPTED_TASK_ERROR = "MiMoCode did not receive or accept the task objec
 export function classifyRunOutcome(evidence: RunEvidence): JobOutcome {
   const finalText = evidence.finalText.trim();
   const common = commonOutcomeFields(evidence);
+  const suppliedCauses = evidence.failureCauses ?? [];
 
   if (evidence.terminationReason === "user_cancelled") {
-    return failureOutcome("cancelled", "MiMoCode job was cancelled.", "cancelled", common);
+    return withCauses(
+      failureOutcome("cancelled", "MiMoCode job was cancelled.", "cancelled", common),
+      suppliedCauses,
+      { code: "cancelled", stage: "execution" }
+    );
   }
+
+  if (hasCause(suppliedCauses, "prompt_identity_mismatch")) {
+    return withCauses(
+      failureOutcome(
+        "failed",
+        "MiMoCode prompt identity did not match the job query.",
+        "prompt_identity_mismatch",
+        common,
+        "MiMoCode prompt identity did not match the job query."
+      ),
+      suppliedCauses,
+      { code: "prompt_identity_mismatch", stage: "prompt" }
+    );
+  }
+
+  if (evidence.eventSessionMismatch || hasCause(suppliedCauses, "event_session_mismatch")) {
+    return withCauses(
+      failureOutcome(
+        "failed",
+        "MiMoCode JSONL session identity changed during the run.",
+        "event_session_mismatch",
+        common
+      ),
+      suppliedCauses,
+      { code: "event_session_mismatch", stage: "execution" }
+    );
+  }
+
+  if (hasCallbackSessionMismatch(evidence)) {
+    return withCauses(
+      failureOutcome(
+        "failed",
+        "MiMoCode completion callback session did not match the run session.",
+        "callback_session_mismatch",
+        common
+      ),
+      suppliedCauses,
+      { code: "callback_session_mismatch", stage: "callback" }
+    );
+  }
+
   if (evidence.terminationReason === "progress_timeout") {
     const errorCode = evidence.stallErrorCode ?? "no_effective_progress";
     const summary = publicProgressSummary({
@@ -95,27 +144,34 @@ export function classifyRunOutcome(evidence: RunEvidence): JobOutcome {
       status: "stalled",
       errorCode
     });
-    return {
-      status: "stalled",
-      summary,
-      errorCode,
-      error: summary,
-      ...common
-    };
+    return withCauses(
+      {
+        status: "stalled",
+        summary,
+        errorCode,
+        error: summary,
+        ...common
+      },
+      suppliedCauses,
+      { code: errorCode, stage: "execution" }
+    );
   }
   if (evidence.terminationReason === "idle_timeout") {
-    return failureOutcome(
-      "timeout",
-      "MiMoCode job idle-timed out.",
-      "idle_timeout",
-      common
+    return withCauses(
+      failureOutcome("timeout", "MiMoCode job idle-timed out.", "idle_timeout", common),
+      suppliedCauses,
+      { code: "idle_timeout", stage: "execution" }
     );
   }
   if (
     evidence.terminationReason === "process_timeout" ||
     (evidence.terminationReason === undefined && evidence.exitCode === 124)
   ) {
-    return failureOutcome("timeout", "MiMoCode job timed out.", "timeout", common);
+    return withCauses(
+      failureOutcome("timeout", "MiMoCode job timed out.", "timeout", common),
+      suppliedCauses,
+      { code: "process_timeout", stage: "execution" }
+    );
   }
 
   const callbackCode = callbackFailureCode(evidence.executionCallback);
@@ -125,58 +181,87 @@ export function classifyRunOutcome(evidence: RunEvidence): JobOutcome {
       : callbackCode === "callback_cancelled"
         ? "MiMoCode completion callback reported cancellation."
         : "MiMoCode completion callback reported an error.";
-    return {
-      status: "failed",
-      summary: "MiMoCode completion callback was not accepted.",
-      ...common,
-      error: callbackError,
-      errorCode: callbackCode
-    };
+    return withCauses(
+      {
+        status: "failed",
+        summary: "MiMoCode completion callback was not accepted.",
+        ...common,
+        error: callbackError,
+        errorCode: callbackCode
+      },
+      suppliedCauses,
+      { code: callbackCode, stage: "callback" }
+    );
   }
 
   const semanticFailure = detectUnacceptedTask(finalText);
   if (semanticFailure) {
-    return failureOutcome("failed", semanticFailure, "semantic_failure", common, semanticFailure);
+    return withCauses(
+      failureOutcome("failed", semanticFailure, "semantic_failure", common, semanticFailure),
+      suppliedCauses,
+      { code: "semantic_failure", stage: "execution" }
+    );
   }
 
   if (matchesExplicitOutput(finalText, NEEDS_INPUT_PATTERNS)) {
-    return { status: "needs_input", summary: "MiMoCode needs additional input.", ...common };
+    return withCauses(
+      { status: "needs_input", summary: "MiMoCode needs additional input.", ...common },
+      suppliedCauses
+    );
   }
   if (matchesExplicitOutput(finalText, BLOCKED_PATTERNS)) {
-    return { status: "blocked", summary: "MiMoCode is blocked by an external condition.", ...common };
+    return withCauses(
+      { status: "blocked", summary: "MiMoCode is blocked by an external condition.", ...common },
+      suppliedCauses
+    );
   }
 
   if (evidence.verification.some((result) => !result.passed)) {
-    return failureOutcome(
-      "failed",
-      "MiMoCode verification failed.",
-      "verification_failed",
-      common,
-      "One or more verification commands failed."
+    return withCauses(
+      failureOutcome(
+        "failed",
+        "MiMoCode verification failed.",
+        "verification_failed",
+        common,
+        "One or more verification commands failed."
+      ),
+      suppliedCauses,
+      { code: "verification_failed", stage: "test" }
     );
   }
   if (evidence.exitCode !== 0 || evidence.terminationReason === "host_abort") {
     const error = evidence.terminationReason === "host_abort"
       ? "MiMoCode run was aborted by the host."
       : `MiMoCode exited with code ${evidence.exitCode}.`;
-    return failureOutcome("failed", "MiMoCode execution failed.", "mimo_exit_nonzero", common, error);
-  }
-
-  if (evidence.requireFinalText && !finalText) {
-    return failureOutcome(
-      "failed",
-      "MiMoCode did not return a final result.",
-      "result_missing",
-      common,
-      "MiMoCode did not return a final result."
+    return withCauses(
+      failureOutcome("failed", "MiMoCode execution failed.", "mimo_exit_nonzero", common, error),
+      suppliedCauses,
+      { code: "mimo_exit_nonzero", stage: "execution" }
     );
   }
 
-  return {
-    status: "completed",
-    summary: "MiMoCode completed the job.",
-    ...common
-  };
+  if (evidence.requireFinalText && !finalText) {
+    return withCauses(
+      failureOutcome(
+        "failed",
+        "MiMoCode did not return a final result.",
+        "result_missing",
+        common,
+        "MiMoCode did not return a final result."
+      ),
+      suppliedCauses,
+      { code: "result_missing", stage: "execution" }
+    );
+  }
+
+  return withCauses(
+    {
+      status: "completed",
+      summary: "MiMoCode completed the job.",
+      ...common
+    },
+    suppliedCauses
+  );
 }
 
 export function detectUnacceptedTask(finalText: string | undefined): string | undefined {
@@ -188,6 +273,11 @@ export function detectUnacceptedTask(finalText: string | undefined): string | un
     : undefined;
 }
 
+export function compactFailureCauses(causes: JobFailureCause[] | undefined): JobFailureCause[] | undefined {
+  if (!causes || causes.length === 0) return undefined;
+  return causes.slice(0, COMPACT_FAILURE_CAUSE_LIMIT);
+}
+
 function normalizeGreetingPrefix(text: string): string {
   return text.replace(/^(?:hello|hi|hey)\b(?:[!.,]+\s*|\s+)/i, "").trim();
 }
@@ -196,10 +286,11 @@ function commonOutcomeFields(evidence: RunEvidence): Pick<
   JobOutcome,
   "sessionId" | "verification" | "executionCallback"
 > {
+  const sessionId = evidence.runSessionId !== undefined
+    ? evidence.runSessionId
+    : evidence.executionCallback?.sessionId;
   return {
-    ...(evidence.executionCallback?.sessionId !== undefined
-      ? { sessionId: evidence.executionCallback.sessionId }
-      : {}),
+    ...(sessionId !== undefined ? { sessionId } : {}),
     verification: evidence.verification,
     ...(evidence.executionCallback
       ? { executionCallback: toPublicExecutionCallback(evidence.executionCallback) }
@@ -238,6 +329,45 @@ function callbackFailureCode(callback?: ExecutionCallbackSummary): string | unde
   if (callback?.outcome === "error") return "callback_error";
   if (callback?.outcome === "cancelled") return "callback_cancelled";
   return undefined;
+}
+
+function hasCallbackSessionMismatch(evidence: RunEvidence): boolean {
+  const runSessionId = evidence.runSessionId;
+  const callbackSessionId = evidence.executionCallback?.sessionId;
+  return (
+    typeof runSessionId === "string" &&
+    runSessionId.length > 0 &&
+    typeof callbackSessionId === "string" &&
+    callbackSessionId.length > 0 &&
+    runSessionId !== callbackSessionId
+  );
+}
+
+function hasCause(causes: JobFailureCause[], code: string): boolean {
+  return causes.some((cause) => cause.code === code);
+}
+
+function withCauses(
+  outcome: JobOutcome,
+  supplied: JobFailureCause[],
+  primary?: JobFailureCause
+): JobOutcome {
+  if (supplied.length === 0) {
+    return outcome;
+  }
+  const merged: JobFailureCause[] = [];
+  const seen = new Set<string>();
+  const push = (cause: JobFailureCause | undefined) => {
+    if (!cause) return;
+    const key = `${cause.code}:${cause.stage}:${cause.command ?? ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(cause);
+  };
+  push(primary);
+  for (const cause of supplied) push(cause);
+  if (merged.length === 0) return outcome;
+  return { ...outcome, causes: merged };
 }
 
 function matchesExplicitOutput(text: string, patterns: readonly RegExp[]): boolean {

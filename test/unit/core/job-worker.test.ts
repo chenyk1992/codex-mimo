@@ -100,6 +100,9 @@ function hook(callback: MimoHookCallbackSummary | null = completedCallback): Hoo
     configDir: "hook-dir",
     callbackFile: "callback.json",
     env: { HOOK_ENV: "yes" },
+    bindRunSession: vi.fn(),
+    getRunSession: vi.fn(() => undefined),
+    getDiagnostics: vi.fn(() => []),
     waitForCallback: vi.fn(async () => callback),
     close: vi.fn(async () => undefined)
   };
