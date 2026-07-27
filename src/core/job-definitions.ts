@@ -253,6 +253,8 @@ export interface JobFinalizeDependencies {
 export interface JobExecutionFinalizeContext {
   signal: AbortSignal;
   mimoArgs?: string[];
+  /** Authoritative JSONL primary session captured by the job worker. */
+  runSessionId?: string;
   run: StreamingRunResult;
   events: NormalizedMimoEvent[];
   executionCallback?: ExecutionCallbackSummary;
