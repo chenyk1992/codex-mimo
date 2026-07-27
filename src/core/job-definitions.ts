@@ -8,6 +8,7 @@ import {
 } from "../compose/report.js";
 import {
   buildReadOnlyReportDiff,
+  changedFingerprintFiles,
   detectNewFilesFromStatus,
   detectReadOnlyViolationFiles,
   gitHeadChanged,
@@ -112,6 +113,7 @@ import {
 } from "./job-store.js";
 import { spawnJobSupervisor } from "./job-process.js";
 import { transitionJob, type JobTransition } from "./job-transition.js";
+import { isRuntimeArtifactPath } from "./runtime-paths.js";
 
 const DEFAULT_TIMEOUT_MS = 1_800_000;
 
@@ -757,21 +759,43 @@ function collectChangedFiles(
   context: JobExecutionFinalizeContext,
   writesAllowed: boolean
 ): string[] {
-  const diffFiles = context.diff?.changedFiles ?? [];
-  const commitFiles = context.commitChanges?.changedFiles ?? [];
+  const commitFiles = excludeRuntimeChangedFiles(context.commitChanges?.changedFiles ?? []);
   if (!writesAllowed) {
+    const diffFiles = context.diff?.changedFiles ?? [];
     const statusFiles = detectReadOnlyViolationFiles(
       false,
       diffFiles,
       context.gitStatusBefore,
       context.gitStatusAfter
     );
-    return mergeChangedFiles(statusFiles, commitFiles);
+    return excludeRuntimeChangedFiles(mergeChangedFiles(statusFiles, commitFiles));
   }
-  const newStatusFiles = context.gitStatusBefore && context.gitStatusAfter
-    ? detectNewFilesFromStatus(context.gitStatusBefore, context.gitStatusAfter)
-    : [];
-  return mergeChangedFiles(diffFiles, commitFiles, newStatusFiles);
+  if (context.gitStatusBefore && context.gitStatusAfter) {
+    const attributed = attributedJobChangedFiles(context.gitStatusBefore, context.gitStatusAfter);
+    return excludeRuntimeChangedFiles(mergeChangedFiles(attributed, commitFiles));
+  }
+  return excludeRuntimeChangedFiles(
+    mergeChangedFiles(context.diff?.changedFiles ?? [], commitFiles)
+  );
+}
+
+function excludeRuntimeChangedFiles(files: string[]): string[] {
+  return files.filter((file) => !isRuntimeArtifactPath(file));
+}
+
+function attributedJobChangedFiles(before: GitStatusSnapshot, after: GitStatusSnapshot): string[] {
+  const hasFingerprintData = Boolean(
+    before.fingerprints &&
+    after.fingerprints &&
+    (
+      Object.keys(before.fingerprints).length > 0 ||
+      Object.keys(after.fingerprints).length > 0
+    )
+  );
+  if (hasFingerprintData) {
+    return changedFingerprintFiles(before, after);
+  }
+  return detectNewFilesFromStatus(before, after);
 }
 
 function hasReadOnlyViolation(context: JobExecutionFinalizeContext, changedFiles: string[]): boolean {

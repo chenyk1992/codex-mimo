@@ -224,14 +224,16 @@ export function parseGitStatusFiles(status: string): Set<string> {
   );
 }
 
-function changedFingerprintFiles(before: GitStatusSnapshot, after: GitStatusSnapshot): string[] {
+export function changedFingerprintFiles(before: GitStatusSnapshot, after: GitStatusSnapshot): string[] {
+  const beforeFingerprints = before.fingerprints ?? {};
+  const afterFingerprints = after.fingerprints ?? {};
   const files = new Set([
-    ...Object.keys(before.fingerprints),
-    ...Object.keys(after.fingerprints)
+    ...Object.keys(beforeFingerprints),
+    ...Object.keys(afterFingerprints)
   ]);
   return [...files].filter((file) => {
-    const beforeFingerprint = before.fingerprints[file];
-    const afterFingerprint = after.fingerprints[file];
+    const beforeFingerprint = beforeFingerprints[file];
+    const afterFingerprint = afterFingerprints[file];
     return beforeFingerprint?.status !== afterFingerprint?.status
       || beforeFingerprint?.contentHash !== afterFingerprint?.contentHash;
   });
