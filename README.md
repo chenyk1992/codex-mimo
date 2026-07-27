@@ -34,12 +34,50 @@ Job status is one of:
 - `running`: MiMoCode or finalization is active
 - `needs_input`: paused until the caller supplies information
 - `blocked`: paused because an external condition prevents progress
+- `stalled`: no effective progress within the progress stop-loss; durable checkpoint written
 - `completed`: execution and required verification succeeded
 - `failed`: execution, callback, validation, or verification failed
 - `cancelled`: the caller cancelled the job
 - `timeout`: the configured execution deadline expired
 
-`needs_input` and `blocked` retain the MiMoCode session. Continue them with `mimo_resume` and the parent `jobId`; the continuation is a new child job and inherits the parent's notification target unless explicitly overridden.
+`needs_input`, `blocked`, and `stalled` retain resumable context. Continue them with `mimo_resume` and the parent `jobId`; the continuation is a new child job and inherits the parent's notification target unless explicitly overridden. `timeout` jobs with a durable checkpoint may also resume when the MiMo process is confirmed dead. Development acceptance failures with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing` are also resumable via Phase 2 `mimo_resume` when a checkpoint exists; `acceptance_config_missing` pauses as `needs_input`. Mid-chain `slice_failed` is resumable on the root (continues the attention slice and skips completed slices). `slice_plan_invalid` is not resumable — re-launch with a corrected objective or `batchMode` after re-planning.
+
+### Slice chains (`batchMode`)
+
+Write entries (`implement` and write Compose workflows) accept `batchMode`: `auto` (default), `single`, or `sliced`.
+
+- `auto` — bounded read-only planning returns one or more slices.
+- `single` — caller asserts one narrow deliverable (materialized as a one-slice chain).
+- `sliced` — require at least two slices; planning fails with `slice_plan_invalid` if the objective cannot be decomposed safely.
+
+The bridge saves the manifest at `.codex-mimo/reports/<rootJobId>.slices.json` and the durable chain at `.codex-mimo/jobs/<chainId>.chain.json`, then executes **one slice at a time**. Internal slice children omit notification targets; only the public root enqueues outbox deliveries. A failed slice finalizes the root with `slice_failed`. Standard `mimo_result` on a chain root includes `completedSlices` and `remainingSlices`.
+
+## Progress and timeout budgets
+
+Work requests accept three independent clocks:
+
+| Budget | Field | Default | Measures |
+| --- | --- | --- | --- |
+| Effective-progress stop-loss | `progressTimeoutMs` | 5 minutes (`300_000`) | Time since the last fingerprintable useful progress event |
+| Progress warning (internal) | `progressWarningMs` | 2 minutes (`120_000`) | Earlier internal warning before the stop-loss fires |
+| Transport idle stop-loss | `idleTimeoutMs` | 30 minutes (`1_800_000`) | Silence since the last stdout JSONL line |
+| Absolute run budget | `timeoutMs` | 30 minutes (`1_800_000`) | Total wall time since job start |
+
+Whichever budget fires first wins. Effective-progress stop-loss is distinct from transport idle timeout: JSONL may still arrive while MiMo repeats the same non-progress output; after five minutes without new useful progress the worker writes `.codex-mimo/reports/<jobId>.checkpoint.json`, terminates the owned MiMo tree, and finalizes as immutable `stalled`. Setting `progressTimeoutMs: 0` disables effective-progress stop-loss and weakens the five-minute deliverability objective.
+
+`mimo_status` at `standard` level exposes `lastProgressAt`, `quietSince`, and progress budgets while a job is `running`.
+
+### Resume eligibility
+
+| Parent status | Checkpoint required | Session reuse | Notes |
+| --- | --- | --- | --- |
+| `needs_input` | No | Yes when present | Caller supplies additional `task` text |
+| `blocked` | No | Yes when present | Caller supplies additional `task` text |
+| `stalled` | Yes | Yes when present | Checkpoint-only prompt forbids broad repository scans |
+| `timeout` | Yes when no session | Checkpoint when no `sessionId` | `idle_timeout` and absolute `timeout` |
+| `failed` with resumable code | Per error | Per error | `build_failed`, `tests_failed`, `diff_check_failed`, `delivery_contract_missing`, `slice_failed` (`slice_plan_invalid` requires a new job) |
+
+Never call `mimo_resume` while `stalled_process_alive` is set on a `blocked` parent.
 
 ## Work Tools
 
@@ -77,11 +115,19 @@ Every work tool returns:
 }
 ```
 
-The default Codex Desktop flow omits `notify` and uses a native in-chat scheduled follow-up (heartbeat) about once per minute: each beat may call at most one `mimo_status`; on `needs_input`, `blocked`, or a terminal status it calls at most one `mimo_result`, deletes the schedule, and answers the user. Do not call `mimo_events` or `mimo_wait` on that path. Optional App Server `notify: { type: "codex", threadId }` remains a CLI/compat history-write path: the notify worker waits on App Server `turn/completed` and starts one callback turn whose prompt already contains the prefetched public result and must not call any tool. Outbox `delivered` means that matching callback turn completed on the independent App Server connection — never that the Desktop UI refreshed. Direct user diagnostics may still use `mimo_result`.
+The default Codex Desktop flow omits `notify` and uses a native in-chat scheduled follow-up (heartbeat) every 5 minutes: each beat may call at most one `mimo_status` at the default compact level; on `needs_input`, `blocked`, `stalled`, or a terminal status it calls at most one `mimo_result` at the default compact level, deletes the schedule, and answers from status, changed files, tests, failure, bounded plan/review summary when present, and `reportPath`. Do not call `mimo_events` or `mimo_wait` on that path. Optional App Server `notify: { type: "codex", threadId }` remains a CLI/compat history-write path: the notify worker waits on App Server `turn/completed` and starts one callback turn whose prompt already contains the prefetched public result and must not call any tool. Outbox `delivered` means that matching callback turn completed on the independent App Server connection — never that the Desktop UI refreshed. Direct user diagnostics may still use `mimo_result`.
 
-## Result privacy boundary
+## Result delivery and artifacts
 
-Final assistant text is available only from an explicit `mimo_result` read as `mimo_result.output`. Status, job lists, signals, notifications, and Compose reports remain intentionally compact and structural: they omit model output. Operators should not expect a plan body in `.codex-mimo/reports/*.md`. The raw `jobs/<jobId>.events.jsonl` file remains a diagnostic artifact, not the normal result API.
+`mimo_result` defaults to a compact delivery record: status, changed files, compact verification/acceptance stage results, failure, report path, and a bounded plan/review summary when applicable. Complete final text is not returned by default. `reportPath` is repository-relative when the artifact is inside the requested workspace. Default compact `mimo_result` JSON must not exceed 6,000 UTF-8 bytes. Acceptance failures include compact fields such as `failedStage`, failed command/tests, and a shortest-fix `suggestion`.
+
+Use `level: "standard"` for bounded operator diagnostics and `level: "full"` only for explicit manual troubleshooting. `full` reads complete semantic and verification artifacts; normal Desktop heartbeat and automatic callback delivery remain compact.
+
+Full responses inline at most 1,000,000 bytes per artifact. A larger artifact is not truncated: the result contains `artifact_too_large`, the exact artifact path, and its byte count.
+
+Every finalized job has structural report paths. Complete semantic output is saved separately as `<jobId>.result.md`; plans additionally use `<jobId>.plan.md`; full verification stdout/stderr uses `<jobId>.verification.json`; stall checkpoints use `<jobId>.checkpoint.json`; slice chains use `<rootJobId>.slices.json` plus `.codex-mimo/jobs/<chainId>.chain.json`. Structural `.json`/`.md` reports link to these files and do not inline their content. Recognized credentials are redacted before semantic or verification artifacts are persisted and before full diagnostics are returned.
+
+CLI `status` defaults to `standard` for humans; MCP `mimo_status` defaults to compact.
 
 Direct `mimo_plan` and Compose `workflow: "plan"` cannot finish `completed` without a readable final result; they finish `failed` with safe `errorCode: "result_missing"` when a planning run had no readable final result.
 
@@ -102,8 +148,8 @@ A queued work receipt alone does not prove a Codex notification target exists un
 
 1. Launch one work job and **omit `notify`**.
 2. Return the queued receipt and `jobId`.
-3. Create an in-chat scheduled follow-up / heartbeat about once per minute.
-4. Each beat: at most one `mimo_status`. While `queued`/`running`, stop quietly. On `needs_input`, `blocked`, `completed`, `failed`, `cancelled`, or `timeout`: call at most one `mimo_result`, **delete/cancel/stop the heartbeat schedule**, then answer from `mimo_result.output` when present.
+3. Create an in-chat scheduled follow-up / heartbeat every 5 minutes.
+4. Each beat: at most one `mimo_status` at the default compact level. While `queued`/`running`, stop quietly. On `needs_input`, `blocked`, `stalled`, `completed`, `failed`, `cancelled`, or `timeout`: call at most one `mimo_result` at the default compact level, **delete/cancel/stop the heartbeat schedule**, then answer from status, changed files, tests, failure, bounded plan/review summary when present, and `reportPath`.
 5. Never treat App Server `delivered` or later session-history reads as Desktop UI visibility.
 
 ### Codex App Server notify (compat / CLI)
@@ -186,20 +232,28 @@ codex-mimo compose --cwd E:\project --workflow dev "Build the feature"
 
 Controls are `status`, `events`, `wait`, `result`, `cancel`, and `jobs`, each with `--cwd` and the relevant `--job-id`/cursor flags. Notification flags are `--notify codex --thread-id ...` or `--notify webhook --url ... --secret-env ...`.
 
+```powershell
+codex-mimo status --cwd E:\project --job-id <job-id>
+codex-mimo result --cwd E:\project --job-id <job-id>
+codex-mimo result --cwd E:\project --job-id <job-id> --level full
+```
+
+CLI `status` defaults to `standard` for humans; MCP `mimo_status` defaults to compact.
+
 CLI exit codes are: `0` success; `2` command, input, or schema error; and `1` runtime failure, including an unhealthy `doctor` or `healthcheck`.
 
 ## Compose Workflows
 
 Registered workflows are `brainstorm`, `plan`, `dev`, `fix`, `fix-ci`, `execute-plan`, `review`, `parallel`, `worktree`, `merge`, and `new-skill`. Compose uses the same worker and job lifecycle as every other kind; only its prompt, workflow rules, verification, and report finalization differ. See [Compose workflows](doc/compose-workflows.md).
 
-`verification` holds executable commands run without a shell — not natural-language acceptance criteria. Put scope or state prose in `task`. The `plan` workflow is read-only; read the plan from an explicit `mimo_result` as `mimo_result.output`. Asking it to write a plan file ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
+Prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck` for write acceptance. Stages run fail-fast: build → test → diffCheck (deterministic self-check plus read-only MiMo review). Legacy `verification[]` remains accepted and maps to the **test stage only** — it does not satisfy build. Put scope or state prose in `task`. `dev`, `execute-plan`, and `implement` cannot complete without acceptance: missing build/test disposition at finalize pauses as `needs_input` with `acceptance_config_missing`; stage failures finish `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing`. Resume those codes (and checkpoint-backed stalls/timeouts) via Phase 2 `mimo_resume`. The `plan` workflow is read-only; MiMoCode returns the plan in its final response and does not write project files. The bridge saves the complete plan to `.codex-mimo/reports/<jobId>.plan.md`; default `mimo_result` returns only a bounded summary and `reportPath`. Asking it to write a plan file ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
 
 ```json
 { "workflow": "plan", "task": "Plan the feature; return the plan only" }
 ```
 
 ```json
-{ "workflow": "dev", "task": "Implement the feature", "verification": ["npm test", "npm run build"] }
+{ "workflow": "dev", "task": "Implement the feature", "acceptance": { "build": ["npm run build"], "test": ["npm test"], "diffCheck": true } }
 ```
 
 ## Runtime Files and Recovery
@@ -212,7 +266,7 @@ Runtime state is below `.codex-mimo/`:
 - `jobs/<jobId>.signals.jsonl`: cursor-addressed signals
 - `jobs/notifications.jsonl`: durable notification outbox
 - `callbacks/`: allowlisted internal callback receipts without final text, raw metadata, or callback error strings
-- `reports/`, `events/`, `diffs/`: Compose structural event summaries, verification, and Git artifacts (reports intentionally omit model output; do not expect a plan body in `reports/*.md`)
+- `reports/`, `events/`, `diffs/`: Compose structural event summaries, verification, and Git artifacts. Structural `.json`/`.md` reports link to semantic artifacts (`.result.md`, `.plan.md`, `.verification.json`) and do not inline their content. The raw `jobs/<jobId>.events.jsonl` file remains a diagnostic artifact, not the normal result API.
 - `inputs/`, `runtime-hooks/`: UTF-8 prompt transport and generated internal callback plugins
 
 The per-job JSON file is authoritative; `jobs/state.json` is a rebuildable cache. Each launch starts one workspace-scoped internal supervisor, which adopts an existing physical worker owner or replaces a crashed worker while execution or delivery remains unfinished, and exits when the workspace is idle. Worker startup retries are bounded. A restarted job worker never blindly reruns an unknown process: it verifies process ownership and keeps the job `running` with its PID/identity intact while termination remains unconfirmed. Only confirmed exit, identity mismatch, or confirmed termination permits a terminal transition. Pending transitions and outbox delivery identity remain stable across restart.
@@ -241,4 +295,4 @@ $env:CODEX_MIMO_INSTALLED_PLUGIN_ROOT='C:\Users\<you>\.codex\plugins\cache\<sour
 $env:RUN_LOCAL_CODEX_NOTIFY_SMOKE='1'; npm run test:smoke:codex-notify
 ```
 
-The Codex notification smoke also requires a real Codex App Server and an idle, dedicated Codex task with its injected `CODEX_THREAD_ID`. `CODEX_MIMO_INSTALLED_PLUGIN_ROOT` must be the absolute installed package root, not this source checkout; the smoke rejects a missing package or a plugin manifest version that differs from the checkout. Before removing Codex-bearing PATH directories and clearing `CODEX_MIMO_CODEX_BIN`, it freezes the resolved MiMoCode command as an absolute `CODEX_MIMO_COMMAND`, so the run deterministically exercises Desktop-local discovery even when MiMoCode and Codex share a directory. Do not run it from a task handling other work: the smoke deliberately resumes that task and reads the newest assistant response from the target session rollout after the prefetched-result callback completes.
+The Codex notification smoke also requires a real Codex App Server and an idle, dedicated Codex task with its injected `CODEX_THREAD_ID`. `CODEX_MIMO_INSTALLED_PLUGIN_ROOT` must be the absolute installed package root, not this source checkout; the smoke rejects a missing package or a plugin manifest version that differs from the checkout. Before removing Codex-bearing PATH directories and clearing `CODEX_MIMO_CODEX_BIN`, it freezes the resolved MiMoCode command as an absolute `CODEX_MIMO_COMMAND`, so the run deterministically exercises Desktop-local discovery even when MiMoCode and Codex share a directory. Do not run it from a task handling other work: the smoke deliberately resumes that task and reads the newest assistant response from the target session rollout after the prefetched-result callback completes. Passing that read proves three separate facts: the complete MiMo marker is present in `<jobId>.result.md`, the callback assistant response is non-empty but does not echo that marker, and exactly one callback `turn/start` reaches independent session history.

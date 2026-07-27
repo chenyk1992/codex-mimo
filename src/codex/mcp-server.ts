@@ -86,7 +86,8 @@ export function createMcpServer(overrides: Partial<McpToolHandlers> = {}): McpSe
     description: "Create an implementation plan in a background job", inputSchema: PlanInput
   }, handle("mimo_plan", handlers.mimoPlan));
   server.registerTool("mimo_implement", {
-    description: "Implement code changes in a background job", inputSchema: ImplementInput
+    description: "Implement code changes in a background job. Requires ordered development acceptance (acceptance.build/test/diffCheck); cannot complete without it. Optional batchMode auto|single|sliced runs a sequential slice chain with root-only notifications; slice_failed is resumable on the root, while slice_plan_invalid requires a new job after re-planning.",
+    inputSchema: ImplementInput
   }, handle("mimo_implement", handlers.mimoImplement));
   server.registerTool("mimo_review", {
     description: "Review the current diff in a background job", inputSchema: ReviewInput
@@ -95,14 +96,16 @@ export function createMcpServer(overrides: Partial<McpToolHandlers> = {}): McpSe
     description: "Fix CI failures in a background job", inputSchema: FixCiInput
   }, handle("mimo_fix_ci", handlers.mimoFixCi));
   server.registerTool("mimo_resume", {
-    description: "Resume a paused job through its parent job ID", inputSchema: ResumeInput
+    description: "Resume a paused or resumable-failure parent (needs_input, blocked, stalled, eligible timeout, build_failed, tests_failed, diff_check_failed, delivery_contract_missing, acceptance_config_missing, slice_failed) from session and/or checkpoint context. For slice-chain roots, continues the current attention slice and skips completed slices; child slices never notify. slice_plan_invalid is not resumable — re-launch after fixing the plan.",
+    inputSchema: ResumeInput
   }, handle("mimo_resume", handlers.mimoResume));
   server.registerTool("mimo_compose", {
-    description: "Run a Compose workflow in a background job. The plan workflow is read-only and returns its plan in the job result via mimo_result; verification holds executable no-shell commands, not acceptance-criteria prose.",
+    description: "Run a Compose workflow in a background job. Plan workflows are read-only; compact results return a summary and saved plan path. Prefer acceptance.build/test/diffCheck; legacy verification maps to the test stage only. Write workflows accept batchMode auto|single|sliced for sequential slices with root-only notifications. dev and execute-plan cannot complete without acceptance.",
     inputSchema: ComposeInput
   }, handle("mimo_compose", handlers.mimoCompose));
   server.registerTool("mimo_status", {
-    description: "Show compact status for an active or recent job", inputSchema: JobStatusInput
+    description: "Return a minimal heartbeat status by default; request standard or full for diagnostics",
+    inputSchema: JobStatusInput
   }, handle("mimo_status", handlers.mimoStatus));
   server.registerTool("mimo_events", {
     description: "Return incremental compact job signals", inputSchema: JobEventsInput
@@ -111,7 +114,8 @@ export function createMcpServer(overrides: Partial<McpToolHandlers> = {}): McpSe
     description: "Wait for a job event that requires caller attention", inputSchema: JobWaitInput
   }, handle("mimo_wait", handlers.mimoWait));
   server.registerTool("mimo_result", {
-    description: "Return a compact partial or final job result", inputSchema: JobResultInput
+    description: "Return a compact job result by default; request standard or full only for diagnostics",
+    inputSchema: JobResultInput
   }, handle("mimo_result", handlers.mimoResult));
   server.registerTool("mimo_cancel", {
     description: "Cancel a queued or running job", inputSchema: JobCancelInput

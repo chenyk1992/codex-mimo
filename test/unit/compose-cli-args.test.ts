@@ -35,6 +35,9 @@ it("passes the complete Compose request through the shared work API", async () =
     model: "mimo-v2",
     timeoutMs: 45000,
     idleTimeoutMs: 1_800_000,
+    progressWarningMs: 120_000,
+    progressTimeoutMs: 300_000,
+    batchMode: "auto",
     task: "Fix the pipeline"
   });
 });

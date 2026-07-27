@@ -15,8 +15,25 @@ import {
   ReviewInput
 } from "./tool-schemas.js";
 import { launchJob, type LaunchJobDependencies } from "../core/job-launcher.js";
-import { bindJobDefinition } from "../core/job-definitions.js";
-import { listJobs, readJob, resolveJobPaths } from "../core/job-store.js";
+import { advanceJobChainAfterChild, bindJobDefinition } from "../core/job-definitions.js";
+import {
+  captureRepositoryFingerprint,
+  detectResumeConflict,
+  readJobCheckpoint,
+  RESUMABLE_FAILURE_CODES,
+  type JobCheckpoint
+} from "../core/job-checkpoint.js";
+import {
+  findChainAttentionSlice,
+  isChainOrchestratorRoot,
+  isChainSliceChild,
+  markPendingSlicesCancelled,
+  markSliceRunning,
+  markSliceTerminal,
+  readJobChain,
+  resolveLiveChainChildJobId
+} from "../core/job-chain.js";
+import { listJobs, readJob, resolveJobPaths, updateJobAuthoritative } from "../core/job-store.js";
 import { recoverStaleQueuedJobs } from "../core/job-recovery.js";
 import {
   spawnNotificationWorker,
@@ -25,9 +42,14 @@ import {
   type OwnedProcessTermination,
   type ProcessIdentityVerification
 } from "../core/job-process.js";
-import type { JobNotificationStatus, JobRecord } from "../core/jobs.js";
-import { renderJobResult, renderJobStatus } from "../core/job-render.js";
-import { readFinalJobOutput } from "../core/job-output.js";
+import type { JobNotificationStatus, JobRecord, RenderedJobResult, RenderedJobStatus } from "../core/jobs.js";
+import { isSemanticResultJob, renderCompactJobResult, renderCompactJobStatus, renderFullJobResult, renderJobResult, renderJobStatus } from "../core/job-render.js";
+import {
+  readFinalJobOutput,
+  readJobDiagnostics,
+  readKeyVerificationError,
+  readSavedJobOutput
+} from "../core/job-output.js";
 import { readRecentJobLogLines } from "../core/job-log.js";
 import {
   isAttentionSignal,
@@ -122,35 +144,235 @@ export async function mimoCompose(input: unknown, deps: LaunchJobDependencies = 
   }, deps);
 }
 
-export async function mimoResume(input: unknown, deps: LaunchJobDependencies = {}) {
+export interface MimoResumeDependencies extends LaunchJobDependencies {
+  verifyProcess?: (
+    pid: number,
+    expectedIdentity: string | null | undefined
+  ) => ProcessIdentityVerification;
+  readCheckpoint?: typeof readJobCheckpoint;
+  captureFingerprint?: (cwd: string, checkpoint: JobCheckpoint) => Promise<string>;
+}
+
+function isResumableParent(parent: JobRecord): boolean {
+  if (
+    parent.status === "needs_input" ||
+    parent.status === "blocked" ||
+    parent.status === "stalled" ||
+    parent.status === "timeout"
+  ) {
+    return true;
+  }
+  return parent.status === "failed" &&
+    parent.errorCode !== undefined &&
+    RESUMABLE_FAILURE_CODES.has(parent.errorCode);
+}
+
+function requiresExplicitTask(parent: JobRecord): boolean {
+  return parent.status === "needs_input" || parent.status === "blocked";
+}
+
+function requiresCheckpointContext(parent: JobRecord): boolean {
+  return parent.status === "stalled" ||
+    parent.status === "timeout" ||
+    (parent.status === "failed" &&
+      parent.errorCode !== undefined &&
+      RESUMABLE_FAILURE_CODES.has(parent.errorCode));
+}
+
+function assertParentProcessNotAlive(
+  parent: JobRecord,
+  verify: (
+    pid: number,
+    expectedIdentity: string | null | undefined
+  ) => ProcessIdentityVerification
+): void {
+  if (typeof parent.pid !== "number" || parent.pid <= 0) return;
+  const result = verify(parent.pid, parent.processIdentity);
+  if (result.status === "match") {
+    throw new Error(`Job ${parent.id} cannot be resumed while its process is still alive.`);
+  }
+}
+
+export async function mimoResume(input: unknown, deps: MimoResumeDependencies = {}) {
   const parsed = ResumeInput.parse(input);
   const parent = readJob(parsed.cwd, parsed.jobId);
   if (!parent) throw new Error(`No job found for ${parsed.jobId}.`);
-  if (parent.status !== "needs_input" && parent.status !== "blocked") {
-    throw new Error(`Job ${parent.id} must be needs_input or blocked before it can be resumed.`);
+  if (!isResumableParent(parent)) {
+    throw new Error(`Job ${parent.id} is not in a resumable state.`);
   }
-  if (!parent.sessionId) {
+  if (parent.status === "blocked" && parent.errorCode === "stalled_process_alive") {
+    throw new Error(`Job ${parent.id} is not resumable while stalled_process_alive.`);
+  }
+  if (requiresExplicitTask(parent) && !parsed.task?.trim()) {
+    throw new Error(`Job ${parent.id} requires a non-empty task before it can be resumed.`);
+  }
+
+  const chainResume = resolveChainResumeContext(parsed.cwd, parent);
+  const resumeSource = chainResume?.sourceJob ?? parent;
+
+  if (requiresExplicitTask(parent) && !resumeSource.sessionId) {
     throw new Error(`Job ${parent.id} does not have a sessionId and cannot be resumed.`);
   }
-  const executionPolicy = bindJobDefinition(parent).executionPolicy;
 
+  const verify = deps.verifyProcess ?? verifyProcessIdentity;
+  assertParentProcessNotAlive(resumeSource, verify);
+  if (chainResume && resumeSource.id !== parent.id) {
+    assertParentProcessNotAlive(parent, verify);
+  }
+
+  const readCheckpoint = deps.readCheckpoint ?? readJobCheckpoint;
+  const checkpointPath = parent.reportPaths?.checkpoint ?? resumeSource.reportPaths?.checkpoint;
+  let checkpoint = checkpointPath ? readCheckpoint(checkpointPath) : null;
+  if (chainResume && checkpoint) {
+    checkpoint = {
+      ...checkpoint,
+      chainId: chainResume.chain.chainId,
+      completedSlices: [...chainResume.chain.completedSliceIds],
+      ...(chainResume.sliceId ? { sliceId: chainResume.sliceId } : {})
+    };
+  } else if (chainResume && !checkpoint && resumeSource.reportPaths?.checkpoint) {
+    checkpoint = readCheckpoint(resumeSource.reportPaths.checkpoint);
+    if (checkpoint) {
+      checkpoint = {
+        ...checkpoint,
+        chainId: chainResume.chain.chainId,
+        completedSlices: [...chainResume.chain.completedSliceIds],
+        ...(chainResume.sliceId ? { sliceId: chainResume.sliceId } : {})
+      };
+    }
+  }
+
+  if (requiresCheckpointContext(parent) && !checkpoint) {
+    throw new Error(`resume_context_missing: Job ${parent.id} has no durable checkpoint.`);
+  }
+  if (requiresCheckpointContext(parent) && !resumeSource.sessionId && !checkpoint) {
+    throw new Error(`resume_context_missing: Job ${parent.id} has no session or checkpoint.`);
+  }
+
+  if (checkpoint) {
+    const captureFingerprint = deps.captureFingerprint ??
+      ((cwd, saved) => captureRepositoryFingerprint(
+        cwd,
+        [...saved.contextFiles, ...saved.changedFiles]
+      ));
+    const currentFingerprint = await captureFingerprint(parent.cwd, checkpoint);
+    const conflict = detectResumeConflict(checkpoint, { repositoryFingerprint: currentFingerprint });
+    if (conflict) {
+      throw new Error(`resume_conflict: ${JSON.stringify(conflict)}`);
+    }
+  }
+
+  const task = parsed.task?.trim() ||
+    checkpoint?.remainingChecklist[0] ||
+    resumeSource.task ||
+    parent.task;
+  const executionPolicy = bindJobDefinition(parent).executionPolicy;
   const { notify, ...options } = parsed;
-  return launchJob({
+  const request = {
+    ...options,
+    jobId: parent.id,
+    task,
+    executionPolicy,
+    ...(resumeSource.sessionId ? { sessionId: resumeSource.sessionId } : {}),
+    ...(checkpoint ? { checkpoint } : {})
+  };
+
+  const receipt = await launchJob({
     kind: "resume",
     cwd: parsed.cwd,
-    task: parsed.task,
-    parentJobId: parent.id,
-    request: { ...options, sessionId: parent.sessionId, executionPolicy },
-    ...(notify === undefined
-      ? { notificationTarget: parent.notificationTarget ?? null }
-      : { notify })
+    task,
+    parentJobId: chainResume ? chainResume.rootJobId : parent.id,
+    ...(chainResume
+      ? {
+          chainId: chainResume.chain.chainId,
+          sliceId: chainResume.sliceId
+        }
+      : {}),
+    request,
+    ...(chainResume
+      ? { notificationTarget: null }
+      : notify === undefined
+        ? { notificationTarget: parent.notificationTarget ?? null }
+        : { notify })
   }, deps);
+
+  if (chainResume) {
+    markSliceRunning(
+      parsed.cwd,
+      chainResume.chain.chainId,
+      chainResume.sliceId,
+      receipt.jobId
+    );
+    await updateJobAuthoritative(parsed.cwd, chainResume.rootJobId, {
+      status: "running",
+      phase: "editing",
+      summary: `Resuming slice ${chainResume.sliceId}.`,
+      error: undefined,
+      errorCode: undefined,
+      pid: null,
+      processIdentity: null
+    });
+  }
+
+  return receipt;
 }
 
-export async function mimoStatus(input: unknown, deps: MimoStatusDependencies = {}) {
+function resolveChainResumeContext(
+  cwd: string,
+  parent: JobRecord
+): {
+  chain: NonNullable<ReturnType<typeof readJobChain>>;
+  sliceId: string;
+  rootJobId: string;
+  sourceJob: JobRecord;
+} | null {
+  if (isChainOrchestratorRoot(parent) && parent.chainId) {
+    const chain = readJobChain(cwd, parent.chainId);
+    if (!chain) return null;
+    const attention = findChainAttentionSlice(chain);
+    if (!attention) return null;
+    const sourceJob = readJob(cwd, attention.childJobId) ?? parent;
+    return {
+      chain,
+      sliceId: attention.sliceId,
+      rootJobId: chain.rootJobId,
+      sourceJob
+    };
+  }
+
+  if (isChainSliceChild(parent) && parent.chainId && parent.sliceId && parent.parentJobId) {
+    const chain = readJobChain(cwd, parent.chainId);
+    if (!chain) return null;
+    const state = chain.sliceStates[parent.sliceId];
+    if (
+      state !== "failed" &&
+      state !== "stalled" &&
+      state !== "needs_input" &&
+      state !== "blocked" &&
+      state !== "timeout"
+    ) {
+      return null;
+    }
+    return {
+      chain,
+      sliceId: parent.sliceId,
+      rootJobId: parent.parentJobId,
+      sourceJob: parent
+    };
+  }
+
+  return null;
+}
+
+export async function mimoStatus(
+  input: unknown,
+  deps: MimoStatusDependencies = {}
+): Promise<RenderedJobStatus> {
   const parsed = JobStatusInput.parse(input);
   const job = parsed.jobId ? readJob(parsed.cwd, parsed.jobId) : listJobs(parsed.cwd)[0];
   if (!job) throw new Error("No jobs recorded for this workspace.");
+  if (parsed.level === "compact") return renderCompactJobStatus(job);
+
   const processAlive = probeProcessAlive(job, deps);
   return renderJobStatus(job, {
     progress: readRecentJobLogLines(job.logFile, 5),
@@ -246,7 +468,7 @@ export async function mimoWait(input: unknown, deps: MimoWaitDependencies = {}) 
   };
 }
 
-export async function mimoResult(input: unknown) {
+export async function mimoResult(input: unknown): Promise<RenderedJobResult> {
   const parsed = JobResultInput.parse(input);
   const job = parsed.jobId
     ? readJob(parsed.cwd, parsed.jobId)
@@ -259,7 +481,26 @@ export async function mimoResult(input: unknown) {
   if (!isResultStatus(job.status)) {
     throw new Error(`Job result is not available while ${job.id} is ${job.status}.`);
   }
-  return renderJobResult(job, notificationStatus(job), readFinalJobOutput(job.eventsFile));
+
+  if (parsed.level === "full") {
+    const fallbackOutput = job.reportPaths?.result
+      ? undefined
+      : readFinalJobOutput(job.eventsFile);
+    return renderFullJobResult(job, {
+      notification: notificationStatus(job),
+      ...readJobDiagnostics(job, fallbackOutput)
+    });
+  }
+
+  const output = isSemanticResultJob(job) ? readSavedJobOutput(job) : undefined;
+  if (parsed.level === "compact") {
+    return renderCompactJobResult(job, { output });
+  }
+  return renderJobResult(job, {
+    notification: notificationStatus(job),
+    output,
+    keyError: readKeyVerificationError(job.reportPaths?.verification)
+  });
 }
 
 export interface MimoJobsDependencies {
@@ -293,10 +534,15 @@ export async function mimoCancel(input: unknown, deps: MimoCancelDependencies = 
   const existing = readJob(parsed.cwd, parsed.jobId);
   if (!existing) throw new Error(`No job found for ${parsed.jobId}.`);
   if (existing.status === "cancelled") {
-    return renderJobResult(existing, notificationStatus(existing));
+    return renderJobResult(existing, { notification: notificationStatus(existing) });
   }
   if (existing.status !== "queued" && existing.status !== "running") {
     throw new Error(`Job ${existing.id} cannot be cancelled while ${existing.status}.`);
+  }
+
+  // Chain roots: stop remaining pending slices and cancel the live write child first.
+  if (isChainOrchestratorRoot(existing) && existing.chainId) {
+    await cascadeCancelChainRoot(parsed.cwd, existing, deps);
   }
 
   const requested = await (deps.requestJobCancellation ?? requestJobCancellation)(
@@ -304,7 +550,7 @@ export async function mimoCancel(input: unknown, deps: MimoCancelDependencies = 
     existing.id
   );
   if (requested.status === "cancelled") {
-    return renderJobResult(requested, notificationStatus(requested));
+    return renderJobResult(requested, { notification: notificationStatus(requested) });
   }
   if (requested.status !== "queued" && requested.status !== "running") {
     throw new Error(`Job ${requested.id} cannot be cancelled while ${requested.status}.`);
@@ -347,7 +593,7 @@ export async function mimoCancel(input: unknown, deps: MimoCancelDependencies = 
         existing.id
       );
       if (pending.status === "cancelled") {
-        return renderJobResult(pending, notificationStatus(pending));
+        return renderJobResult(pending, { notification: notificationStatus(pending) });
       }
       return renderJobStatus(pending, {
         progress: readRecentJobLogLines(pending.logFile, 3),
@@ -356,7 +602,7 @@ export async function mimoCancel(input: unknown, deps: MimoCancelDependencies = 
     }
     const raced = readJob(parsed.cwd, existing.id);
     if (raced?.status === "cancelled") {
-      return renderJobResult(raced, notificationStatus(raced));
+      return renderJobResult(raced, { notification: notificationStatus(raced) });
     }
     throw error;
   }
@@ -366,7 +612,7 @@ export async function mimoCancel(input: unknown, deps: MimoCancelDependencies = 
     if (!cancelled || cancelled.status !== "cancelled") {
       throw new Error(`Cancellation did not finalize ${existing.id}.`);
     }
-    return renderJobResult(cancelled, notificationStatus(cancelled));
+    return renderJobResult(cancelled, { notification: notificationStatus(cancelled) });
   }
 
   if (transitioned.deliveryCreated) {
@@ -374,7 +620,59 @@ export async function mimoCancel(input: unknown, deps: MimoCancelDependencies = 
       spawnNotificationWorker: deps.spawnNotificationWorker
     });
   }
-  return renderJobResult(transitioned.job, notificationStatus(transitioned.job));
+  return renderJobResult(transitioned.job, { notification: notificationStatus(transitioned.job) });
+}
+
+async function cascadeCancelChainRoot(
+  cwd: string,
+  root: JobRecord,
+  deps: MimoCancelDependencies
+): Promise<void> {
+  if (!root.chainId) return;
+  const chain = readJobChain(cwd, root.chainId);
+  if (!chain) return;
+
+  markPendingSlicesCancelled(cwd, root.chainId);
+
+  const childId = resolveLiveChainChildJobId(chain);
+  if (!childId || childId === root.id) return;
+  const child = readJob(cwd, childId);
+  if (!child) return;
+  if (child.status !== "queued" && child.status !== "running") {
+    if (child.sliceId && isChainSliceChild(child)) {
+      const latest = readJobChain(cwd, root.chainId);
+      const state = latest?.sliceStates[child.sliceId];
+      if (state === "running" || state === "pending") {
+        markSliceTerminal(cwd, root.chainId, child.sliceId, "cancelled");
+      }
+    }
+    return;
+  }
+
+  try {
+    await mimoCancel({ cwd, jobId: child.id }, deps);
+  } catch {
+    // Best-effort cascade: root cancel still proceeds; advance gates block further slices.
+    await (deps.requestJobCancellation ?? requestJobCancellation)(cwd, child.id).catch(() => undefined);
+  }
+
+  const cancelledChild = readJob(cwd, child.id);
+  if (!cancelledChild || !isChainSliceChild(cancelledChild)) return;
+  if (cancelledChild.status === "queued" || cancelledChild.status === "running") {
+    return;
+  }
+
+  try {
+    await advanceJobChainAfterChild({ cwd, child: cancelledChild });
+  } catch {
+    if (cancelledChild.sliceId) {
+      const latest = readJobChain(cwd, root.chainId);
+      const state = latest?.sliceStates[cancelledChild.sliceId];
+      if (state === "running" || state === "pending") {
+        markSliceTerminal(cwd, root.chainId, cancelledChild.sliceId, "cancelled");
+      }
+    }
+  }
 }
 
 async function waitForCancellation(cwd: string, jobId: string): Promise<JobRecord> {
@@ -423,7 +721,13 @@ function renderJobSignals(job: JobRecord, result: JobSignalReadResult) {
       status: "mimo_status" as const,
       ...(canCancel ? { cancel: "mimo_cancel" as const } : {}),
       ...(canReadResult ? { result: "mimo_result" as const } : {}),
-      ...(job.status === "needs_input" || job.status === "blocked"
+      ...(job.status === "needs_input" ||
+        job.status === "blocked" ||
+        job.status === "stalled" ||
+        job.status === "timeout" ||
+        (job.status === "failed" &&
+          job.errorCode !== undefined &&
+          RESUMABLE_FAILURE_CODES.has(job.errorCode))
         ? { resume: "mimo_resume" as const }
         : {})
     }

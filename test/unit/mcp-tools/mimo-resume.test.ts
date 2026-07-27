@@ -3,7 +3,21 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mimoResume } from "../../../src/codex/tools.js";
-import { createJobStore, listJobs, readJob, updateJob } from "../../../src/core/job-store.js";
+import { readJobCheckpoint, writeJobCheckpoint } from "../../../src/core/job-checkpoint.js";
+import {
+  createJobChainFromManifest,
+  markSliceRunning,
+  markSliceTerminal,
+  readJobChain,
+  resolveSliceManifestPath,
+  writeSliceManifestArtifact
+} from "../../../src/core/job-chain.js";
+import { getJobDefinition } from "../../../src/core/job-definitions.js";
+import { createJobStore, listJobs, readJob, updateJob, updateJobAuthoritative } from "../../../src/core/job-store.js";
+import type { JobRecord } from "../../../src/core/jobs.js";
+import type { SliceManifest } from "../../../src/compose/slices.js";
+
+const ACTIVE_SIGNAL = new AbortController().signal;
 
 const tempDirs: string[] = [];
 function tempWorkspace(): string {
@@ -113,7 +127,7 @@ describe("mimo_resume", () => {
   });
 
   it.each([
-    ["completed", "ses_parent", "must be needs_input or blocked"],
+    ["completed", "ses_parent", "is not in a resumable state"],
     ["blocked", null, "does not have a sessionId"]
   ] as const)("rejects invalid parent status/session without persisting a child", async (status, sessionId, message) => {
     const cwd = tempWorkspace();
@@ -197,6 +211,82 @@ describe("mimo_resume", () => {
     });
   });
 
+  it("resumes a stalled parent with session reuse", async () => {
+    const cwd = tempWorkspace();
+    const source = await stalledParent(cwd, { sessionId: "ses_stalled" });
+    const spawnJobSupervisor = vi.fn().mockReturnValue(123);
+
+    const receipt = await mimoResume({ cwd, jobId: source.id }, {
+      env: {}, spawnJobSupervisor,
+      verifyProcess: () => ({ status: "not_running" as const, evidence: "gone" }),
+      captureFingerprint: async () => source.checkpoint!.repositoryFingerprint
+    });
+
+    const child = readJob(cwd, receipt.jobId)!;
+    expect(child.parentJobId).toBe(source.id);
+    expect(child.request).toMatchObject({ sessionId: "ses_stalled" });
+  });
+
+  it("resumes timeout without session using checkpoint-only prompt", async () => {
+    const cwd = tempWorkspace();
+    const source = await stalledParent(cwd, { status: "timeout", sessionId: null });
+    const spawnJobSupervisor = vi.fn().mockReturnValue(123);
+
+    await mimoResume({ cwd, jobId: source.id }, {
+      env: {}, spawnJobSupervisor,
+      verifyProcess: () => ({ status: "not_running" as const, evidence: "gone" }),
+      captureFingerprint: async () => source.checkpoint!.repositoryFingerprint
+    });
+
+    const child = readJob(cwd, listJobs(cwd).find((job) => job.kind === "resume")!.id)!;
+    expect(child.request).not.toHaveProperty("sessionId");
+    const prompt = await getJobDefinition("resume").buildPrompt(
+      child.request as never,
+      ACTIVE_SIGNAL
+    );
+    expect(prompt.message).toMatch(/Do not perform a broad project scan/i);
+    expect(prompt.message).toContain("src/feature.ts");
+    expect(prompt.message).toContain("remainingChecklist");
+  });
+
+  it("rejects resume when process still alive or fingerprint conflicts", async () => {
+    const cwd = tempWorkspace();
+    const alive = createJobStore(cwd).create({
+      kind: "implement",
+      task: "Build feature",
+      request: { cwd, task: "Build feature", allowWrite: true }
+    });
+    updateJob(cwd, alive.id, {
+      status: "blocked",
+      errorCode: "stalled_process_alive",
+      sessionId: "ses_alive",
+      summary: "Process still running."
+    });
+    await expect(mimoResume({ cwd, jobId: alive.id, task: "Continue" }, {
+      env: {}, spawnJobSupervisor: vi.fn()
+    })).rejects.toThrow(/not resumable|stalled_process_alive/i);
+
+    const conflict = await stalledParent(cwd, { sessionId: "ses_conflict" });
+    await expect(mimoResume({ cwd, jobId: conflict.id }, {
+      env: {}, spawnJobSupervisor: vi.fn(),
+      verifyProcess: () => ({ status: "not_running" as const, evidence: "gone" }),
+      captureFingerprint: async () => "different-fingerprint"
+    })).rejects.toThrow(/resume_conflict/i);
+  });
+
+  it("still requires a task when resuming blocked", async () => {
+    const cwd = tempWorkspace();
+    const source = createJobStore(cwd).create({
+      kind: "plan",
+      task: "Plan",
+      request: { cwd, task: "Plan" }
+    });
+    updateJob(cwd, source.id, { status: "blocked", sessionId: "ses_parent" });
+    await expect(mimoResume({ cwd, jobId: source.id }, {
+      env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
+    })).rejects.toThrow(/task/i);
+  });
+
   it("does not expose a public write-policy override", async () => {
     const cwd = tempWorkspace();
     const source = createJobStore(cwd).create({
@@ -213,7 +303,205 @@ describe("mimo_resume", () => {
       allowWrite: true
     }, { env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123) })).rejects.toThrow();
   });
+
+  it("resumes a mid-chain root attention on the current failed slice and skips completed slices", async () => {
+    const cwd = tempWorkspace();
+    const { root, chainId, stalledChild, checkpointFingerprint } = await midChainStalledRoot(cwd);
+    const spawnJobSupervisor = vi.fn().mockReturnValue(123);
+
+    const receipt = await mimoResume({ cwd, jobId: root.id }, {
+      env: {},
+      spawnJobSupervisor,
+      verifyProcess: () => ({ status: "not_running" as const, evidence: "gone" }),
+      captureFingerprint: async () => checkpointFingerprint
+    });
+
+    const continuation = readJob(cwd, receipt.jobId)!;
+    expect(continuation).toMatchObject({
+      kind: "resume",
+      parentJobId: root.id,
+      chainId,
+      sliceId: "slice-2"
+    });
+    expect(continuation.notificationTarget == null).toBe(true);
+    expect(continuation.request).toMatchObject({
+      sessionId: "ses_slice_2",
+      checkpoint: expect.objectContaining({
+        completedSlices: ["slice-1"],
+        chainId
+      })
+    });
+    expect(readJobChain(cwd, chainId)).toMatchObject({
+      sliceStates: { "slice-1": "completed", "slice-2": "running" },
+      latestContinuationJobId: continuation.id,
+      completedSliceIds: ["slice-1"]
+    });
+    expect(readJob(cwd, root.id)).toMatchObject({ status: "running" });
+    expect(listJobs(cwd).some((job) => job.sliceId === "slice-1" && job.kind === "resume")).toBe(false);
+    expect(stalledChild.id).not.toBe(continuation.id);
+  });
+
+  it("keeps resume_conflict when mid-chain fingerprint drifts", async () => {
+    const cwd = tempWorkspace();
+    const { root } = await midChainStalledRoot(cwd);
+    await expect(mimoResume({ cwd, jobId: root.id }, {
+      env: {},
+      spawnJobSupervisor: vi.fn(),
+      verifyProcess: () => ({ status: "not_running" as const, evidence: "gone" }),
+      captureFingerprint: async () => "different-fingerprint"
+    })).rejects.toThrow(/resume_conflict/i);
+  });
 });
+
+async function stalledParent(
+  cwd: string,
+  patch: Partial<JobRecord> & { status?: "stalled" | "timeout" } = {}
+): Promise<JobRecord & { checkpoint: NonNullable<ReturnType<typeof readJobCheckpoint>> }> {
+  const record = createJobStore(cwd).create({
+    kind: "implement",
+    task: "Build feature",
+    request: { cwd, task: "Build feature", allowWrite: true }
+  });
+  const base = updateJob(cwd, record.id, {
+    status: patch.status ?? "stalled",
+    sessionId: patch.sessionId === null ? null : (patch.sessionId ?? "ses_stalled"),
+    summary: "Stalled waiting for progress.",
+    changedFiles: ["src/feature.ts"],
+    lastCommand: "npm test",
+    ...patch
+  });
+  const paths = await writeJobCheckpoint({
+    job: base,
+    objective: base.task,
+    changedFiles: base.changedFiles,
+    contextFiles: ["src/feature.ts"],
+    captureHead: async () => ({ oid: "abc123", branch: "main" }),
+    captureStatus: async () => ({
+      short: "",
+      dirty: false,
+      fingerprints: { "src/feature.ts": { status: " M", contentHash: "hash-feature" } }
+    })
+  });
+  updateJob(cwd, base.id, { reportPaths: paths });
+  const checkpoint = readJobCheckpoint(paths.checkpoint!)!;
+  return { ...readJob(cwd, base.id)!, checkpoint };
+}
+
+async function midChainStalledRoot(cwd: string): Promise<{
+  root: JobRecord;
+  chainId: string;
+  stalledChild: JobRecord;
+  checkpointFingerprint: string;
+}> {
+  const acceptance = {
+    build: ["npm run build"],
+    test: ["npm test -- focused.test.ts"]
+  };
+  const store = createJobStore(cwd);
+  const root = store.create({
+    kind: "implement",
+    task: "Build feature",
+    request: {
+      cwd,
+      task: "Build feature",
+      allowWrite: true,
+      acceptance,
+      batchMode: "sliced"
+    },
+    notificationTarget: { type: "codex", threadId: "thread-root" }
+  });
+  const chainId = `chain-${root.id}`;
+  const manifest: SliceManifest = {
+    version: 1,
+    chainId,
+    objective: "Build feature",
+    repositoryFingerprint: "fp-root",
+    slices: [
+      {
+        id: "slice-1",
+        title: "Slice 1",
+        objective: "First slice",
+        dependsOn: [],
+        contextFiles: ["src/a.ts"],
+        allowedPaths: ["src/a.ts"],
+        acceptance
+      },
+      {
+        id: "slice-2",
+        title: "Slice 2",
+        objective: "Second slice",
+        dependsOn: ["slice-1"],
+        contextFiles: ["src/b.ts"],
+        allowedPaths: ["src/b.ts"],
+        acceptance
+      }
+    ]
+  };
+  const manifestPath = writeSliceManifestArtifact({ cwd, rootJobId: root.id, manifest });
+  createJobChainFromManifest({ cwd, rootJobId: root.id, manifest, manifestPath });
+  const first = store.create({
+    kind: "implement",
+    task: "First slice",
+    request: { cwd, task: "First slice", allowWrite: true, acceptance, batchMode: "single" },
+    parentJobId: root.id,
+    chainId,
+    sliceId: "slice-1"
+  });
+  markSliceRunning(cwd, chainId, "slice-1", first.id);
+  markSliceTerminal(cwd, chainId, "slice-1", "completed");
+  const second = store.create({
+    kind: "implement",
+    task: "Second slice",
+    request: { cwd, task: "Second slice", allowWrite: true, acceptance, batchMode: "single" },
+    parentJobId: root.id,
+    chainId,
+    sliceId: "slice-2"
+  });
+  markSliceRunning(cwd, chainId, "slice-2", second.id);
+  updateJob(cwd, second.id, {
+    status: "stalled",
+    sessionId: "ses_slice_2",
+    summary: "Slice 2 stalled.",
+    changedFiles: ["src/b.ts"],
+    errorCode: "no_effective_progress"
+  });
+  markSliceTerminal(cwd, chainId, "slice-2", "stalled");
+  await updateJobAuthoritative(cwd, root.id, {
+    status: "stalled",
+    chainId,
+    summary: "Slice slice-2 stalled.",
+    error: "Slice slice-2 stalled.",
+    errorCode: "no_effective_progress",
+    changedFiles: ["src/a.ts", "src/b.ts"],
+    reportPaths: { slices: resolveSliceManifestPath(cwd, root.id).replace(/\\/g, "/") }
+  });
+  const rootAfter = readJob(cwd, root.id)!;
+  const paths = await writeJobCheckpoint({
+    job: rootAfter,
+    objective: rootAfter.task,
+    changedFiles: rootAfter.changedFiles,
+    contextFiles: ["src/a.ts", "src/b.ts"],
+    completedSlices: ["slice-1"],
+    captureHead: async () => ({ oid: "abc123", branch: "main" }),
+    captureStatus: async () => ({
+      short: "",
+      dirty: false,
+      fingerprints: {
+        "src/a.ts": { status: " M", contentHash: "hash-a" },
+        "src/b.ts": { status: " M", contentHash: "hash-b" }
+      }
+    })
+  });
+  await updateJobAuthoritative(cwd, root.id, { reportPaths: { ...rootAfter.reportPaths, ...paths } });
+  const checkpoint = readJobCheckpoint(paths.checkpoint!)!;
+  expect(readJobChain(cwd, chainId)?.completedSliceIds).toEqual(["slice-1"]);
+  return {
+    root: readJob(cwd, root.id)!,
+    chainId,
+    stalledChild: readJob(cwd, second.id)!,
+    checkpointFingerprint: checkpoint.repositoryFingerprint
+  };
+}
 
 function artifactPaths(cwd: string): string[] {
   const root = path.join(cwd, ".codex-mimo");

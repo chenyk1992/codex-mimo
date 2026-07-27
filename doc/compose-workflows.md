@@ -36,23 +36,37 @@ Use these Compose skills in order: <skill chain>
 
 Instructions require focused changes, action/verification/risk reporting, and PowerShell-compatible commands on Windows. Read-only workflows explicitly prohibit modifications. Large or non-ASCII prompts use UTF-8 files under `.codex-mimo/inputs/`; the MiMoCode message points at that file.
 
+## Slice chains (`batchMode`)
+
+Write Compose workflows (`dev`, `fix`, `fix-ci`, `execute-plan`, `parallel`, `worktree`, `merge`, `new-skill`) accept optional `batchMode`: `auto` (default), `single`, or `sliced`. Read-only workflows strip `batchMode`. When enabled, the bridge plans `.codex-mimo/reports/<rootJobId>.slices.json`, records `.codex-mimo/jobs/<chainId>.chain.json`, and runs one slice at a time under the public root job. Slice children never notify; only the root delivers. Planning failure uses `slice_plan_invalid` (re-launch after re-planning; not resumable); a failed slice uses `slice_failed` (resumable). Resume the root to continue the attention slice while skipping completed slices.
+
 ## Execution and Status
 
 The common worker validates the stored request, builds `mimo run --format json --agent compose` arguments, captures Git evidence, creates the internal `session.post` controller, streams events, runs finalization, and transitions the job.
 
-Compose uses the platform job statuses: `queued`, `running`, `needs_input`, `blocked`, `completed`, `failed`, `cancelled`, and `timeout`. Report status (`passed`, `failed`, `needs_review`, or `timeout`) is an artifact-level assessment and does not replace job status.
+Compose uses the platform job statuses: `queued`, `running`, `needs_input`, `blocked`, `stalled`, `completed`, `failed`, `cancelled`, and `timeout`. Report status (`passed`, `failed`, `needs_review`, or `timeout`) is an artifact-level assessment and does not replace job status.
 
-The work call returns a queued receipt. Codex then relies on the parent-task notification and calls `mimo_result` in the resumed turn, consuming `mimo_result.output` when present. `mimo_status`, `mimo_events`, and one `mimo_wait` are available only for explicit diagnosis.
+Compose jobs share the same timeout budgets as other work kinds: `progressTimeoutMs` (default `300_000`, five minutes of no effective progress), `progressWarningMs` (default `120_000`, two-minute internal warning), `idleTimeoutMs` (default `1_800_000`, 30 minutes of JSONL silence), and absolute `timeoutMs`. Setting `progressTimeoutMs: 0` disables effective-progress stop-loss and weakens deliverability. Call `mimo_resume` for `stalled` or checkpoint-backed `timeout` parents; stalled jobs write `.codex-mimo/reports/<jobId>.checkpoint.json`.
 
-## Verification
+The work call returns a queued receipt. Codex then relies on the parent-task notification or Desktop heartbeat and calls `mimo_result` at the default compact level in the resumed turn. `mimo_status`, `mimo_events`, and one `mimo_wait` are available only for explicit diagnosis.
 
-Explicit `verification` commands take precedence over workflow defaults. Values are executable command strings run without a shell — not natural-language acceptance criteria. Put scope or state prose (for example `计划不修改业务源码`) in `task`, not in `verification`.
+## Verification and development acceptance
+
+Prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck` for write workflows. Stages run fail-fast in order: build → test → diffCheck (deterministic self-check plus read-only MiMo review). `dev`, `execute-plan`, and `implement` cannot complete without acceptance.
+
+| Field | Role |
+| --- | --- |
+| `acceptance.build` | Build commands (or host-validated `not_applicable` for recognized non-compiled trees) |
+| `acceptance.test` | Targeted test commands |
+| `acceptance.diffCheck` | Diff self-check + read-only MiMo review (default true) |
+
+Legacy `verification[]` remains accepted during migration and maps to the **test stage only** — it does not satisfy build. Values are executable command strings run without a shell — not natural-language acceptance criteria. Put scope or state prose (for example `计划不修改业务源码`) in `task`, not in `verification`.
 
 ```json
-{ "workflow": "dev", "task": "Implement the feature", "verification": ["npm test", "npm run build"] }
+{ "workflow": "dev", "task": "Implement the feature", "acceptance": { "build": ["npm run build"], "test": ["npm test"], "diffCheck": true } }
 ```
 
-When neither explicit commands nor workflow defaults exist, detection uses:
+When neither explicit `acceptance.test` / `verification` nor workflow defaults exist, detection uses:
 
 | Project marker | Command |
 | --- | --- |
@@ -61,11 +75,11 @@ When neither explicit commands nor workflow defaults exist, detection uses:
 | `go.mod` | `go test ./...` |
 | `package.json` | `npm test` |
 
-Commands are split into executable and arguments and run without a shell. A failed required command produces job status `failed` with `verification_failed` while retaining the execution callback evidence.
+Commands are split into executable and arguments and run without a shell. Missing build disposition or targeted tests at finalize pauses as `needs_input` with `acceptance_config_missing`. A failed stage finishes `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing` while retaining execution callback evidence. Compact `mimo_result` includes the first failed stage, failed command/tests, and a shortest-fix `suggestion`; call `mimo_resume` for `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing` via Phase 2 checkpoint resume at `.codex-mimo/reports/<jobId>.checkpoint.json`. Non-acceptance workflows may still use legacy `verification_failed` for required command failures.
 
 ## Plan workflow
 
-The `plan` workflow is read-only (`writesAllowed: false`). The plan body is available only from an explicit `mimo_result` read as `mimo_result.output` — callers must not expect it in a saved report file. The prompt instructs MiMoCode to return the plan in the final response only and not to save plan files. Asking `plan` to write a plan file intentionally ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with safe `errorCode: "result_missing"`.
+The `plan` workflow remains read-only. MiMoCode returns the plan in its final response and does not write project files. During host finalization the bridge saves the complete plan to `.codex-mimo/reports/<jobId>.plan.md`. Default `mimo_result` returns only a bounded summary and `reportPath` (repository-relative report path when inside the workspace); use `level: "full"` only for explicit troubleshooting. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
 
 For Codex Desktop, omit `notify` and use an in-chat scheduled follow-up heartbeat. For CLI/compat App Server history writeback, send `notify: { type: "codex", threadId: "..." }` on the first attempt. Cursor companion and intentional no-notify launches may omit Codex notify. Outbox `delivered` does not mean the Desktop UI refreshed.
 
@@ -75,14 +89,14 @@ For Codex Desktop, omit `notify` and use an in-chat scheduled follow-up heartbea
 
 ## Reports
 
-Compose finalization writes:
+Compose finalization writes structural JSON/Markdown/event reports plus applicable semantic artifacts:
 
-- `.codex-mimo/reports/<jobId>.json`
-- `.codex-mimo/reports/<jobId>.md`
-- `.codex-mimo/events/<jobId>.jsonl`
+- `.codex-mimo/reports/<jobId>.result.md`
+- `.codex-mimo/reports/<jobId>.plan.md` for planning workflows
+- `.codex-mimo/reports/<jobId>.verification.json` when host verification ran
 - `.codex-mimo/diffs/<jobId>.diff` when a diff exists
 
-Reports remain structural and intentionally omit model output. They include the workflow, requested skills, structural event counts, Git before/after evidence, changed files, verification, allowlisted callback outcome, and sanitized errors. Report event entries omit message/error text, tool arguments, and raw payloads. Operators should not expect a plan body in `.codex-mimo/reports/*.md`. Raw job `events.jsonl` remains a diagnostic artifact, not the normal result API. Notification payloads contain only a bounded status summary and report paths; they do not contain raw events, final text, complete prompts, or full diffs.
+Structural reports omit model output and verification stdout/stderr; they contain paths to the separate artifacts.
 
 ## Read-Only Enforcement
 
@@ -90,7 +104,7 @@ Reports remain structural and intentionally omit model output. They include the 
 
 ## Paused Workflow Continuation
 
-When Compose returns `needs_input` or `blocked`, read the partial result and reason with `mimo_result`. Supply the answer through `mimo_resume` using the parent `jobId`. The child job continues the saved MiMoCode session and inherits the notification target by default.
+When Compose returns `needs_input` or `blocked` (including `acceptance_config_missing`), or a resumable acceptance failure (`build_failed`, `tests_failed`, `diff_check_failed`, `delivery_contract_missing`), or a mid-chain `slice_failed`, read the partial result and reason with `mimo_result`. Supply the answer through `mimo_resume` using the parent `jobId` (the chain root for sliced work). `slice_plan_invalid` is not resumable — start a new job after correcting the plan. The child job continues the saved MiMoCode session and/or checkpoint; ordinary resume inherits the notification target by default, while mid-chain slice resume uses a null notification target and skips completed slices.
 
 ## Notification and Recovery
 

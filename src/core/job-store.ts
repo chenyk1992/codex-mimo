@@ -43,6 +43,8 @@ export interface CreateJobInput {
   task: string;
   request: unknown;
   parentJobId?: string | null;
+  chainId?: string | null;
+  sliceId?: string | null;
   notificationTarget?: NotificationTarget;
 }
 
@@ -53,7 +55,9 @@ export interface JobStoreOptions {
 export type JobUpdatePatch = Partial<Omit<
   JobRecord,
   "id" | "kind" | "cwd" | "createdAt" | "pendingTransition"
->>;
+>> & {
+  quietSince?: string | null;
+};
 
 export function resolveJobDir(cwd: string): string {
   return path.join(cwd, ".codex-mimo", "jobs");
@@ -98,11 +102,15 @@ export function createJobStore(cwd: string, options: JobStoreOptions = {}): {
         processIdentity: null,
         sessionId: null,
         parentJobId: input.parentJobId ?? null,
+        ...(input.chainId !== undefined ? { chainId: input.chainId } : {}),
+        ...(input.sliceId !== undefined ? { sliceId: input.sliceId } : {}),
         createdAt: timestamp,
         updatedAt: timestamp,
         changedFiles: [],
         verification: [],
         idleTimeoutMs: readIdleTimeoutFromRequest(input.request),
+        progressWarningMs: readProgressWarningFromRequest(input.request),
+        progressTimeoutMs: readProgressTimeoutFromRequest(input.request),
         notificationTarget: input.notificationTarget,
         logFile: paths.logFile,
         eventsFile: paths.eventsFile,
@@ -219,6 +227,9 @@ export async function updateJobAuthoritative(
   };
   if (Object.prototype.hasOwnProperty.call(patch, "phase") && patch.phase === undefined) {
     delete updated.phase;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "quietSince") && patch.quietSince === null) {
+    delete updated.quietSince;
   }
   return persistAuthoritativeRecord(cwd, updated, options.maxJobs ?? DEFAULT_MAX_JOBS);
 }
@@ -341,8 +352,18 @@ function isJobRecord(value: unknown, expectedJobId: string): value is JobRecord 
     typeof value.signalsFile === "string" &&
     typeof value.notificationOutboxFile === "string" &&
     isOptionalTimestamp(value.lastEventAt) &&
+    isOptionalTimestamp(value.lastActivityAt) &&
+    isOptionalTimestamp(value.lastProgressAt) &&
+    isOptionalEffectiveProgressKind(value.lastProgressKind) &&
+    isOptionalString(value.lastProgressFingerprint) &&
+    isOptionalString(value.lastCommand) &&
     isOptionalString(value.lastTool) &&
     isOptionalNonNegativeInteger(value.idleTimeoutMs) &&
+    isOptionalNonNegativeInteger(value.progressWarningMs) &&
+    isOptionalNonNegativeInteger(value.progressTimeoutMs) &&
+    isOptionalTimestamp(value.quietSince) &&
+    isOptionalNullableString(value.chainId) &&
+    isOptionalNullableString(value.sliceId) &&
     (value.pendingTransition === undefined ||
       (isJobStatus(value.status) && isPendingJobTransition(value.pendingTransition, value.status)))
   );
@@ -477,6 +498,7 @@ function transitionRecordPatch(
     ...(transition.sessionId !== undefined ? { sessionId: transition.sessionId } : {}),
     ...(transition.changedFiles !== undefined ? { changedFiles: transition.changedFiles } : {}),
     ...(transition.verification !== undefined ? { verification: transition.verification } : {}),
+    ...(transition.acceptance !== undefined ? { acceptance: transition.acceptance } : {}),
     ...(transition.executionCallback !== undefined
       ? { executionCallback: transition.executionCallback }
       : {}),
@@ -500,6 +522,7 @@ const JOB_STATUSES = new Set([
   "running",
   "needs_input",
   "blocked",
+  "stalled",
   "completed",
   "failed",
   "cancelled",
@@ -518,9 +541,10 @@ const JOB_PHASES = new Set([
 
 const LEGAL_TRANSITIONS: Record<string, readonly string[]> = {
   queued: ["running", "failed", "cancelled"],
-  running: ["needs_input", "blocked", "completed", "failed", "cancelled", "timeout"],
+  running: ["needs_input", "blocked", "stalled", "completed", "failed", "cancelled", "timeout"],
   needs_input: [],
   blocked: [],
+  stalled: [],
   completed: [],
   failed: [],
   cancelled: [],
@@ -563,6 +587,7 @@ function isPendingJobTransition(
       !isOptionalNullableString(value.sessionId) ||
       !isOptionalStringArray(value.changedFiles) ||
       !isOptionalVerificationArray(value.verification) ||
+      !isOptionalAcceptance(value.acceptance) ||
       !isOptionalExecutionCallback(value.executionCallback) ||
       !isOptionalReportPaths(value.reportPaths) ||
       !isOptionalString(value.error) ||
@@ -596,6 +621,36 @@ function isOptionalVerificationArray(value: unknown): boolean {
   ));
 }
 
+function isOptionalAcceptance(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value) || !Array.isArray(value.stages)) return false;
+  const stagesOk = value.stages.every((entry) =>
+    isRecord(entry) &&
+    (entry.stage === "build" || entry.stage === "test" || entry.stage === "diff_check") &&
+    (entry.outcome === "passed" || entry.outcome === "failed" ||
+      entry.outcome === "not_applicable" || entry.outcome === "pending") &&
+    (entry.command === undefined || typeof entry.command === "string")
+  );
+  if (!stagesOk) return false;
+  if (
+    value.failedStage !== undefined &&
+    value.failedStage !== "build" &&
+    value.failedStage !== "test" &&
+    value.failedStage !== "diff_check"
+  ) {
+    return false;
+  }
+  if (value.failedCommand !== undefined && typeof value.failedCommand !== "string") return false;
+  if (value.suggestion !== undefined && typeof value.suggestion !== "string") return false;
+  if (
+    value.failedTests !== undefined &&
+    !(Array.isArray(value.failedTests) && value.failedTests.every((item) => typeof item === "string"))
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function isOptionalExecutionCallback(value: unknown): boolean {
   if (value === undefined) return true;
   return isRecord(value) &&
@@ -622,7 +677,12 @@ function isOptionalReportPaths(value: unknown): boolean {
     isOptionalString(value.json) &&
     isOptionalString(value.markdown) &&
     isOptionalString(value.eventsJsonl) &&
-    isOptionalString(value.diff);
+    isOptionalString(value.diff) &&
+    isOptionalString(value.result) &&
+    isOptionalString(value.plan) &&
+    isOptionalString(value.verification) &&
+    isOptionalString(value.checkpoint) &&
+    isOptionalString(value.slices);
 }
 
 function isOptionalStringArray(value: unknown): boolean {
@@ -660,14 +720,45 @@ function isOptionalNonNegativeInteger(value: unknown): boolean {
 }
 
 function readIdleTimeoutFromRequest(request: unknown): number {
+  return readNonNegativeIntFromRequest(request, "idleTimeoutMs", 1_800_000);
+}
+
+function readProgressWarningFromRequest(request: unknown): number {
+  return readNonNegativeIntFromRequest(request, "progressWarningMs", 120_000);
+}
+
+function readProgressTimeoutFromRequest(request: unknown): number {
+  return readNonNegativeIntFromRequest(request, "progressTimeoutMs", 300_000);
+}
+
+function readNonNegativeIntFromRequest(
+  request: unknown,
+  field: string,
+  fallback: number
+): number {
   if (typeof request !== "object" || request === null || Array.isArray(request)) {
-    return 1_800_000;
+    return fallback;
   }
-  const value = (request as Record<string, unknown>).idleTimeoutMs;
+  const value = (request as Record<string, unknown>)[field];
   if (typeof value === "number" && Number.isFinite(value) && value >= 0 && Number.isInteger(value)) {
     return value;
   }
-  return 1_800_000;
+  return fallback;
+}
+
+const EFFECTIVE_PROGRESS_KINDS = new Set([
+  "tool_start",
+  "tool_finish",
+  "file_change",
+  "phase_change",
+  "verification",
+  "callback",
+  "slice_complete"
+]);
+
+function isOptionalEffectiveProgressKind(value: unknown): boolean {
+  return value === undefined ||
+    (typeof value === "string" && EFFECTIVE_PROGRESS_KINDS.has(value));
 }
 
 function pruneState(cwd: string, state: JobState, maxJobs: number): JobState {

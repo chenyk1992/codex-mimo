@@ -56,6 +56,8 @@ export interface LaunchJobInput {
   task: string;
   request: unknown;
   parentJobId?: string;
+  chainId?: string | null;
+  sliceId?: string | null;
   notify?: NotificationInput;
   notificationTarget?: NotificationTarget | null;
 }
@@ -112,6 +114,8 @@ export async function launchJob(
     task: input.task,
     request: input.request,
     parentJobId: input.parentJobId,
+    ...(input.chainId !== undefined ? { chainId: input.chainId } : {}),
+    ...(input.sliceId !== undefined ? { sliceId: input.sliceId } : {}),
     notificationTarget: target
   });
 

@@ -16,11 +16,14 @@ import {
   readJob,
   resolveJobPaths,
   savePendingJobTransition,
-  updateJobAuthoritative
+  updateJobAuthoritative,
+  type JobUpdatePatch
 } from "./job-store.js";
 import {
   nowIso,
+  type EffectiveProgressKind,
   type JobRecord,
+  type JobReportPaths,
   type JobStatus,
   type JobTransitionFields,
   type PendingJobTransition
@@ -31,12 +34,18 @@ import {
   readDeliveries
 } from "../notify/outbox.js";
 import { publicProgressSummary } from "./public-summary.js";
+import { readSavedJobOutput } from "./job-output.js";
+import {
+  writeJobArtifacts,
+  type WriteJobArtifactsInput
+} from "./job-artifacts.js";
 
 const LEGAL: Record<JobStatus, readonly JobStatus[]> = {
   queued: ["running", "failed", "cancelled"],
-  running: ["needs_input", "blocked", "completed", "failed", "cancelled", "timeout"],
+  running: ["needs_input", "blocked", "stalled", "completed", "failed", "cancelled", "timeout"],
   needs_input: [],
   blocked: [],
+  stalled: [],
   completed: [],
   failed: [],
   cancelled: [],
@@ -59,6 +68,7 @@ export interface JobTransitionDependencies {
   afterIntentCleared?: () => Promise<void> | void;
   appendSignal?: typeof appendJobSignalAtCursor;
   enqueueDelivery?: typeof enqueueNotificationDelivery;
+  writeJobArtifacts?: (input: WriteJobArtifactsInput) => JobReportPaths;
 }
 
 type ProgressSignalKind = Exclude<JobSignalKind, AttentionSignalKind>;
@@ -94,7 +104,8 @@ export async function transitionJob(
       throw new Error(`Job ${jobId} cancellation was requested; only cancellation may finalize it.`);
     }
 
-    const pending = buildPendingTransition(existing, transition);
+    const requested = ensureTransitionArtifacts(existing, transition, dependencies);
+    const pending = buildPendingTransition(existing, requested, transition);
     const intentJob = await savePendingJobTransition(cwd, jobId, pending);
     await dependencies.afterIntentPersisted?.();
     return applyPendingTransition(cwd, intentJob, pending, dependencies);
@@ -136,15 +147,21 @@ export async function updateRunningJobObservation(
   jobId: string,
   patch: {
     lastEventAt?: string;
+    lastActivityAt?: string;
+    lastProgressAt?: string;
+    lastProgressKind?: EffectiveProgressKind;
+    lastProgressFingerprint?: string;
     lastTool?: string;
+    lastCommand?: string;
     sessionId?: string | null;
     idleTimeoutMs?: number;
+    quietSince?: string | null;
   }
 ): Promise<JobRecord> {
   return withProcessLock(resolveJobStateLock(cwd, jobId), async () => {
     const job = requireJob(cwd, jobId);
     if (job.status !== "running") return job;
-    return updateJobAuthoritative(cwd, jobId, patch);
+    return updateJobAuthoritative(cwd, jobId, patch as JobUpdatePatch);
   });
 }
 
@@ -243,7 +260,8 @@ function recoverUnacknowledgedDelivery(job: JobRecord): JobTransitionResult | un
 
 function buildPendingTransition(
   job: JobRecord,
-  transition: JobTransition
+  transition: JobTransition,
+  requestHashSource: JobTransition = transition
 ): PendingJobTransition {
   const timestamp = nowIso();
   const running = transition.status === "running";
@@ -259,7 +277,7 @@ function buildPendingTransition(
     fromStatus: job.status,
     signalCursor: readJobSignals(job.signalsFile).nextCursor + 1,
     signalCreatedAt: timestamp,
-    requestHash: transitionRequestHash(transition),
+    requestHash: transitionRequestHash(requestHashSource),
     status: transition.status,
     summary: publicSummary,
     phase: running ? transition.phase : undefined,
@@ -273,6 +291,7 @@ function buildPendingTransition(
     ...(transition.sessionId !== undefined ? { sessionId: transition.sessionId } : {}),
     ...(transition.changedFiles !== undefined ? { changedFiles: transition.changedFiles } : {}),
     ...(transition.verification !== undefined ? { verification: transition.verification } : {}),
+    ...(transition.acceptance !== undefined ? { acceptance: transition.acceptance } : {}),
     ...(transition.executionCallback !== undefined
       ? { executionCallback: sanitizeExecutionCallback(transition.executionCallback) }
       : {}),
@@ -333,7 +352,9 @@ function canonicalize(value: unknown): unknown {
 
 function signalLevel(status: JobStatus): JobSignalLevel {
   if (status === "failed") return "error";
-  if (status === "needs_input" || status === "blocked" || status === "timeout") return "warn";
+  if (status === "needs_input" || status === "blocked" || status === "stalled" || status === "timeout") {
+    return "warn";
+  }
   return "info";
 }
 
@@ -341,4 +362,39 @@ function transitionSignalKind(status: JobStatus): JobSignalKind {
   if (status === "running") return "phase_changed";
   if (status === "queued") throw new Error("A job cannot transition to queued");
   return status;
+}
+
+function ensureTransitionArtifacts(
+  job: JobRecord,
+  transition: JobTransition,
+  dependencies: JobTransitionDependencies
+): JobTransition {
+  if (transition.status === "running" || transition.reportPaths) return transition;
+  const writeArtifacts = dependencies.writeJobArtifacts ?? writeJobArtifacts;
+  const workflow = typeof job.request === "object" && job.request !== null
+    ? (job.request as Record<string, unknown>).workflow
+    : undefined;
+  const reportDir = typeof job.request === "object" &&
+    job.request !== null &&
+    typeof (job.request as Record<string, unknown>).reportDir === "string"
+    ? (job.request as Record<string, unknown>).reportDir as string
+    : undefined;
+  try {
+    const reportPaths = writeArtifacts({
+      job,
+      status: transition.status,
+      ...(transition.errorCode ? { errorCode: transition.errorCode } : {}),
+      changedFiles: transition.changedFiles ?? job.changedFiles,
+      verification: [],
+      compactVerification: transition.verification ?? job.verification,
+      finalText: readSavedJobOutput(job) ?? "",
+      plan: job.kind === "plan" || (job.kind === "compose" && workflow === "plan"),
+      ...(reportDir ? { reportDir } : {}),
+      existingReportPaths: transition.reportPaths ?? job.reportPaths
+    });
+    return { ...transition, reportPaths };
+  } catch {
+    const existingPaths = transition.reportPaths ?? job.reportPaths;
+    return existingPaths ? { ...transition, reportPaths: existingPaths } : transition;
+  }
 }

@@ -13,6 +13,7 @@ if (process.env.JOB_WORKER_PID_FILE) {
 }
 
 await runJobWorker(cwd, jobId, {
+  bootstrapWriteJobChain: async () => ({ status: "skipped" }),
   createHookCallbackController: (input) => createHookCallbackController({
     ...input,
     callbackWaitMs: 100

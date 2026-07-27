@@ -1,3 +1,5 @@
+import type { BatchMode } from "../core/jobs.js";
+
 export const COMPOSE_WORKFLOW_NAMES = [
   "brainstorm",
   "dev",
@@ -39,6 +41,19 @@ export interface ComposeWorkflowInput {
   workflow: ComposeWorkflowName;
   task?: string;
   file?: string;
+  batchMode?: BatchMode;
+}
+
+export interface DevelopmentAcceptanceInput {
+  build?: string[];
+  test?: string[];
+  diffCheck?: boolean;
+}
+
+export function workflowRequiresDevelopmentAcceptance(
+  workflow: ComposeWorkflowName
+): boolean {
+  return workflow === "dev" || workflow === "execute-plan";
 }
 
 const workflows: Record<ComposeWorkflowName, ComposeWorkflow> = {
@@ -164,6 +179,20 @@ export function validateComposeWorkflowInput(input: ComposeWorkflowInput): strin
     issues.push(`Workflow ${input.workflow} requires a file.`);
   }
   return issues;
+}
+
+export function normalizeComposeBatchMode<
+  Request extends ComposeWorkflowInput & { batchMode?: BatchMode }
+>(request: Request): Request {
+  const workflow = getComposeWorkflow(request.workflow);
+  if (workflow.writesAllowed) {
+    return { ...request, batchMode: request.batchMode ?? "auto" };
+  }
+  if (request.batchMode === undefined) {
+    return request;
+  }
+  const { batchMode: _ignored, ...rest } = request;
+  return rest as Request;
 }
 
 export function buildComposePrompt(input: BuildComposePromptInput): string {

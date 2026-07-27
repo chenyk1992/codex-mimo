@@ -17,6 +17,7 @@ import {
 export type TerminationReason =
   | "process_timeout"
   | "idle_timeout"
+  | "progress_timeout"
   | "host_abort"
   | "user_cancelled";
 
@@ -58,6 +59,9 @@ interface StreamingChildProcess extends EventEmitter {
 
 export interface StreamingRunOptions {
   onStart?: (pid: number | null) => Promise<void> | void;
+  onTerminationControl?: (control: {
+    requestTermination: (reason: TerminationReason) => Promise<void>;
+  }) => void;
   timeoutMs?: number;
   timeoutWarningMs?: number;
   idleTimeoutMs?: number;
@@ -331,6 +335,8 @@ export async function runMimoCliStreaming(
     resolveTerminationRequest({ promise: termination });
     return termination;
   };
+
+  options.onTerminationControl?.({ requestTermination });
 
   timeout = options.timeoutMs
     ? setTimeout(() => void requestTermination("process_timeout"), options.timeoutMs)

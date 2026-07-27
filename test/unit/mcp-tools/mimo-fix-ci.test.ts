@@ -20,7 +20,8 @@ describe("mimo_fix_ci", () => {
       actions: { status: "mimo_status", events: "mimo_events", result: "mimo_result", cancel: "mimo_cancel" }
     });
     expect(readJob(cwd, result.jobId)?.request).toEqual({
-      cwd, file: "ci.log", task: "Fix tests", timeoutMs: 1_800_000, idleTimeoutMs: 1_800_000
+      cwd, file: "ci.log", task: "Fix tests", timeoutMs: 1_800_000, idleTimeoutMs: 1_800_000,
+      progressWarningMs: 120_000, progressTimeoutMs: 300_000
     });
   });
 });

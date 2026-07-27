@@ -35,6 +35,17 @@ const verification = {
   items: verificationItem,
   description: "Executable verification commands, not natural-language acceptance criteria"
 };
+const acceptance = {
+  type: "object",
+  properties: {
+    build: { type: "array", items: string },
+    test: { type: "array", items: string },
+    diffCheck: { type: "boolean" }
+  },
+  additionalProperties: false
+};
+const batchMode = { type: "string", enum: ["auto", "single", "sliced"] };
+const batchModeWithDefault = { ...batchMode, default: "auto" };
 const notify = {
   anyOf: [
     {
@@ -56,6 +67,8 @@ const commonProperties = {
   model: string,
   timeoutMs: { type: "integer", exclusiveMinimum: 0, default: 1_800_000 },
   idleTimeoutMs: { type: "integer", minimum: 0, default: 1_800_000 },
+  progressWarningMs: { type: "integer", minimum: 0, default: 120_000 },
+  progressTimeoutMs: { type: "integer", minimum: 0, default: 300_000 },
   notify
 };
 
@@ -71,10 +84,15 @@ function workSchema(properties: Record<string, unknown>, required: string[]): Re
 
 const WORK_SCHEMAS: Record<string, Record<string, unknown>> = {
   mimo_plan: workSchema({ task: string }, ["cwd", "task"]),
-  mimo_implement: workSchema({ task: string, allowWrite: { type: "boolean" } }, ["cwd", "task", "allowWrite"]),
+  mimo_implement: workSchema({
+    task: string,
+    allowWrite: { type: "boolean" },
+    acceptance,
+    batchMode: batchModeWithDefault
+  }, ["cwd", "task", "allowWrite"]),
   mimo_review: workSchema({ base: { ...string, default: "HEAD" } }, ["cwd"]),
   mimo_fix_ci: workSchema({ file: string, task: string }, ["cwd", "file"]),
-  mimo_resume: workSchema({ jobId: string, task: string }, ["cwd", "jobId", "task"]),
+  mimo_resume: workSchema({ jobId: string, task: string }, ["cwd", "jobId"]),
   mimo_compose: workSchema({
     workflow: {
       type: "string",
@@ -83,9 +101,32 @@ const WORK_SCHEMAS: Record<string, Record<string, unknown>> = {
     task: string,
     file: string,
     since: string,
+    acceptance,
     verification,
-    reportDir: string
+    reportDir: string,
+    batchMode
   }, ["cwd", "workflow"])
+};
+
+const outputLevel = {
+  type: "string",
+  enum: ["compact", "standard", "full"],
+  default: "compact"
+};
+const controlSchema = {
+  type: "object",
+  properties: {
+    cwd: string,
+    jobId: { type: "string" },
+    level: outputLevel
+  },
+  required: ["cwd"],
+  additionalProperties: false,
+  $schema: "http://json-schema.org/draft-07/schema#"
+};
+const CONTROL_SCHEMAS: Record<string, Record<string, unknown>> = {
+  mimo_status: controlSchema,
+  mimo_result: structuredClone(controlSchema)
 };
 
 function createPluginFixture(
@@ -152,7 +193,11 @@ function createPluginFixture(
   );
   const tools: FixtureTool[] = (options.toolNames ?? EXPECTED_TOOLS).map((name) => ({
     name,
-    inputSchema: structuredClone(WORK_SCHEMAS[name] ?? { type: "object", properties: {} })
+    inputSchema: structuredClone(
+      WORK_SCHEMAS[name] ??
+      CONTROL_SCHEMAS[name] ??
+      { type: "object", properties: {} }
+    )
   }));
   if (options.oldWorkField) {
     const plan = tools.find((tool) => tool.name === "mimo_plan")!;
@@ -268,6 +313,27 @@ describe("lightweight plugin validator", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("mimo_review input schema must match the canonical contract");
   });
+
+  it.each(["mimo_status", "mimo_result"] as const)(
+    "rejects %s without the canonical compact output level",
+    (name) => {
+      const root = createPluginFixture(
+        "---\nname: mimocode\ndescription: Use MiMoCode.\n---",
+        {
+          mutateTools: (tools) => {
+            const schema = tools.find((tool) => tool.name === name)!.inputSchema;
+            delete (schema.properties as Record<string, unknown>).level;
+          }
+        }
+      );
+
+      const result = runValidator(root);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        `${name} input schema must match the canonical contract`
+      );
+    }
+  );
 
   it("rejects an unknown nested notify property", () => {
     const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {

@@ -9,6 +9,7 @@ export const DEFAULT_JOB_TIMEOUT_MS = 1_800_000;
 export const ATTENTION_STATUSES = new Set([
   "needs_input",
   "blocked",
+  "stalled",
   "completed",
   "failed",
   "cancelled",

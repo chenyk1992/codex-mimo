@@ -96,6 +96,25 @@ describe("webhook adapter", () => {
     expect(JSON.stringify(payload)).not.toContain("request-secret");
   });
 
+  it("redacts and bounds verification commands", () => {
+    const payload = buildNotificationPayload(delivery, {
+      ...job,
+      verification: [{
+        command: `npm test --token private ${"x".repeat(300)}`,
+        exitCode: 1,
+        passed: false
+      }]
+    }, signal);
+
+    expect(payload.result.verification).toEqual([{
+      command: expect.stringMatching(/^npm test --token \[REDACTED\]/),
+      exitCode: 1,
+      passed: false
+    }]);
+    expect(JSON.stringify(payload)).not.toContain("private");
+    expect(payload.result.verification[0].command.length).toBeLessThanOrEqual(240);
+  });
+
   it("defensively replaces direct multiline and oversized summaries", () => {
     const marker = `WEBHOOK_DIRECT_SENTINEL\n${"x".repeat(5_000)}`;
     const payload = buildNotificationPayload(

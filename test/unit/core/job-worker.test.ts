@@ -19,6 +19,7 @@ import { isProcessLockHeld } from "../../../src/core/process-lock.js";
 import { resolveJobWorkerOwnershipKey } from "../../../src/core/worker-ownership.js";
 import { withUtf8ProcessEnv } from "../../../src/core/encoding.js";
 import { readDeliveries } from "../../../src/notify/outbox.js";
+import type { TerminationReason } from "../../../src/mimo/streaming-runner.js";
 import type { HookCallbackController, MimoHookCallbackSummary } from "../../../src/mimo/hook-callback.js";
 import {
   runMimoCliStreaming,
@@ -66,6 +67,12 @@ const completedRun: StreamingRunResult = {
   stderr: "",
   exitCode: 0,
   pid: 321
+};
+
+const PASSING_ACCEPTANCE = {
+  build: ["node -e process.exit(0)"],
+  test: ["node -e process.exit(0)"],
+  diffCheck: false as const
 };
 
 function seedJob(cwd: string, kind: JobKind, notify = false): JobRecord {
@@ -119,6 +126,8 @@ function workerDeps(overrides: Partial<JobWorkerDependencies> = {}): JobWorkerDe
   const bound = definition();
   const controller = hook();
   return {
+    // Direct MiMo path tests skip chain bootstrap; slice-chain coverage lives elsewhere.
+    bootstrapWriteJobChain: async () => ({ status: "skipped" }),
     bindJobDefinition: vi.fn(() => bound),
     createHookCallbackController: vi.fn(async () => controller),
     runMimoStreaming: vi.fn(async (_cwd: string, _args: string[], options: StreamingRunOptions) => {
@@ -1285,7 +1294,12 @@ describe("runJobWorker", () => {
     const job = createJobStore(cwd).create({
       kind: "implement",
       task: "Implement it",
-      request: { cwd, task: "Implement it", allowWrite: true }
+      request: {
+        cwd,
+        task: "Implement it",
+        allowWrite: true,
+        acceptance: PASSING_ACCEPTANCE
+      }
     });
     const deps = workerDeps({
       runMimoStreaming: async (_cwd, _args, options) => {
@@ -1643,5 +1657,217 @@ describe("runJobWorker", () => {
     expect(stored.status).toBe("completed");
     expect(fs.readFileSync(stored.logFile, "utf8")).toContain("MiMoCode job diagnostic recorded.");
     expect(fs.readFileSync(stored.logFile, "utf8")).not.toContain("close failed");
+  });
+
+  describe("progress monitor", () => {
+    function progressMonitorHarness(
+      overrides: Partial<JobWorkerDependencies> = {}
+    ): {
+      deps: JobWorkerDependencies;
+      whenReady: Promise<{ emitLines: (lines: string[]) => Promise<void> }>;
+      tick: () => Promise<void>;
+      advance: (ms: number) => Promise<void>;
+    } {
+      let nowMs = Date.parse("2026-07-26T00:00:00.000Z");
+      let monitorTick!: () => Promise<void>;
+      let readyResolve!: (control: { emitLines: (lines: string[]) => Promise<void> }) => void;
+      const whenReady = new Promise<{
+        emitLines: (lines: string[]) => Promise<void>;
+      }>((resolve) => { readyResolve = resolve; });
+      const deps = workerDeps({
+        nowMs: () => nowMs,
+        progressMonitorPollMs: 86_400_000,
+        onProgressMonitorTick: (tick) => { monitorTick = tick; },
+        ...overrides,
+        runMimoStreaming: overrides.runMimoStreaming ?? (async (_cwd, _args, options) => {
+          let releaseRun!: () => void;
+          const runDone = new Promise<void>((resolve) => { releaseRun = resolve; });
+          const emitLine = async (line: string) => {
+            await options.onLine?.(line);
+          };
+          const emitLines = async (lines: string[]) => {
+            for (const line of lines) await emitLine(line);
+          };
+          await options.onStart?.(555);
+          options.onTerminationControl?.({
+            requestTermination: async () => {
+              releaseRun();
+            }
+          });
+          readyResolve({ emitLines });
+          await runDone;
+          return { ...completedRun, exitCode: 124, pid: 555, terminationReason: "progress_timeout" };
+        })
+      });
+      return {
+        deps,
+        whenReady,
+        tick: async () => monitorTick(),
+        advance: async (ms: number) => {
+          nowMs += ms;
+          await monitorTick();
+        }
+      };
+    }
+
+    it("does not stall before progressTimeoutMs and stalls at the deadline", async () => {
+      const cwd = tempWorkspace();
+      const job = createJobStore(cwd).create({
+        kind: "implement",
+        task: "Stall test",
+        request: {
+          cwd,
+          progressTimeoutMs: 300_000,
+          progressWarningMs: 120_000,
+          idleTimeoutMs: 0
+        }
+      });
+      const harness = progressMonitorHarness({
+        terminateOwnedProcess: vi.fn(() => ({ status: "not_running" as const, evidence: "gone" }))
+      });
+
+      const worker = runJobWorker(cwd, job.id, harness.deps);
+      const { emitLines } = await harness.whenReady;
+      await emitLines([
+        '{"type":"reasoning","text":"thinking"}',
+        '{"type":"text","text":"still thinking"}'
+      ]);
+
+      await harness.advance(119_999);
+      expect(readJob(cwd, job.id)).toMatchObject({ status: "running" });
+      expect(readJob(cwd, job.id)?.quietSince).toBeUndefined();
+
+      await harness.advance(1);
+      expect(readJob(cwd, job.id)).toMatchObject({ status: "running" });
+      expect(readJob(cwd, job.id)?.quietSince).toEqual(expect.any(String));
+      expect(readDeliveries(readJob(cwd, job.id)!.notificationOutboxFile)).toHaveLength(0);
+
+      await harness.advance(179_000);
+      expect(readJob(cwd, job.id)?.status).toBe("running");
+
+      await harness.advance(1_000);
+      await worker;
+
+      expect(readJob(cwd, job.id)).toMatchObject({
+        status: "stalled",
+        errorCode: expect.stringMatching(/no_effective_progress|agent_silent/)
+      });
+    });
+
+    it("refreshes progress lease on a new tool fingerprint", async () => {
+      const cwd = tempWorkspace();
+      const job = createJobStore(cwd).create({
+        kind: "implement",
+        task: "Lease test",
+        request: {
+          cwd,
+          progressTimeoutMs: 60_000,
+          progressWarningMs: 30_000,
+          idleTimeoutMs: 0
+        }
+      });
+      const bashStart = JSON.stringify({
+        type: "tool_use",
+        part: {
+          type: "tool",
+          tool: "bash",
+          state: { status: "started", input: { command: "npm test" } }
+        }
+      });
+      const readTool = JSON.stringify({
+        type: "tool_use",
+        part: {
+          type: "tool",
+          tool: "read",
+          state: { status: "started", input: { file_path: "src/a.ts" } }
+        }
+      });
+      const harness = progressMonitorHarness({
+        terminateOwnedProcess: vi.fn(() => ({ status: "not_running" as const, evidence: "gone" }))
+      });
+
+      const worker = runJobWorker(cwd, job.id, harness.deps);
+      const { emitLines } = await harness.whenReady;
+      await emitLines([bashStart]);
+      await harness.advance(59_999);
+      expect(readJob(cwd, job.id)?.status).toBe("running");
+
+      await emitLines([bashStart, readTool]);
+      await vi.waitFor(() => {
+        expect(readJob(cwd, job.id)?.lastTool).toBe("read");
+      });
+      await harness.advance(59_999);
+      expect(readJob(cwd, job.id)?.status).toBe("running");
+
+      await harness.advance(1_000);
+      await worker;
+
+      expect(readJob(cwd, job.id)).toMatchObject({ status: "stalled" });
+    });
+
+    it("becomes blocked with stalled_process_alive when termination cannot be confirmed", async () => {
+      const cwd = tempWorkspace();
+      const job = createJobStore(cwd).create({
+        kind: "implement",
+        task: "Alive stall",
+        request: {
+          cwd,
+          progressTimeoutMs: 5_000,
+          progressWarningMs: 1_000,
+          idleTimeoutMs: 0
+        }
+      });
+      const harness = progressMonitorHarness({
+        terminateOwnedProcess: vi.fn(() => ({
+          status: "unconfirmed" as const,
+          evidence: "still alive"
+        }))
+      });
+
+      const worker = runJobWorker(cwd, job.id, harness.deps);
+      const { emitLines } = await harness.whenReady;
+      await emitLines(['{"type":"text","text":"waiting"}']);
+      await harness.advance(6_000);
+      await worker;
+
+      expect(readJob(cwd, job.id)).toMatchObject({
+        status: "blocked",
+        errorCode: "stalled_process_alive"
+      });
+    });
+
+    it("skips the progress monitor when progressTimeoutMs is zero", async () => {
+      const cwd = tempWorkspace();
+      const job = createJobStore(cwd).create({
+        kind: "implement",
+        task: "Disabled monitor",
+        request: {
+          cwd,
+          progressTimeoutMs: 0,
+          progressWarningMs: 1_000,
+          idleTimeoutMs: 0
+        }
+      });
+      let release!: () => void;
+      const harness = progressMonitorHarness({
+        runMimoStreaming: async (_cwd, _args, options) => {
+          await options.onStart?.(556);
+          options.onTerminationControl?.({
+            requestTermination: async (_reason: TerminationReason) => undefined
+          });
+          await options.onLine?.('{"type":"text","text":"waiting"}');
+          await new Promise<void>((resolve) => { release = resolve; });
+          return { ...completedRun, pid: 556 };
+        }
+      });
+
+      const worker = runJobWorker(cwd, job.id, harness.deps);
+      await vi.waitFor(() => expect(readJob(cwd, job.id)?.status).toBe("running"));
+      await harness.advance(600_000);
+      expect(readJob(cwd, job.id)?.status).toBe("running");
+      release!();
+      await worker;
+      expect(readJob(cwd, job.id)?.status).toBe("completed");
+    });
   });
 });

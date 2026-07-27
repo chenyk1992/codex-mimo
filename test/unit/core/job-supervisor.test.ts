@@ -470,4 +470,115 @@ describe("job supervisor", () => {
     expect(spawnNotificationWorker).toHaveBeenCalledTimes(2);
     expect(runNotificationWorker).toHaveBeenCalledOnce();
   });
+
+  it("keeps the supervisor alive for an unfinished chain with only pending slices", async () => {
+    const cwd = workspace();
+    const { createJobChainFromManifest, resolveSliceManifestPath, writeSliceManifestArtifact } =
+      await import("../../../src/core/job-chain.js");
+    const manifest = {
+      version: 1 as const,
+      chainId: "chain-pending",
+      objective: "pending work",
+      repositoryFingerprint: "fp",
+      slices: [
+        {
+          id: "slice-1",
+          title: "One",
+          objective: "one",
+          dependsOn: [] as string[],
+          contextFiles: [] as string[],
+          allowedPaths: ["src/**"],
+          acceptance: { build: ["npm run build"], test: ["npm test"] }
+        }
+      ]
+    };
+    const manifestPath = writeSliceManifestArtifact({ cwd, rootJobId: "root-pending", manifest });
+    createJobChainFromManifest({
+      cwd,
+      rootJobId: "root-pending",
+      manifest,
+      manifestPath: resolveSliceManifestPath(cwd, "root-pending")
+    });
+    expect(fs.existsSync(manifestPath)).toBe(true);
+
+    let sleeps = 0;
+    await runJobSupervisor(cwd, {
+      listJobs: () => [],
+      readNotificationDeliveries: () => [],
+      spawnJobWorker: vi.fn(() => 1),
+      sleep: async () => {
+        sleeps += 1;
+        if (sleeps >= 2) {
+          const { markSliceTerminal } = await import("../../../src/core/job-chain.js");
+          markSliceTerminal(cwd, "chain-pending", "slice-1", "completed");
+        }
+      }
+    });
+
+    expect(sleeps).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps contending for unfinished chain work when only pending slices remain", async () => {
+    const cwd = workspace();
+    const ownershipKey = path.join(resolveJobDir(cwd), "supervisor-ownership");
+    const { createJobChainFromManifest, markSliceTerminal, resolveSliceManifestPath, writeSliceManifestArtifact } =
+      await import("../../../src/core/job-chain.js");
+    const manifest = {
+      version: 1 as const,
+      chainId: "chain-handoff",
+      objective: "pending work",
+      repositoryFingerprint: "fp",
+      slices: [
+        {
+          id: "slice-1",
+          title: "One",
+          objective: "one",
+          dependsOn: [] as string[],
+          contextFiles: [] as string[],
+          allowedPaths: ["src/**"],
+          acceptance: { build: ["npm run build"], test: ["npm test"] }
+        }
+      ]
+    };
+    writeSliceManifestArtifact({ cwd, rootJobId: "root-handoff", manifest });
+    createJobChainFromManifest({
+      cwd,
+      rootJobId: "root-handoff",
+      manifest,
+      manifestPath: resolveSliceManifestPath(cwd, "root-handoff")
+    });
+
+    let finalScan!: () => void;
+    let releaseOwner!: () => void;
+    const scanned = new Promise<void>((resolve) => { finalScan = resolve; });
+    const held = new Promise<void>((resolve) => { releaseOwner = resolve; });
+    const incumbent = withProcessLock(ownershipKey, async () => {
+      finalScan();
+      await held;
+    });
+    await scanned;
+
+    let sleeps = 0;
+    const contender = runJobSupervisor(cwd, {
+      listJobs: () => [],
+      readNotificationDeliveries: () => [],
+      spawnJobWorker: vi.fn(() => 1),
+      sleep: async () => {
+        sleeps += 1;
+        if (sleeps >= 1) {
+          markSliceTerminal(cwd, "chain-handoff", "slice-1", "completed");
+        }
+      }
+    });
+    const stateBeforeRelease = await Promise.race([
+      contender.then(() => "settled" as const),
+      new Promise<"waiting">((resolve) => setTimeout(() => resolve("waiting"), 350))
+    ]);
+
+    releaseOwner();
+    await Promise.all([incumbent, contender]);
+
+    expect(stateBeforeRelease).toBe("waiting");
+    expect(sleeps).toBeGreaterThanOrEqual(1);
+  });
 });

@@ -10,6 +10,7 @@ import {
   resolveJobStateFile,
   updateJob
 } from "../../src/core/job-store.js";
+import { writeJobArtifacts } from "../../src/core/job-artifacts.js";
 import { withProcessLock } from "../../src/core/process-lock.js";
 
 const tempDirs: string[] = [];
@@ -59,6 +60,36 @@ describe("job store", () => {
     expect(job.notificationOutboxFile).toBe(paths.notificationOutboxFile);
     expect(readJob(cwd, job.id)?.task).toBe(task);
     expect(listJobs(cwd).map((entry) => entry.id)).toEqual([job.id]);
+  });
+
+  it("round-trips progress fields and checkpoint report path", () => {
+    const cwd = tempWorkspace();
+    const timestamp = "2026-07-26T10:00:00.000Z";
+    const job = createJobStore(cwd).create({
+      kind: "plan",
+      task: "Progress fields",
+      request: { cwd, task: "Progress fields", progressTimeoutMs: 0, progressWarningMs: 60_000 }
+    });
+    const checkpoint = path.join(cwd, ".codex-mimo", "checkpoints", `${job.id}.json`);
+    const reportPaths = {
+      json: path.join(cwd, ".codex-mimo", "reports", `${job.id}.json`),
+      checkpoint
+    };
+
+    expect(job.progressWarningMs).toBe(60_000);
+    expect(job.progressTimeoutMs).toBe(0);
+
+    updateJob(cwd, job.id, {
+      lastProgressAt: timestamp,
+      progressTimeoutMs: 0,
+      reportPaths
+    });
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      lastProgressAt: timestamp,
+      progressTimeoutMs: 0,
+      reportPaths: { checkpoint }
+    });
   });
 
   it("seeds idleTimeoutMs from the request when available", () => {
@@ -338,6 +369,7 @@ describe("job store", () => {
     "queued",
     "needs_input",
     "blocked",
+    "stalled",
     "completed",
     "failed",
     "cancelled",
@@ -364,6 +396,7 @@ describe("job store", () => {
     ["queued", "queued", undefined, null, null],
     ["needs_input", "needs_input", undefined, null, null],
     ["blocked", "blocked", undefined, null, null],
+    ["stalled", "stalled", undefined, null, null],
     ["completed", "completed", undefined, null, null],
     ["failed", "failed", undefined, null, null],
     ["cancelled", "cancelled", undefined, null, null],
@@ -409,6 +442,66 @@ describe("job store", () => {
     }), "utf8");
 
     expect(() => readJob(cwd, job.id)).toThrow(/malformed job/i);
+  });
+
+  it("reads persisted semantic artifact paths", () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "plan",
+      task: "plan",
+      request: { cwd, task: "plan" }
+    });
+    const reportPaths = {
+      json: path.join(cwd, ".codex-mimo", "reports", `${job.id}.json`),
+      markdown: path.join(cwd, ".codex-mimo", "reports", `${job.id}.md`),
+      result: path.join(cwd, ".codex-mimo", "reports", `${job.id}.result.md`),
+      plan: path.join(cwd, ".codex-mimo", "reports", `${job.id}.plan.md`),
+      verification: path.join(cwd, ".codex-mimo", "reports", `${job.id}.verification.json`)
+    };
+
+    updateJob(cwd, job.id, { reportPaths });
+
+    expect(readJob(cwd, job.id)?.reportPaths).toEqual(reportPaths);
+  });
+
+  it("round-trips chainId and sliceId", () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "slice child",
+      request: { cwd, task: "slice child", allowWrite: true }
+    });
+
+    updateJob(cwd, job.id, { chainId: "chain-root", sliceId: "slice-1" });
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      chainId: "chain-root",
+      sliceId: "slice-1"
+    });
+  });
+
+  it("persists reportPaths.slices and normalizes path separators", () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "root chain",
+      request: { cwd, task: "root chain", allowWrite: true }
+    });
+    const slicesPath = path.join(cwd, ".codex-mimo", "reports", `${job.id}.slices.json`);
+
+    updateJob(cwd, job.id, { reportPaths: { slices: slicesPath } });
+    expect(readJob(cwd, job.id)?.reportPaths?.slices).toBe(slicesPath);
+
+    const normalized = writeJobArtifacts({
+      job: readJob(cwd, job.id)!,
+      status: "completed",
+      changedFiles: [],
+      verification: [],
+      finalText: "",
+      plan: false,
+      existingReportPaths: { slices: slicesPath }
+    });
+    expect(normalized.slices).toBe(slicesPath.replace(/\\/g, "/"));
   });
 
   it.each([

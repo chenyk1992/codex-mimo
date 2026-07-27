@@ -26,7 +26,7 @@ const forbidden = [
 describe("work tool schemas", () => {
   it("accepts only the common job options", () => {
     expect(Object.keys(JobOptionsSchema.shape).sort()).toEqual([
-      "cwd", "idleTimeoutMs", "model", "notify", "timeoutMs"
+      "cwd", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "timeoutMs"
     ]);
   });
 
@@ -40,6 +40,17 @@ describe("work tool schemas", () => {
   it("accepts idleTimeoutMs of 0 to disable idle stop-loss", () => {
     expect(JobOptionsSchema.parse({ cwd: "E:/project", idleTimeoutMs: 0 }).idleTimeoutMs).toBe(0);
     expect(PlanInput.parse({ cwd: "E:/project", task: "Plan", idleTimeoutMs: 0 }).idleTimeoutMs).toBe(0);
+  });
+
+  it("defaults progress timeouts and accepts progressTimeoutMs 0", () => {
+    const parsed = PlanInput.parse({ cwd: "E:/project", task: "x" });
+    expect(parsed.progressWarningMs).toBe(120_000);
+    expect(parsed.progressTimeoutMs).toBe(300_000);
+    expect(PlanInput.parse({
+      cwd: "E:/project",
+      task: "x",
+      progressTimeoutMs: 0
+    }).progressTimeoutMs).toBe(0);
   });
 
   it("rejects negative idleTimeoutMs", () => {
@@ -72,13 +83,13 @@ describe("work tool schemas", () => {
   });
 
   it("keeps exactly approved per-tool fields plus common options", () => {
-    expect(Object.keys(PlanInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "model", "notify", "task", "timeoutMs"]);
-    expect(Object.keys(ImplementInput.shape).sort()).toEqual(["allowWrite", "cwd", "idleTimeoutMs", "model", "notify", "task", "timeoutMs"]);
-    expect(Object.keys(ReviewInput.shape).sort()).toEqual(["base", "cwd", "idleTimeoutMs", "model", "notify", "timeoutMs"]);
-    expect(Object.keys(FixCiInput.shape).sort()).toEqual(["cwd", "file", "idleTimeoutMs", "model", "notify", "task", "timeoutMs"]);
-    expect(Object.keys(ResumeInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "jobId", "model", "notify", "task", "timeoutMs"]);
+    expect(Object.keys(PlanInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
+    expect(Object.keys(ImplementInput.shape).sort()).toEqual(["acceptance", "allowWrite", "batchMode", "cwd", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
+    expect(Object.keys(ReviewInput.shape).sort()).toEqual(["base", "cwd", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "timeoutMs"]);
+    expect(Object.keys(FixCiInput.shape).sort()).toEqual(["cwd", "file", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
+    expect(Object.keys(ResumeInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "jobId", "model", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
     expect(Object.keys(ComposeInputShape).sort()).toEqual([
-      "cwd", "file", "idleTimeoutMs", "model", "notify", "reportDir", "since", "task", "timeoutMs", "verification", "workflow"
+      "acceptance", "batchMode", "cwd", "file", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "reportDir", "since", "task", "timeoutMs", "verification", "workflow"
     ]);
   });
 
@@ -114,6 +125,72 @@ describe("work tool schemas", () => {
     expect(combined).toMatch(/not .*acceptance criteria/);
     expect(combined).toMatch(/(?:no|without a) shell/);
   });
+
+  it("parses compose acceptance and defaults diffCheck true for callers that omit it at normalize time", () => {
+    const parsed = ComposeInput.parse({
+      cwd: "E:/project",
+      workflow: "dev",
+      task: "add endpoint",
+      acceptance: { test: ["npm test -- foo.test.ts"] }
+    });
+    expect(parsed.acceptance).toEqual({
+      test: ["npm test -- foo.test.ts"]
+    });
+  });
+
+  it("still accepts legacy verification[] for migration", () => {
+    const parsed = ComposeInput.parse({
+      cwd: "E:/project",
+      workflow: "dev",
+      task: "x",
+      verification: ["npm test"]
+    });
+    expect(parsed.verification).toEqual(["npm test"]);
+  });
+
+  it("defaults batchMode to auto for implement and compose write workflows", () => {
+    expect(ImplementInput.parse({
+      cwd: "E:/project",
+      task: "Build",
+      allowWrite: true
+    }).batchMode).toBe("auto");
+    expect(parseComposeInput({
+      cwd: "E:/project",
+      workflow: "dev",
+      task: "add endpoint"
+    }).batchMode).toBe("auto");
+    expect(parseComposeInput({
+      cwd: "E:/project",
+      workflow: "execute-plan",
+      task: "run plan",
+      file: "docs/plan.md"
+    }).batchMode).toBe("auto");
+  });
+
+  it("parses explicit batchMode single and sliced", () => {
+    expect(ImplementInput.parse({
+      cwd: "E:/project",
+      task: "Build",
+      allowWrite: true,
+      batchMode: "single"
+    }).batchMode).toBe("single");
+    expect(parseComposeInput({
+      cwd: "E:/project",
+      workflow: "dev",
+      task: "x",
+      batchMode: "sliced"
+    }).batchMode).toBe("sliced");
+  });
+
+  it("strips batchMode from read-only compose workflows", () => {
+    const parsed = parseComposeInput({
+      cwd: "E:/project",
+      workflow: "plan",
+      task: "design",
+      batchMode: "auto"
+    });
+    expect(parsed).not.toHaveProperty("batchMode");
+  });
 });
 
 describe("control tool schemas", () => {
@@ -129,4 +206,17 @@ describe("control tool schemas", () => {
     expect(() => schema.parse({ cwd: "", ...cancelFields })).toThrow();
     expect(schema.parse({ cwd: "E:/project", ...cancelFields })).toMatchObject({ cwd: "E:/project" });
   });
+
+  it.each([JobStatusInput, JobResultInput])(
+    "defaults output level to compact and accepts explicit levels %#",
+    (schema) => {
+      expect(schema.parse({ cwd: "E:/project" })).toMatchObject({
+        cwd: "E:/project",
+        level: "compact"
+      });
+      expect(schema.parse({ cwd: "E:/project", level: "standard" }).level).toBe("standard");
+      expect(schema.parse({ cwd: "E:/project", level: "full" }).level).toBe("full");
+      expect(() => schema.parse({ cwd: "E:/project", level: "verbose" })).toThrow();
+    }
+  );
 });

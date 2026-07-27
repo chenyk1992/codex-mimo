@@ -31,7 +31,8 @@ import {
 } from "../../src/notify/codex-app-server.js";
 import { CODEX_COMMAND_ENV } from "../../src/notify/codex-command.js";
 import { prepareCodexConnection } from "../../src/notify/codex-connection.js";
-import { mimoImplement, mimoResult } from "../../src/codex/tools.js";
+import { mimoImplement, mimoResult, mimoResume } from "../../src/codex/tools.js";
+import { getJobDefinition } from "../../src/core/job-definitions.js";
 
 const workspaces: string[] = [];
 const children = new Set<ChildProcess>();
@@ -60,10 +61,22 @@ function workspace(): string {
   return cwd;
 }
 
+const PASSING_ACCEPTANCE = {
+  build: ["node -e process.exit(0)"],
+  test: ["node -e process.exit(0)"],
+  diffCheck: false as const
+};
+
 function requests(cwd: string): JobRequestByKind {
   return {
     plan: { cwd, task: "plan it", timeoutMs: 2_000 },
-    implement: { cwd, task: "implement it", allowWrite: true, timeoutMs: 2_000 },
+    implement: {
+      cwd,
+      task: "implement it",
+      allowWrite: true,
+      timeoutMs: 2_000,
+      acceptance: PASSING_ACCEPTANCE
+    },
     review: { cwd, base: "HEAD", timeoutMs: 2_000 },
     "fix-ci": { cwd, file: "ci.log", task: "fix it", timeoutMs: 2_000 },
     resume: {
@@ -113,6 +126,8 @@ function workerDependencies(input: {
   const callback = input.callback ?? true;
   const finalText = input.finalText ?? "Job completed from fake MiMo.";
   return {
+    // Direct fake-MiMo lifecycle tests skip chain bootstrap; see slice-chain.test.ts.
+    bootstrapWriteJobChain: async () => ({ status: "skipped" }),
     createHookCallbackController: (hookInput) => createHookCallbackController({
       ...hookInput,
       callbackWaitMs: input.callbackWaitMs ?? 100
@@ -147,6 +162,16 @@ function workerDependencies(input: {
 
 async function runFake(cwd: string, job: JobRecord, options: Parameters<typeof workerDependencies>[0] = {}) {
   await runJobWorker(cwd, job.id, workerDependencies(options));
+  return readJob(cwd, job.id)!;
+}
+
+async function runFakeWithDeps(
+  cwd: string,
+  job: JobRecord,
+  options: Parameters<typeof workerDependencies>[0] = {},
+  extraDeps: Partial<JobWorkerDependencies> = {}
+) {
+  await runJobWorker(cwd, job.id, { ...workerDependencies(options), ...extraDeps });
   return readJob(cwd, job.id)!;
 }
 
@@ -232,12 +257,22 @@ describe("unified background jobs", () => {
     const job = createJobStore(cwd).create({
       kind: "compose",
       task: "verify failure",
-      request: { cwd, workflow: "dev", task: "verify failure", verification: ["node -e process.exit(7)"], timeoutMs: 2_000 }
+      request: {
+        cwd,
+        workflow: "dev",
+        task: "verify failure",
+        acceptance: {
+          build: ["node -e process.exit(0)"],
+          test: ["node -e process.exit(7)"],
+          diffCheck: false
+        },
+        timeoutMs: 2_000
+      }
     });
 
     const failed = await runFake(cwd, job);
 
-    expect(failed).toMatchObject({ status: "failed", errorCode: "verification_failed" });
+    expect(failed).toMatchObject({ status: "failed", errorCode: "tests_failed" });
     expect(failed.executionCallback?.outcome).toBe("completed");
   });
 
@@ -257,6 +292,71 @@ describe("unified background jobs", () => {
 
     expect(timedOut).toMatchObject({ status: "timeout", errorCode: "timeout", pid: null });
   });
+
+  it("stalls on no effective progress, surfaces compact attention, and resumes from checkpoint", async () => {
+    const cwd = workspace();
+    const request = {
+      cwd,
+      task: "stall integration",
+      allowWrite: true,
+      progressTimeoutMs: 150,
+      progressWarningMs: 50,
+      idleTimeoutMs: 0,
+      timeoutMs: 60_000
+    };
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "stall integration",
+      request
+    });
+
+    const stalled = await runFakeWithDeps(cwd, job, {
+      mode: "hang",
+      callback: false,
+      callbackWaitMs: 20
+    }, {
+      progressMonitorPollMs: 25
+    });
+
+    expect(stalled).toMatchObject({
+      status: "stalled"
+    });
+    expect(stalled.reportPaths?.checkpoint).toBeDefined();
+    expect(fs.existsSync(stalled.reportPaths!.checkpoint!)).toBe(true);
+    const checkpoint = JSON.parse(fs.readFileSync(stalled.reportPaths!.checkpoint!, "utf8")) as {
+      version: number;
+      jobId: string;
+      repositoryFingerprint: string;
+    };
+    expect(checkpoint.version).toBe(1);
+    expect(checkpoint.jobId).toBe(job.id);
+
+    const compact = await mimoResult({ cwd, jobId: job.id });
+    expect(compact).toMatchObject({
+      status: "stalled",
+      attention: {
+        kind: "stalled",
+        resume: { tool: "mimo_resume", jobId: job.id }
+      }
+    });
+    expect(compact.attention?.reason).toBeTruthy();
+
+    const receipt = await mimoResume({ cwd, jobId: job.id, task: "Continue from stall" }, {
+      env: {},
+      spawnJobSupervisor: () => 123,
+      verifyProcess: () => ({ status: "not_running" as const, evidence: "gone" }),
+      captureFingerprint: async () => checkpoint.repositoryFingerprint
+    });
+    expect(receipt.kind).toBe("resume");
+    const child = readJob(cwd, receipt.jobId)!;
+    expect(child.parentJobId).toBe(job.id);
+
+    const prompt = await getJobDefinition("resume").buildPrompt(
+      child.request as never,
+      new AbortController().signal
+    );
+    expect(prompt.message).toMatch(/Do not perform a broad project scan/i);
+  }, 15_000);
 
   it("honors cancellation while the fake MiMo process is running", async () => {
     const cwd = workspace();
@@ -290,15 +390,20 @@ describe("unified background jobs", () => {
     expect(completed).toMatchObject({ kind: "compose", status: "completed" });
     expect(completed.reportPaths).toBeDefined();
 
-    const result = await mimoResult({ cwd, jobId: completed.id });
-    expect(result.output).toBe(planMarkdown);
-    expect(result.summary).toBe("MiMoCode completed the job.");
+    const compact = await mimoResult({ cwd, jobId: completed.id });
+    const compactPlanPath = path.relative(cwd, completed.reportPaths!.plan!)
+      .split(path.sep)
+      .join("/");
+    expect(compact).toMatchObject({
+      status: "completed",
+      summary: "Task 1...",
+      reportPath: compactPlanPath
+    });
+    expect(compact).not.toHaveProperty("output");
+    expect(fs.readFileSync(completed.reportPaths!.plan!, "utf8")).toBe(planMarkdown);
 
-    const reportJson = fs.readFileSync(completed.reportPaths!.json, "utf8");
-    const reportMarkdown = fs.readFileSync(completed.reportPaths!.markdown, "utf8");
-    expect(reportJson).not.toContain(planMarkdown);
-    expect(reportMarkdown).not.toContain(planMarkdown);
-    expect(JSON.stringify(completed)).not.toContain(planMarkdown);
+    const full = await mimoResult({ cwd, jobId: completed.id, level: "full" });
+    expect(full).toMatchObject({ output: planMarkdown, plan: planMarkdown });
 
     const marker = path.join(cwd, "codex-plan-output.jsonl");
     const createClient = () => createCodexAppServerClient({
@@ -313,11 +418,20 @@ describe("unified background jobs", () => {
     const start = readJsonLines(marker).find((call) => call.method === "turn/start")!;
     const params = start.params as { threadId: string; input: Array<{ text: string }> };
     expect(params.threadId).toBe("thread-plan-output");
-    expect(params.input[0].text).toContain("MIMO_CALLBACK_RESULT_V1");
-    expect(params.input[0].text).toContain('"jobId":"' + completed.id + '"');
-    expect(params.input[0].text).toContain('"output":' + JSON.stringify(planMarkdown));
-    expect(params.input[0].text).toContain("Do not call mimo_result, mimo_status, mimo_events, mimo_wait, or any other tool.");
-    expect(params.input[0].text).not.toContain("Call mimo_result");
+    const callbackText = params.input[0].text;
+    expect(callbackText).toContain("MIMO_CALLBACK_RESULT_V2");
+    expect(callbackText).toContain('"summary":"Task 1..."');
+    expect(callbackText).toContain(
+      '"reportPath":' + JSON.stringify(compactPlanPath)
+    );
+    expect(callbackText).not.toContain(planMarkdown);
+    expect(callbackText).not.toContain('"output"');
+
+    const reportJson = fs.readFileSync(completed.reportPaths!.json, "utf8");
+    const reportMarkdown = fs.readFileSync(completed.reportPaths!.markdown, "utf8");
+    expect(reportJson).not.toContain(planMarkdown);
+    expect(reportMarkdown).not.toContain(planMarkdown);
+    expect(JSON.stringify(completed)).not.toContain(planMarkdown);
   });
 
   it("fails compose plan with result_missing when final text is empty and omits raw payload from public surfaces", async () => {
@@ -334,8 +448,11 @@ describe("unified background jobs", () => {
     expect(failed.reportPaths).toBeDefined();
 
     const result = await mimoResult({ cwd, jobId: failed.id });
-    expect(result.output).toBeUndefined();
-    expect(result.errorCode).toBe("result_missing");
+    expect(result).toMatchObject({
+      status: "failed",
+      failure: { code: "result_missing" }
+    });
+    expect(result).not.toHaveProperty("output");
 
     const persisted = allFiles(path.join(cwd, ".codex-mimo"))
       .filter((file) => !file.endsWith(".events.jsonl"))
@@ -391,7 +508,7 @@ describe("unified background jobs", () => {
       pid: null,
     });
     expect(fs.readFileSync(invocations, "utf8").trim().split(/\r?\n/)).toHaveLength(1);
-  });
+  }, 60_000);
 
   it("automatically replaces a crashed notify-worker and recovers its expired HTTP lease", async () => {
     const cwd = workspace();
@@ -553,7 +670,7 @@ describe("unified background jobs", () => {
         kind: "implement",
         cwd,
         task,
-        request: { cwd, task, allowWrite: true, timeoutMs: 2_000 },
+        request: { cwd, task, allowWrite: true, timeoutMs: 2_000, acceptance: PASSING_ACCEPTANCE },
         notify: { type: "codex", threadId: "thread-frozen" }
       }, {
         env: {},
@@ -610,11 +727,12 @@ describe("unified background jobs", () => {
     const start = calls.find((call) => call.method === "turn/start")!;
     const params = start.params as { threadId: string; input: Array<{ text: string }> };
     expect(params.threadId).toBe("thread-frozen");
-    expect(params.input[0].text).toContain("MIMO_CALLBACK_RESULT_V1");
-    expect(params.input[0].text).toContain('"jobId":"' + completed.id + '"');
-    expect(params.input[0].text).toContain('"output":' + JSON.stringify("Job completed from fake MiMo."));
-    expect(params.input[0].text).toContain("Do not call mimo_result, mimo_status, mimo_events, mimo_wait, or any other tool.");
-    expect(params.input[0].text).not.toContain("Call mimo_result");
+    expect(params.input[0].text).toContain("MIMO_CALLBACK_RESULT_V2");
+    expect(params.input[0].text).toContain('"status":"completed"');
+    expect(params.input[0].text).toContain('"reportPath":');
+    expect(params.input[0].text).not.toContain('"jobId"');
+    expect(params.input[0].text).not.toContain('"output"');
+    expect(params.input[0].text).not.toContain("Job completed from fake MiMo.");
   });
 
   it("rejects explicit Codex notify without a thread ID and creates no job records", async () => {
@@ -717,6 +835,7 @@ describe("unified background jobs", () => {
         cwd,
         task: "Complete the fake notification job.",
         allowWrite: true,
+        acceptance: PASSING_ACCEPTANCE,
         notify: { type: "codex", threadId }
       }, {
         env,

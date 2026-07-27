@@ -107,26 +107,53 @@ function preparedConnection(
 }
 
 describe("Codex notification adapter", () => {
-  it("attaches one public final result and forbids callback tool calls", () => {
-    const prepared = jobWithEvents("CODEX_MIMO_NOTIFY_SMOKE_OUTPUT_v1");
+  it("attaches one compact result and never embeds final output", () => {
+    const prepared = jobWithEvents("CODEX_MIMO_NOTIFY_SMOKE_OUTPUT_v1", {
+      reportPaths: { markdown: "report.md", result: "result.md" }
+    });
     const prompt = buildCodexNotificationPrompt(delivery, prepared, signal);
 
-    expect(prompt.startsWith("MIMO_CALLBACK_RESULT_V1\n")).toBe(true);
-    expect(prompt).toContain('notification event "implement-1:3:codex"');
-    expect(prompt).toContain("Do not call mimo_result, mimo_status, mimo_events, mimo_wait, or any other tool.");
+    expect(prompt.startsWith("MIMO_CALLBACK_RESULT_V2\n")).toBe(true);
     expect(prompt).toContain("<mimo_callback_result>");
-    expect(prompt).toContain('"output":"CODEX_MIMO_NOTIFY_SMOKE_OUTPUT_v1"');
-    expect(prompt).toContain("</mimo_callback_result>");
-    expect(prompt).not.toContain("Call mimo_result");
-    expect(prompt).not.toContain("private task prompt");
-    expect(prompt).not.toContain("request-secret");
-    expect(prompt).not.toContain('"actions"');
+    expect(prompt).toContain('"status":"completed"');
+    expect(prompt).toContain('"reportPath":"report.md"');
+    expect(prompt).toContain("Do not call mimo_result");
+    expect(prompt).not.toContain("CODEX_MIMO_NOTIFY_SMOKE_OUTPUT_v1");
+    expect(prompt).not.toContain('"output"');
     expect(prompt).not.toContain('"notification"');
+    expect(prompt).not.toContain('"actions"');
   });
 
-  it("creates a partial callback result without actions or notification", () => {
-    const result = buildCodexCallbackResult({ ...job, status: "needs_input" });
-    expect(result).toMatchObject({ jobId: "implement-1", status: "needs_input", resultType: "partial" });
+  it("prefetches a bounded plan summary and artifact path", () => {
+    const prepared = jobWithEvents("# Plan\n\nImplement three focused steps.", {
+      kind: "plan",
+      reportPaths: { markdown: "report.md", plan: "plan.md" }
+    });
+    expect(buildCodexCallbackResult(prepared)).toEqual({
+      status: "completed",
+      changedFiles: [],
+      tests: [],
+      failure: null,
+      reportPath: "plan.md",
+      summary: "Implement three focused steps."
+    });
+  });
+
+  it("creates a compact attention callback without identity or generic actions", () => {
+    const result = buildCodexCallbackResult({
+      ...job,
+      status: "needs_input",
+      reportPaths: { markdown: "report.md" }
+    });
+    expect(result).toMatchObject({
+      status: "needs_input",
+      attention: {
+        kind: "needs_input",
+        resume: { tool: "mimo_resume", jobId: "implement-1" }
+      }
+    });
+    expect(result).not.toHaveProperty("jobId");
+    expect(result).not.toHaveProperty("resultType");
     expect(result).not.toHaveProperty("actions");
     expect(result).not.toHaveProperty("notification");
   });
@@ -139,8 +166,9 @@ describe("Codex notification adapter", () => {
       resumeThread: async () => { throw new Error("adapter must not resume"); },
       startTurnAndWait: async (threadId, prompt) => {
         calls.push(`turn:${threadId}`);
-        expect(prompt.startsWith("MIMO_CALLBACK_RESULT_V1\n")).toBe(true);
-        expect(prompt).toContain('"output":"CODEX_MIMO_NOTIFY_SMOKE_OUTPUT_v1"');
+        expect(prompt.startsWith("MIMO_CALLBACK_RESULT_V2\n")).toBe(true);
+        expect(prompt).not.toContain("CODEX_MIMO_NOTIFY_SMOKE_OUTPUT_v1");
+        expect(prompt).not.toContain('"output"');
         expect(prompt).not.toContain("Call mimo_result");
         return { turnId: "turn-1", status: "completed" };
       },

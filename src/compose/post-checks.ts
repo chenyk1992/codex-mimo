@@ -1,6 +1,184 @@
-import type { GitHeadSnapshot, GitStatusSnapshot } from "../git/diff.js";
+import { execa } from "execa";
+import path from "node:path";
+
+import type {
+  GitCommitChangeSnapshot,
+  GitHeadSnapshot,
+  GitStatusSnapshot
+} from "../git/diff.js";
 import { extractFinalText, parseMimoJsonLines } from "./events.js";
 import { detectUnacceptedTask } from "../core/job-outcome.js";
+import type { AcceptanceStageResult } from "./acceptance.js";
+
+export interface DiffAcceptanceInput {
+  cwd: string;
+  changedFiles: string[];
+  allowedPaths?: string[];
+  gitHeadBefore?: GitHeadSnapshot;
+  gitHeadAfter?: GitHeadSnapshot;
+  commitChanges?: GitCommitChangeSnapshot;
+  diffText?: string;
+  signal?: AbortSignal;
+  forbidCommits?: boolean;
+  runGitDiffCheck?: (
+    cwd: string,
+    signal?: AbortSignal
+  ) => Promise<{ passed: boolean; reason?: string }>;
+}
+
+const ACCIDENTAL_ARTIFACT_PREFIXES = ["node_modules/", ".next/", "dist/"];
+
+function normalizeRepoPath(file: string): string {
+  return file.replace(/\\/g, "/");
+}
+
+function gitArgs(cwd: string, args: string[]): string[] {
+  const absolute = path.isAbsolute(cwd) || /^[a-zA-Z]:[\\/]/.test(cwd)
+    ? cwd
+    : path.resolve(cwd);
+  return ["-c", `safe.directory=${absolute.replace(/\\/g, "/")}`, ...args];
+}
+
+async function defaultRunGitDiffCheck(
+  cwd: string,
+  signal?: AbortSignal
+): Promise<{ passed: boolean; reason?: string }> {
+  const result = await execa("git", gitArgs(cwd, ["diff", "--check"]), {
+    cwd,
+    reject: false,
+    ...(signal ? { cancelSignal: signal } : {})
+  });
+  if (result.exitCode === 0) {
+    return { passed: true };
+  }
+  return {
+    passed: false,
+    reason: result.stderr || result.stdout || `exit ${result.exitCode ?? "unknown"}`
+  };
+}
+
+export function isPathWithinAllowedScope(file: string, allowedPaths: string[]): boolean {
+  const normalized = normalizeRepoPath(file);
+  return allowedPaths.some((allowed) => {
+    const normalizedAllowed = normalizeRepoPath(allowed).replace(/\/+$/, "");
+    return (
+      normalized === normalizedAllowed || normalized.startsWith(`${normalizedAllowed}/`)
+    );
+  });
+}
+
+export function findOutOfScopeChangedFiles(changedFiles: string[], allowedPaths: string[]): string[] {
+  if (allowedPaths.length === 0) {
+    return [];
+  }
+  return changedFiles.filter((file) => !isPathWithinAllowedScope(file, allowedPaths));
+}
+
+export function findAccidentalArtifactFiles(
+  changedFiles: string[],
+  allowedPaths?: string[]
+): string[] {
+  return changedFiles.filter((file) => {
+    const normalized = normalizeRepoPath(file);
+    const isArtifact = ACCIDENTAL_ARTIFACT_PREFIXES.some(
+      (prefix) => normalized.includes(prefix) || normalized.startsWith(prefix.replace(/\/$/, ""))
+    );
+    if (!isArtifact) {
+      return false;
+    }
+    if (!allowedPaths || allowedPaths.length === 0) {
+      return true;
+    }
+    return !isPathWithinAllowedScope(file, allowedPaths);
+  });
+}
+
+export function findConflictMarkerFiles(diffText: string, changedFiles: string[]): string[] {
+  const markerPattern = /<<<<<<<|>>>>>>>/;
+  if (!markerPattern.test(diffText)) {
+    return [];
+  }
+
+  const files: string[] = [];
+  for (const section of diffText.split(/^diff --git /m)) {
+    if (!markerPattern.test(section)) {
+      continue;
+    }
+    const match = section.match(/^a\/(.+?) b\//);
+    if (match) {
+      files.push(match[1]);
+    }
+  }
+
+  if (files.length > 0) {
+    return [...new Set(files)];
+  }
+  return changedFiles.length > 0 ? [changedFiles[0]] : ["unknown"];
+}
+
+export async function runDeterministicDiffAcceptance(
+  input: DiffAcceptanceInput
+): Promise<AcceptanceStageResult> {
+  const forbidCommits = input.forbidCommits !== false;
+  const runCheck = input.runGitDiffCheck ?? defaultRunGitDiffCheck;
+
+  const checkResult = await runCheck(input.cwd, input.signal);
+  if (!checkResult.passed) {
+    return {
+      stage: "diff_check",
+      outcome: "failed",
+      command: "git diff --check",
+      reason: checkResult.reason,
+      suggestion:
+        "Fix whitespace or conflict-marker errors reported by git diff --check, then rerun the diff check."
+    };
+  }
+
+  if (input.allowedPaths && input.allowedPaths.length > 0) {
+    const outOfScope = findOutOfScopeChangedFiles(input.changedFiles, input.allowedPaths);
+    if (outOfScope.length > 0) {
+      return {
+        stage: "diff_check",
+        outcome: "failed",
+        reason: `Out-of-scope changes: ${outOfScope.join(", ")}`,
+        suggestion: `Remove out-of-scope change ${outOfScope[0]}, then rerun the diff check.`
+      };
+    }
+  }
+
+  if (forbidCommits && input.commitChanges && input.commitChanges.commits.length > 0) {
+    return {
+      stage: "diff_check",
+      outcome: "failed",
+      reason: `Unexpected commits: ${input.commitChanges.commits.join(", ")}`,
+      suggestion: "Revert unexpected commits, then rerun the diff check."
+    };
+  }
+
+  if (input.diffText) {
+    const conflictFiles = findConflictMarkerFiles(input.diffText, input.changedFiles);
+    if (conflictFiles.length > 0) {
+      return {
+        stage: "diff_check",
+        outcome: "failed",
+        reason: `Conflict markers in ${conflictFiles.join(", ")}`,
+        suggestion: `Resolve conflict markers in ${conflictFiles[0]}, then rerun the diff check.`
+      };
+    }
+  }
+
+  const artifacts = findAccidentalArtifactFiles(input.changedFiles, input.allowedPaths);
+  if (artifacts.length > 0) {
+    return {
+      stage: "diff_check",
+      outcome: "failed",
+      reason: `Accidental generated artifacts: ${artifacts.join(", ")}`,
+      suggestion: `Remove accidental artifact ${artifacts[0]}, then rerun the diff check.`
+    };
+  }
+
+  return { stage: "diff_check", outcome: "passed" };
+}
 
 export function detectSemanticFailure(eventsStdout: string): string | undefined {
   return detectUnacceptedTask(extractFinalText(parseMimoJsonLines(eventsStdout)));

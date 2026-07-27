@@ -24,6 +24,8 @@ import {
   resolveJobWorkerOwnershipKey,
   resolveNotificationWorkerOwnershipKey
 } from "./worker-ownership.js";
+import { isChainOrchestratorRoot, workspaceHasUnfinishedChain } from "./job-chain.js";
+import { recoverUnfinishedJobChains } from "./job-recovery.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 100;
 const OWNERSHIP_HANDOFF_TIMEOUT_MS = 250;
@@ -76,6 +78,7 @@ function hasUnfinishedWork(
 ): boolean {
   const readJobs = dependencies.listJobs ?? listJobs;
   if (readJobs(cwd).some(isSupervisedJob)) return true;
+  if (workspaceHasUnfinishedChain(cwd)) return true;
   const readDeliveries = dependencies.readNotificationDeliveries ?? readNotificationDeliveries;
   return readDeliveries(cwd).some(isDeliveryUnfinished);
 }
@@ -104,6 +107,12 @@ async function runOwnedSupervisor(
   let notificationProgress: string | undefined;
 
   while (true) {
+    await recoverUnfinishedJobChains(cwd, {
+      processIsRunning: isRunning,
+      workerOwnershipIsHeld: ownershipIsHeld,
+      spawnNotificationWorker: startNotificationWorker,
+      ...(dependencies.transitionJob ? { transitionJob: dependencies.transitionJob } : {})
+    });
     const supervisedJobs = readJobs(cwd).filter(isSupervisedJob);
     const supervisedIds = new Set(supervisedJobs.map((job) => job.id));
     for (const jobId of jobWorkers.keys()) {
@@ -123,6 +132,10 @@ async function runOwnedSupervisor(
       }
       jobProgress.set(job.id, progress);
       if (await ownershipIsHeld(resolveJobWorkerOwnershipKey(cwd, job.id))) {
+        continue;
+      }
+      // Task 5: orchestrator roots wait for child workers / Task 6 advance — no root MiMo worker.
+      if (job.status === "running" && isChainOrchestratorRoot(job)) {
         continue;
       }
       const pid = jobWorkers.get(job.id);
@@ -183,7 +196,11 @@ async function runOwnedSupervisor(
       notificationProgress = undefined;
     }
 
-    if (supervisedJobs.length === 0 && unfinishedDeliveries.length === 0) return;
+    if (
+      supervisedJobs.length === 0 &&
+      unfinishedDeliveries.length === 0 &&
+      !workspaceHasUnfinishedChain(cwd)
+    ) return;
     await sleep(pollIntervalMs);
   }
 }

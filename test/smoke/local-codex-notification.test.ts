@@ -107,7 +107,11 @@ describeSmoke("local Codex notification (App Server history writeback)", () => {
 
       const callbackResponse = await waitForTargetAssistantResponse(threadId, 330_000, smokeStartedAt);
       expect(callbackResponse.trim()).not.toBe("");
-      expect(callbackResponse).toContain(OUTPUT_MARKER);
+      expect(callbackResponse).not.toContain(OUTPUT_MARKER);
+
+      const finalJob = readJob(workspace, receipt.jobId)!;
+      expect(finalJob.reportPaths?.result).toBeDefined();
+      expect(fs.readFileSync(finalJob.reportPaths!.result!, "utf8")).toContain(OUTPUT_MARKER);
 
       const finalDelivery = await waitForTerminalDelivery(workspace, receipt.jobId, 30_000);
       expect(finalDelivery).toMatchObject({

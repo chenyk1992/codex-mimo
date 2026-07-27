@@ -37,6 +37,12 @@ afterEach(() => {
   }
 });
 
+async function seedRunningJob(): Promise<{ cwd: string; job: { id: string } }> {
+  const { cwd, jobId } = seedJob("running");
+  const job = readJob(cwd, jobId)!;
+  return { cwd, job };
+}
+
 function seedJob(status: JobStatus, notification = false): { cwd: string; jobId: string } {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-transition-"));
   tempDirs.push(cwd);
@@ -74,6 +80,7 @@ describe("job transitions", () => {
     ["queued", "cancelled"],
     ["running", "needs_input"],
     ["running", "blocked"],
+    ["running", "stalled"],
     ["running", "completed"],
     ["running", "failed"],
     ["running", "cancelled"],
@@ -96,6 +103,20 @@ describe("job transitions", () => {
       })
     });
     expect(readJobSignals(result.job.signalsFile).signals).toEqual([result.signal]);
+  });
+
+  it("allows running -> stalled and rejects stalled -> running", async () => {
+    const { cwd, job } = await seedRunningJob();
+    await transitionJob(cwd, job.id, {
+      status: "stalled",
+      summary: "No effective progress.",
+      errorCode: "no_effective_progress"
+    });
+    expect(readJob(cwd, job.id)?.status).toBe("stalled");
+    await expect(transitionJob(cwd, job.id, {
+      status: "running",
+      summary: "illegal"
+    })).rejects.toThrow(/Illegal job transition/);
   });
 
   it("rejects terminal to running", async () => {
@@ -567,6 +588,23 @@ describe("job transitions", () => {
     expect(updated).not.toHaveProperty("lastTool");
   });
 
+  it("writes a fallback structural report for terminal transitions without a finalizer", async () => {
+    const { cwd, jobId } = seedJob("queued");
+
+    const transitioned = await transitionJob(cwd, jobId, {
+      status: "cancelled",
+      summary: "Cancelled.",
+      errorCode: "cancelled"
+    });
+
+    expect(transitioned.job.reportPaths).toMatchObject({
+      json: expect.any(String),
+      markdown: expect.any(String)
+    });
+    expect(fs.existsSync(transitioned.job.reportPaths!.json!)).toBe(true);
+    expect(fs.existsSync(transitioned.job.reportPaths!.markdown!)).toBe(true);
+  });
+
   it("prevents a normal terminal outcome after cancellation intent wins", async () => {
     const { cwd, jobId } = seedJob("running", true);
 
@@ -581,5 +619,54 @@ describe("job transitions", () => {
       cancellationRequestedAt: expect.any(String)
     });
     expect(readJobSignals(resolveJobPaths(cwd, jobId).signalsFile).signals).toHaveLength(0);
+  });
+
+  it("does not write artifacts for an illegal transition", async () => {
+    const { cwd, jobId } = seedJob("completed");
+    const writeJobArtifacts = vi.fn(() => ({
+      json: "should-not-write.json",
+      markdown: "should-not-write.md"
+    }));
+
+    await expect(transitionJob(cwd, jobId, {
+      status: "running",
+      phase: "starting",
+      summary: "again"
+    }, { writeJobArtifacts })).rejects.toThrow("Illegal job transition completed -> running");
+
+    expect(writeJobArtifacts).not.toHaveBeenCalled();
+  });
+
+  it("finalizes a terminal transition when artifact write fails", async () => {
+    const { cwd, jobId } = seedJob("running", true);
+    const writeJobArtifacts = vi.fn(() => {
+      throw new Error("disk full");
+    });
+
+    const result = await transitionJob(cwd, jobId, {
+      status: "completed",
+      summary: "done"
+    }, { writeJobArtifacts });
+
+    expect(writeJobArtifacts).toHaveBeenCalledOnce();
+    expect(result.job.status).toBe("completed");
+    expect(result.deliveryCreated).toBe(true);
+    expect(result.job.reportPaths).toBeUndefined();
+  });
+
+  it("keeps existing reportPaths when artifact write fails", async () => {
+    const { cwd, jobId } = seedJob("running");
+    const existingPaths = { json: "existing.json", markdown: "existing.md" };
+    updateJob(cwd, jobId, { reportPaths: existingPaths });
+    const writeJobArtifacts = vi.fn(() => {
+      throw new Error("disk full");
+    });
+
+    const result = await transitionJob(cwd, jobId, {
+      status: "completed",
+      summary: "done"
+    }, { writeJobArtifacts });
+
+    expect(result.job.reportPaths).toEqual(existingPaths);
   });
 });

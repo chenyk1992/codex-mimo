@@ -1,4 +1,5 @@
 import path from "node:path";
+import fs from "node:fs";
 import { z } from "zod";
 import {
   createComposeReport,
@@ -17,15 +18,31 @@ import {
   compactVerification,
   normalizeVerificationCommands,
   runVerificationCommands,
+  type VerificationCommandExecutor,
   type VerificationResult,
   type VerificationRunOptions
 } from "../compose/verify.js";
 import {
+  normalizeDevelopmentAcceptancePlan,
+  runDevelopmentAcceptance,
+  runDiffAcceptanceSelfCheck,
+  type AcceptanceStageResult,
+  type DevelopmentAcceptancePlan,
+  type DevelopmentAcceptanceResult
+} from "../compose/acceptance.js";
+import {
+  diffReviewWarningsFromResult,
+  runReadOnlyDiffReview
+} from "../compose/diff-review.js";
+import {
   buildComposePrompt,
   COMPOSE_WORKFLOW_NAMES,
   getComposeWorkflow,
+  normalizeComposeBatchMode,
   validateComposeWorkflowInput,
-  type ComposeWorkflowName
+  workflowRequiresDevelopmentAcceptance,
+  type ComposeWorkflowName,
+  type DevelopmentAcceptanceInput
 } from "../compose/workflow.js";
 import { extractFinalText, type NormalizedMimoEvent } from "../compose/events.js";
 import {
@@ -42,17 +59,77 @@ import {
 } from "../mimo/prompt-transport.js";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
 import type { StreamingRunResult } from "../mimo/streaming-runner.js";
-import { implementPrompt, planPrompt, resumePrompt, reviewPrompt } from "./prompt.js";
+import { implementPrompt, planPrompt, resumeContinuationPrompt, resumePrompt, reviewPrompt } from "./prompt.js";
 import { classifyRunOutcome, type JobOutcome } from "./job-outcome.js";
-import type { ExecutionCallbackSummary, JobKind, JobRecord } from "./jobs.js";
+import {
+  writeJobArtifacts,
+  type WriteJobArtifactsInput
+} from "./job-artifacts.js";
+import {
+  writeJobCheckpoint,
+  readJobCheckpoint,
+  type JobCheckpoint,
+  captureRepositoryFingerprint
+} from "./job-checkpoint.js";
+import type {
+  BatchMode,
+  ExecutionCallbackSummary,
+  JobAcceptanceSummary,
+  JobKind,
+  JobRecord,
+  JobReportPaths,
+  JobStatus,
+  JobVerification,
+  JobVerificationDetails
+} from "./jobs.js";
+import {
+  planSliceManifest,
+  type SliceDefinition,
+  type SliceManifest
+} from "../compose/slices.js";
+import { renameWithWindowsRetry } from "./atomic-file.js";
+import {
+  createJobChainFromManifest,
+  isChainOrchestratorRoot,
+  isChainSliceChild,
+  mapChildStatusToSliceState,
+  markPendingSlicesCancelled,
+  markSliceRunning,
+  markSliceTerminal,
+  readJobChain,
+  readSliceManifestFromChain,
+  selectNextReadySlice,
+  unionChangedFiles,
+  writeSliceManifestArtifact,
+  type JobChainRecord,
+  type SliceRuntimeState
+} from "./job-chain.js";
+import {
+  createJobStore,
+  readJob,
+  updateJobAuthoritative,
+  type CreateJobInput
+} from "./job-store.js";
+import { spawnJobSupervisor } from "./job-process.js";
+import { transitionJob, type JobTransition } from "./job-transition.js";
 
 const DEFAULT_TIMEOUT_MS = 1_800_000;
+
+const BatchModeSchema = z.enum(["auto", "single", "sliced"]);
 
 const CommonRequestSchema = z.object({
   cwd: z.string().min(1),
   model: z.string().min(1).optional(),
   timeoutMs: z.number().int().positive().default(DEFAULT_TIMEOUT_MS),
-  idleTimeoutMs: z.number().int().min(0).default(DEFAULT_TIMEOUT_MS)
+  idleTimeoutMs: z.number().int().min(0).default(DEFAULT_TIMEOUT_MS),
+  progressWarningMs: z.number().int().min(0).default(120_000),
+  progressTimeoutMs: z.number().int().min(0).default(300_000)
+}).strict();
+
+const DevelopmentAcceptanceRequestSchema = z.object({
+  build: z.array(z.string().min(1)).optional(),
+  test: z.array(z.string().min(1)).optional(),
+  diffCheck: z.boolean().optional()
 }).strict();
 
 const PlanRequestSchema = CommonRequestSchema.extend({
@@ -61,7 +138,10 @@ const PlanRequestSchema = CommonRequestSchema.extend({
 
 const ImplementRequestSchema = CommonRequestSchema.extend({
   task: z.string().min(1),
-  allowWrite: z.literal(true)
+  allowWrite: z.literal(true),
+  acceptance: DevelopmentAcceptanceRequestSchema.optional(),
+  allowedPaths: z.array(z.string().min(1)).optional(),
+  batchMode: BatchModeSchema.default("auto")
 });
 
 const ReviewRequestSchema = CommonRequestSchema.extend({
@@ -78,11 +158,38 @@ const JobExecutionPolicySchema = z.object({
   writesAllowed: z.boolean()
 }).strict();
 
+const JobCheckpointSchema = z.object({
+  version: z.literal(1),
+  jobId: z.string().min(1),
+  chainId: z.string().min(1),
+  objective: z.string(),
+  sessionId: z.string().nullable().optional(),
+  repositoryFingerprint: z.string(),
+  contextFiles: z.array(z.string()),
+  changedFiles: z.array(z.string()),
+  completedSlices: z.array(z.string()),
+  completedChecklist: z.array(z.string()),
+  remainingChecklist: z.array(z.string()),
+  acceptance: z.object({
+    stages: z.array(z.object({
+      stage: z.enum(["build", "test", "diff_check"]),
+      outcome: z.enum(["passed", "failed", "not_applicable", "pending"]),
+      command: z.string().optional()
+    })),
+    failedStage: z.enum(["build", "test", "diff_check"]).optional(),
+    failedCommand: z.string().optional(),
+    failedTests: z.array(z.string()).optional(),
+    suggestion: z.string().optional()
+  }).passthrough(),
+  artifactPaths: z.record(z.string()).optional()
+}).passthrough();
+
 const ResumeRequestSchema = CommonRequestSchema.extend({
   jobId: z.string().min(1),
-  task: z.string().min(1),
-  sessionId: z.string().min(1),
-  executionPolicy: JobExecutionPolicySchema
+  task: z.string().min(1).optional(),
+  sessionId: z.string().min(1).optional(),
+  executionPolicy: JobExecutionPolicySchema,
+  checkpoint: JobCheckpointSchema.optional()
 });
 
 const ComposeRequestSchema = CommonRequestSchema.extend({
@@ -91,12 +198,15 @@ const ComposeRequestSchema = CommonRequestSchema.extend({
   file: z.string().min(1).optional(),
   since: z.string().min(1).optional(),
   verification: z.array(z.string().min(1)).optional(),
-  reportDir: z.string().min(1).optional()
+  reportDir: z.string().min(1).optional(),
+  acceptance: DevelopmentAcceptanceRequestSchema.optional(),
+  allowedPaths: z.array(z.string().min(1)).optional(),
+  batchMode: BatchModeSchema.optional()
 }).superRefine((request, context) => {
   for (const message of validateComposeWorkflowInput(request)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message });
   }
-});
+}).transform(normalizeComposeBatchMode);
 
 export type PlanJobRequest = z.input<typeof PlanRequestSchema>;
 export type ImplementJobRequest = z.input<typeof ImplementRequestSchema>;
@@ -121,7 +231,23 @@ export interface JobFinalizeDependencies {
     commands: string[],
     options?: VerificationRunOptions
   ) => Promise<VerificationResult[]>;
+  runDevelopmentAcceptance?: (
+    cwd: string,
+    plan: DevelopmentAcceptancePlan,
+    options?: {
+      signal?: AbortSignal;
+      runDiffCheck?: (cwd: string, signal?: AbortSignal) => Promise<AcceptanceStageResult>;
+      execute?: VerificationCommandExecutor;
+    }
+  ) => Promise<DevelopmentAcceptanceResult>;
+  runDiffCheck?: (cwd: string, signal?: AbortSignal) => Promise<AcceptanceStageResult>;
+  runDiffAcceptanceSelfCheck?: typeof runDiffAcceptanceSelfCheck;
+  runReadOnlyDiffReview?: typeof runReadOnlyDiffReview;
+  captureDiff?: typeof captureGitDiff;
+  executeVerification?: VerificationCommandExecutor;
   writeComposeReport?: (report: ComposeReport) => void;
+  writeJobArtifacts?: (input: WriteJobArtifactsInput) => JobReportPaths;
+  writeJobCheckpoint?: typeof writeJobCheckpoint;
 }
 
 export interface JobExecutionFinalizeContext {
@@ -227,17 +353,22 @@ const resumeDefinition: JobDefinition<"resume", ResumeJobRequest> = {
   kind: "resume",
   executionPolicy: (request) => ({ ...request.executionPolicy }),
   async buildPrompt(request) {
-    return preparePromptTransport(
-      resumePrompt(request.task, request.executionPolicy.writesAllowed),
-      { cwd: request.cwd }
-    );
+    const task = request.task ?? request.checkpoint?.remainingChecklist[0] ?? "Continue the job.";
+    const promptText = request.checkpoint
+      ? resumeContinuationPrompt({
+          objective: request.checkpoint.objective,
+          checkpoint: request.checkpoint as JobCheckpoint,
+          ...(request.task ? { task: request.task } : {})
+        })
+      : resumePrompt(task, request.executionPolicy.writesAllowed);
+    return preparePromptTransport(promptText, { cwd: request.cwd });
   },
   buildMimoArgs(request, prompt) {
     return buildMimoRunArgs({
       cwd: request.cwd,
       agent: request.executionPolicy.agent,
       model: request.model,
-      session: request.sessionId,
+      ...(request.sessionId ? { session: request.sessionId } : {}),
       message: prompt.message,
       title: "codex-mimo resume",
       files: prompt.files
@@ -367,21 +498,59 @@ function directDefinition<
   };
 }
 
-async function finalizeDirect<Request extends { cwd: string }>(
+async function finalizeDirect<Request extends { cwd: string; acceptance?: DevelopmentAcceptanceInput }>(
   context: JobFinalizeContext<Request>,
   writesAllowed: boolean,
   requireFinalText = false
 ): Promise<JobOutcome> {
-  const verification = context.verification ?? [];
+  const requiresAcceptance = context.job.kind === "implement";
   const changedFiles = collectChangedFiles(context, writesAllowed);
-  const outcome = classifyRunOutcome({
+  const acceptanceRun = requiresAcceptance
+    ? await runAcceptanceForFinalize(context, {
+        writesAllowed,
+        acceptance: context.request.acceptance,
+        legacyVerification: undefined,
+        changedFiles
+      })
+    : undefined;
+
+  if (acceptanceRun?.missing) {
+    const missingOutcome = needsInputIfOtherwiseComplete(
+      context,
+      acceptanceRun.missing,
+      requireFinalText
+    );
+    return finalizeWithArtifacts(context, {
+      ...missingOutcome,
+      changedFiles
+    }, [], writesAllowed);
+  }
+
+  const verificationDetails = acceptanceRun?.result?.verificationDetails ??
+    (context.verification ?? []).map((entry) => ({
+      command: entry.command,
+      exitCode: entry.exitCode,
+      passed: entry.passed,
+      durationMs: entry.durationMs,
+      stdout: "",
+      stderr: ""
+    }));
+  const compact = acceptanceRun?.result
+    ? compactVerificationFromAcceptance(acceptanceRun.result)
+    : toCompactJobVerification(verificationDetails);
+  const acceptanceSummary = acceptanceRun?.result
+    ? toAcceptanceSummary(acceptanceRun.result)
+    : undefined;
+
+  let outcome = classifyRunOutcome({
     exitCode: context.run.exitCode,
     terminationReason: context.run.terminationReason,
     executionCallback: context.executionCallback,
-    verification: compactVerification(verification),
+    verification: compact,
     finalText: finalTextFrom(context),
     ...(requireFinalText ? { requireFinalText: true } : {})
   });
+  outcome = applyAcceptanceFailure(outcome, acceptanceRun?.result, compact, acceptanceSummary);
 
   if (!writesAllowed && hasReadOnlyViolation(context, changedFiles)) {
     const error = readOnlyViolationError(
@@ -391,7 +560,7 @@ async function finalizeDirect<Request extends { cwd: string }>(
       context.gitHeadAfter
     );
     if (!outcome.errorCode?.startsWith("callback_")) {
-      return {
+      outcome = {
         ...outcome,
         status: "failed",
         summary: error,
@@ -402,21 +571,17 @@ async function finalizeDirect<Request extends { cwd: string }>(
     }
   }
 
-  return { ...outcome, changedFiles };
+  return finalizeWithArtifacts(context, {
+    ...outcome,
+    changedFiles,
+    verification: compact,
+    ...(acceptanceSummary ? { acceptance: acceptanceSummary } : {})
+  }, verificationDetails, writesAllowed);
 }
 
 async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): Promise<JobOutcome> {
   const workflow = getComposeWorkflow(context.request.workflow);
-  const runVerification = context.deps?.runVerification ?? runVerificationCommands;
-  const commands = normalizeVerificationCommands(
-    context.request.verification,
-    workflow.defaultVerification,
-    context.request.cwd
-  );
-  context.signal.throwIfAborted();
-  const verification = await runVerification(context.request.cwd, commands, { signal: context.signal });
-  context.signal.throwIfAborted();
-
+  const requiresAcceptance = workflowRequiresDevelopmentAcceptance(workflow.name);
   const changedFiles = collectChangedFiles(context, workflow.writesAllowed);
   let reportDiff = context.diff ?? emptyDiff();
   if (!workflow.writesAllowed) {
@@ -425,14 +590,60 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     reportDiff = { ...reportDiff, changedFiles };
   }
 
-  let outcome = classifyRunOutcome({
-    exitCode: context.run.exitCode,
-    terminationReason: context.run.terminationReason,
-    executionCallback: context.executionCallback,
-    verification: compactVerification(verification),
-    finalText: finalTextFrom(context),
-    ...(workflow.name === "plan" ? { requireFinalText: true } : {})
-  });
+  let verificationDetails: JobVerificationDetails[] = [];
+  let compact: JobVerification[] = [];
+  let acceptanceResult: DevelopmentAcceptanceResult | undefined;
+  let acceptanceMissing: { reason: string; code: "acceptance_config_missing" } | undefined;
+
+  if (requiresAcceptance) {
+    const acceptanceRun = await runAcceptanceForFinalize(context, {
+      writesAllowed: workflow.writesAllowed,
+      acceptance: context.request.acceptance,
+      legacyVerification: context.request.verification,
+      changedFiles,
+      reportDiff
+    });
+    if (acceptanceRun.missing) {
+      acceptanceMissing = acceptanceRun.missing;
+    } else if (acceptanceRun.result) {
+      acceptanceResult = acceptanceRun.result;
+      verificationDetails = acceptanceResult.verificationDetails;
+      compact = compactVerificationFromAcceptance(acceptanceResult);
+    }
+  } else {
+    const runVerification = context.deps?.runVerification ?? runVerificationCommands;
+    const commands = normalizeVerificationCommands(
+      context.request.verification,
+      workflow.defaultVerification,
+      context.request.cwd
+    );
+    context.signal.throwIfAborted();
+    const verification = await runVerification(context.request.cwd, commands, {
+      signal: context.signal,
+      ...(context.deps?.executeVerification ? { execute: context.deps.executeVerification } : {})
+    });
+    context.signal.throwIfAborted();
+    verificationDetails = verification;
+    compact = compactVerification(verification);
+  }
+
+  const acceptanceSummary = acceptanceResult
+    ? toAcceptanceSummary(acceptanceResult)
+    : acceptanceMissing
+      ? { stages: [] }
+      : undefined;
+
+  let outcome = acceptanceMissing
+    ? needsInputIfOtherwiseComplete(context, acceptanceMissing, workflow.name === "plan")
+    : classifyRunOutcome({
+        exitCode: context.run.exitCode,
+        terminationReason: context.run.terminationReason,
+        executionCallback: context.executionCallback,
+        verification: compact,
+        finalText: finalTextFrom(context),
+        ...(workflow.name === "plan" ? { requireFinalText: true } : {})
+      });
+  outcome = applyAcceptanceFailure(outcome, acceptanceResult, compact, acceptanceSummary);
 
   const readOnlyError = !workflow.writesAllowed && hasReadOnlyViolation(context, changedFiles)
     ? readOnlyViolationError(
@@ -461,7 +672,7 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     workflow: workflow.name,
     cwd: context.request.cwd,
     requestedSkills: workflow.skillChain,
-    status: composeReportStatus(outcome, verification, changedFiles),
+    status: composeReportStatus(outcome, toVerificationResults(verificationDetails), changedFiles, requiresAcceptance),
     events: context.events,
     diff: reportDiff,
     terminationReason: context.run.terminationReason,
@@ -472,26 +683,71 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     gitHeadBefore: context.gitHeadBefore,
     gitHeadAfter: context.gitHeadAfter,
     gitCommits: context.commitChanges?.commits,
-    verification,
+    verification: toVerificationResults(verificationDetails),
     error: outcome.error,
     errorCode: outcome.errorCode,
     reportDir: context.request.reportDir ?? path.join(context.request.cwd, ".codex-mimo", "reports"),
     eventsDir: path.join(context.request.cwd, ".codex-mimo", "events"),
     diffsDir: path.join(context.request.cwd, ".codex-mimo", "diffs")
   });
+
+  const baseReportPaths: JobReportPaths = {
+    json: report.reportPaths.json,
+    markdown: report.reportPaths.markdown,
+    eventsJsonl: report.reportPaths.eventsJsonl,
+    ...(report.diffPath ? { diff: report.diffPath } : {})
+  };
+  const writeArtifacts = context.deps?.writeJobArtifacts ?? writeJobArtifacts;
+  const writeCheckpoint = context.deps?.writeJobCheckpoint ?? writeJobCheckpoint;
+  const checkpointPaths = await writeCheckpoint({
+    job: context.job,
+    objective: context.job.task,
+    changedFiles,
+    acceptance: acceptanceSummary ?? outcome.acceptance,
+    existingReportPaths: {
+      ...context.job.reportPaths,
+      ...baseReportPaths
+    },
+    reportDir: context.request.reportDir ??
+      path.join(context.request.cwd, ".codex-mimo", "reports")
+  });
+  const reportPaths = writeArtifacts({
+    job: context.job,
+    status: outcome.status,
+    ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
+    changedFiles,
+    verification: verificationDetails,
+    finalText: finalTextFrom(context),
+    plan: workflow.name === "plan",
+    reportDir: context.request.reportDir ??
+      path.join(context.request.cwd, ".codex-mimo", "reports"),
+    existingReportPaths: {
+      ...context.job.reportPaths,
+      ...baseReportPaths,
+      ...checkpointPaths
+    }
+  });
+
+  report.reportPaths = {
+    json: report.reportPaths.json,
+    markdown: report.reportPaths.markdown,
+    eventsJsonl: report.reportPaths.eventsJsonl,
+    ...(reportPaths.result ? { result: reportPaths.result } : {}),
+    ...(reportPaths.plan ? { plan: reportPaths.plan } : {}),
+    ...(reportPaths.verification ? { verification: reportPaths.verification } : {}),
+    ...(reportPaths.checkpoint ? { checkpoint: reportPaths.checkpoint } : {})
+  };
   context.signal.throwIfAborted();
   (context.deps?.writeComposeReport ?? writeComposeReport)(report);
 
   return {
     ...outcome,
     changedFiles,
-    verification: compactVerification(verification),
-    reportPaths: {
-      json: report.reportPaths.json,
-      markdown: report.reportPaths.markdown,
-      eventsJsonl: report.reportPaths.eventsJsonl,
-      ...(report.diffPath ? { diff: report.diffPath } : {})
-    }
+    verification: compact,
+    ...(acceptanceSummary || outcome.acceptance
+      ? { acceptance: acceptanceSummary ?? outcome.acceptance }
+      : {}),
+    reportPaths
   };
 }
 
@@ -531,10 +787,12 @@ function emptyDiff(): GitDiffSnapshot {
 function composeReportStatus(
   outcome: JobOutcome,
   verification: VerificationResult[],
-  changedFiles: string[]
+  changedFiles: string[],
+  requiresAcceptance = false
 ): ComposeReport["status"] {
   if (outcome.status === "timeout") return "timeout";
   if (outcome.status !== "completed") return "failed";
+  if (requiresAcceptance) return "passed";
   if (verification.length === 0 && changedFiles.length > 0) return "needs_review";
   return "passed";
 }
@@ -542,3 +800,1114 @@ function composeReportStatus(
 function defaultComposeTask(workflow: ComposeWorkflowName): string {
   return `Run ${workflow} workflow.`;
 }
+
+async function finalizeWithArtifacts<Request extends { cwd: string }>(
+  context: JobFinalizeContext<Request>,
+  outcome: JobOutcome,
+  verificationDetails: JobVerificationDetails[],
+  _writesAllowed: boolean
+): Promise<JobOutcome> {
+  const writeArtifacts = context.deps?.writeJobArtifacts ?? writeJobArtifacts;
+  const writeCheckpoint = context.deps?.writeJobCheckpoint ?? writeJobCheckpoint;
+  const changedFiles = outcome.changedFiles ?? [];
+  const checkpointPaths = await writeCheckpoint({
+    job: context.job,
+    objective: context.job.task,
+    changedFiles,
+    acceptance: outcome.acceptance,
+    existingReportPaths: context.job.reportPaths
+  });
+  const reportPaths = writeArtifacts({
+    job: context.job,
+    status: outcome.status,
+    ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
+    changedFiles,
+    verification: verificationDetails,
+    finalText: finalTextFrom(context),
+    ...(context.diff?.diff ? { diff: context.diff.diff } : {}),
+    plan: context.job.kind === "plan",
+    existingReportPaths: {
+      ...context.job.reportPaths,
+      ...checkpointPaths
+    }
+  });
+  return {
+    ...outcome,
+    changedFiles,
+    verification: outcome.verification ?? toCompactJobVerification(verificationDetails),
+    reportPaths
+  };
+}
+
+function toCompactJobVerification(details: JobVerificationDetails[]): JobVerification[] {
+  return details.map(({ command, exitCode, passed, durationMs }) => ({
+    command,
+    exitCode,
+    passed,
+    ...(durationMs === undefined ? {} : { durationMs })
+  }));
+}
+
+function toVerificationResults(details: JobVerificationDetails[]): VerificationResult[] {
+  return details.map((entry) => ({
+    command: entry.command,
+    exitCode: entry.exitCode,
+    stdout: entry.stdout,
+    stderr: entry.stderr,
+    passed: entry.passed,
+    durationMs: entry.durationMs ?? 0
+  }));
+}
+
+function needsInputIfOtherwiseComplete(
+  context: JobExecutionFinalizeContext,
+  missing: { reason: string; code: "acceptance_config_missing" },
+  requireFinalText = false
+): JobOutcome {
+  const base = classifyRunOutcome({
+    exitCode: context.run.exitCode,
+    terminationReason: context.run.terminationReason,
+    executionCallback: context.executionCallback,
+    verification: [],
+    finalText: finalTextFrom(context),
+    ...(requireFinalText ? { requireFinalText: true } : {})
+  });
+  if (base.status !== "completed") return base;
+  return {
+    status: "needs_input",
+    summary: missing.reason,
+    error: missing.reason,
+    errorCode: missing.code,
+    verification: [],
+    acceptance: { stages: [] },
+    ...(base.sessionId !== undefined ? { sessionId: base.sessionId } : {}),
+    ...(base.executionCallback ? { executionCallback: base.executionCallback } : {})
+  };
+}
+
+function applyAcceptanceFailure(
+  outcome: JobOutcome,
+  acceptance: DevelopmentAcceptanceResult | undefined,
+  compact: JobVerification[],
+  summary?: JobAcceptanceSummary
+): JobOutcome {
+  if (!acceptance) {
+    return summary ? { ...outcome, acceptance: summary } : outcome;
+  }
+  const acceptanceSummary = summary ?? toAcceptanceSummary(acceptance);
+  if (acceptance.passed) {
+    return { ...outcome, verification: compact, acceptance: acceptanceSummary };
+  }
+  if (
+    outcome.errorCode?.startsWith("callback_") ||
+    outcome.status === "cancelled" ||
+    outcome.status === "timeout" ||
+    outcome.status === "stalled" ||
+    outcome.status === "needs_input" ||
+    outcome.status === "blocked"
+  ) {
+    return { ...outcome, verification: compact, acceptance: acceptanceSummary };
+  }
+  if (outcome.status !== "completed" && outcome.errorCode !== "verification_failed") {
+    return { ...outcome, verification: compact, acceptance: acceptanceSummary };
+  }
+  const errorCode = acceptance.errorCode ?? "verification_failed";
+  const message = acceptance.suggestion ??
+    acceptance.failedCommand ??
+    "MiMoCode acceptance failed.";
+  return {
+    ...outcome,
+    status: "failed",
+    summary: message,
+    error: message,
+    errorCode,
+    verification: compact,
+    acceptance: acceptanceSummary
+  };
+}
+
+function toAcceptanceSummary(result: DevelopmentAcceptanceResult): JobAcceptanceSummary {
+  return {
+    stages: result.stages.map((stage) => ({
+      stage: stage.stage,
+      outcome: stage.outcome === "skipped" ? "pending" : stage.outcome,
+      ...(stage.command !== undefined ? { command: stage.command } : {})
+    })),
+    ...(result.failedStage ? { failedStage: result.failedStage } : {}),
+    ...(result.failedCommand ? { failedCommand: result.failedCommand } : {}),
+    ...(result.failedTests ? { failedTests: result.failedTests } : {}),
+    ...(result.suggestion ? { suggestion: result.suggestion } : {})
+  };
+}
+
+function compactVerificationFromAcceptance(
+  result: DevelopmentAcceptanceResult
+): JobVerification[] {
+  const fromCommands = toCompactJobVerification(result.verificationDetails);
+  if (result.failedStage === "diff_check" && result.passed === false) {
+    return [
+      ...fromCommands,
+      {
+        command: result.failedCommand ?? "diff_check",
+        exitCode: 1,
+        passed: false
+      }
+    ];
+  }
+  return fromCommands;
+}
+
+async function runAcceptanceForFinalize<Request extends { cwd: string }>(
+  context: JobFinalizeContext<Request>,
+  input: {
+    writesAllowed: boolean;
+    acceptance?: DevelopmentAcceptanceInput;
+    legacyVerification?: string[];
+    changedFiles: string[];
+    reportDiff?: GitDiffSnapshot;
+  }
+): Promise<{
+  missing?: { reason: string; code: "acceptance_config_missing" };
+  result?: DevelopmentAcceptanceResult;
+}> {
+  const plan = normalizeDevelopmentAcceptancePlan({
+    cwd: context.request.cwd,
+    acceptance: input.acceptance,
+    legacyVerification: input.legacyVerification,
+    requireAcceptance: true
+  });
+  if ("missing" in plan && plan.missing) {
+    return { missing: { reason: plan.reason, code: plan.code } };
+  }
+
+  const acceptancePlan = plan as DevelopmentAcceptancePlan;
+  const diffPath = ensureDiffArtifact(context, input.reportDiff ?? context.diff);
+  const runAcceptance = context.deps?.runDevelopmentAcceptance ?? runDevelopmentAcceptance;
+  const runDiffCheck = context.deps?.runDiffCheck ??
+    createDefaultRunDiffCheck(context, input.writesAllowed, diffPath);
+
+  context.signal.throwIfAborted();
+  const result = await runAcceptance(context.request.cwd, acceptancePlan, {
+    signal: context.signal,
+    runDiffCheck,
+    ...(context.deps?.executeVerification ? { execute: context.deps.executeVerification } : {})
+  });
+  context.signal.throwIfAborted();
+
+  // Surface read-only review warnings into verification artifact details when present.
+  const diffStage = result.stages.find((stage) => stage.stage === "diff_check");
+  if (diffStage) {
+    const warnings = diffReviewWarningsFromResult(diffStage);
+    if (warnings.length > 0) {
+      result.verificationDetails.push({
+        command: "diff_check:review_warnings",
+        exitCode: 0,
+        passed: true,
+        stdout: JSON.stringify({ warnings }),
+        stderr: ""
+      });
+    }
+  }
+
+  return { result };
+}
+
+function ensureDiffArtifact(
+  context: JobFinalizeContext<{ cwd: string }>,
+  diff: GitDiffSnapshot | undefined
+): string | undefined {
+  const text = diff?.diff?.trim();
+  if (!text) return undefined;
+  const diffsDir = path.join(context.request.cwd, ".codex-mimo", "diffs");
+  fs.mkdirSync(diffsDir, { recursive: true });
+  const diffPath = path.join(diffsDir, `${context.job.id}.diff`);
+  fs.writeFileSync(diffPath, text, "utf8");
+  return diffPath;
+}
+
+function hasUsableDiffFile(diffPath: string | undefined): boolean {
+  if (!diffPath || !fs.existsSync(diffPath)) return false;
+  try {
+    return fs.readFileSync(diffPath, "utf8").trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveDiffPathForReview(
+  context: JobFinalizeContext<{ cwd: string }>,
+  initialDiffPath: string | undefined,
+  captureDiff: typeof captureGitDiff,
+  signal?: AbortSignal
+): Promise<string | undefined> {
+  if (hasUsableDiffFile(initialDiffPath)) {
+    return initialDiffPath;
+  }
+  const existing = context.job.reportPaths?.diff;
+  if (hasUsableDiffFile(existing)) {
+    return existing;
+  }
+  const fromContext = ensureDiffArtifact(context, context.diff);
+  if (fromContext) return fromContext;
+
+  const snapshot = await captureDiff(context.request.cwd, "HEAD", { signal });
+  return ensureDiffArtifact(context, snapshot);
+}
+
+function createDefaultRunDiffCheck(
+  context: JobFinalizeContext<{ cwd: string }>,
+  writesAllowed: boolean,
+  initialDiffPath: string | undefined
+): (cwd: string, signal?: AbortSignal) => Promise<AcceptanceStageResult> {
+  return async (cwd, signal) => {
+    const runSelfCheck = context.deps?.runDiffAcceptanceSelfCheck ?? runDiffAcceptanceSelfCheck;
+    const runReview = context.deps?.runReadOnlyDiffReview ?? runReadOnlyDiffReview;
+    const captureDiff = context.deps?.captureDiff ?? captureGitDiff;
+
+    const allowedPaths = readAllowedPathsFromRequest(context.request);
+    const selfCheck = await runSelfCheck({
+      cwd,
+      expectedWritesAllowed: writesAllowed,
+      gitHeadBefore: context.gitHeadBefore,
+      signal,
+      ...(allowedPaths ? { allowedPaths } : {})
+    });
+    if (selfCheck.outcome === "failed") {
+      return selfCheck;
+    }
+
+    const changedFileCount = selfCheck.summary?.changedFileCount ?? 0;
+    const hasWorkspaceChanges = changedFileCount > 0;
+
+    if (!hasWorkspaceChanges && !hasUsableDiffFile(initialDiffPath)) {
+      // Align with runReadOnlyDiffReview no_diff → not_applicable → passed.
+      return { stage: "diff_check", outcome: "passed" };
+    }
+
+    const diffPath = await resolveDiffPathForReview(
+      context,
+      initialDiffPath,
+      captureDiff,
+      signal
+    );
+    if (!diffPath) {
+      return {
+        stage: "diff_check",
+        outcome: "failed",
+        reason: "delivery_contract_missing",
+        suggestion:
+          "Could not produce a diff artifact for read-only review despite workspace changes."
+      };
+    }
+
+    const review = await runReview({
+      cwd,
+      sessionId: context.executionCallback?.sessionId ?? context.job.sessionId,
+      diffPath,
+      signal
+    });
+    if (review.outcome === "not_applicable") {
+      if (hasWorkspaceChanges) {
+        return {
+          stage: "diff_check",
+          outcome: "failed",
+          reason: "delivery_contract_missing",
+          suggestion:
+            "Diff review reported no_diff despite workspace changes; refresh the diff artifact and rerun."
+        };
+      }
+      return { stage: "diff_check", outcome: "passed" };
+    }
+    return review;
+  };
+}
+
+function readAllowedPathsFromRequest(request: unknown): string[] | undefined {
+  if (typeof request !== "object" || request === null || !("allowedPaths" in request)) {
+    return undefined;
+  }
+  const value = (request as { allowedPaths?: unknown }).allowedPaths;
+  if (!Array.isArray(value) || value.length === 0 || !value.every((entry) => typeof entry === "string")) {
+    return undefined;
+  }
+  return value;
+}
+
+/**
+ * Task 5/7: for write roots with batchMode auto|single|sliced, plan a slice manifest,
+ * materialize the durable chain, and spawn the first child (null notify).
+ * Root becomes an orchestrator and skips write MiMo.
+ *
+ * Task 6 advances the chain after each child terminal via advanceJobChainAfterChild.
+ */
+export type WriteChainBootstrapResult =
+  | { status: "skipped" }
+  | { status: "failed"; errorCode: "slice_plan_invalid"; reason: string }
+  | {
+      status: "bootstrapped";
+      chainId: string;
+      childJobId: string;
+      sliceId: string;
+      summary: string;
+      reportPaths: JobReportPaths;
+      root: JobRecord;
+      child: JobRecord;
+    };
+
+export interface WriteChainBootstrapDependencies {
+  planSliceManifest?: typeof planSliceManifest;
+  captureRepositoryFingerprint?: typeof captureRepositoryFingerprint;
+  createChildJob?: (cwd: string, input: CreateJobInput) => JobRecord;
+  spawnJobSupervisor?: typeof spawnJobSupervisor;
+  updateRoot?: typeof updateJobAuthoritative;
+  writeSliceManifestArtifact?: typeof writeSliceManifestArtifact;
+  createJobChainFromManifest?: typeof createJobChainFromManifest;
+  markSliceRunning?: typeof markSliceRunning;
+  selectNextReadySlice?: typeof selectNextReadySlice;
+}
+
+export function shouldBootstrapWriteJobChain(job: JobRecord): boolean {
+  if (job.parentJobId || job.sliceId) {
+    return false;
+  }
+  if (isChainOrchestratorRoot(job)) {
+    return false;
+  }
+  if (job.kind === "implement") {
+    const parsed = ImplementRequestSchema.safeParse(job.request);
+    if (!parsed.success) return false;
+    return isBootstrapBatchMode(parsed.data.batchMode);
+  }
+  if (job.kind === "compose") {
+    const parsed = ComposeRequestSchema.safeParse(job.request);
+    if (!parsed.success) return false;
+    const workflow = getComposeWorkflow(parsed.data.workflow);
+    if (!workflow.writesAllowed) return false;
+    return isBootstrapBatchMode(parsed.data.batchMode);
+  }
+  return false;
+}
+
+function isBootstrapBatchMode(batchMode: BatchMode | undefined): boolean {
+  return batchMode === "auto" || batchMode === "single" || batchMode === "sliced";
+}
+
+export async function bootstrapWriteJobChain(
+  job: JobRecord,
+  deps: WriteChainBootstrapDependencies = {},
+  signal?: AbortSignal
+): Promise<WriteChainBootstrapResult> {
+  if (!shouldBootstrapWriteJobChain(job)) {
+    return { status: "skipped" };
+  }
+
+  const plan = resolveChainRootPlanInput(job);
+  if (!plan) {
+    return { status: "skipped" };
+  }
+
+  const chainId = `chain-${job.id}`;
+  const captureFingerprint = deps.captureRepositoryFingerprint ?? captureRepositoryFingerprint;
+  const repositoryFingerprint = await captureFingerprint(job.cwd, []);
+  signal?.throwIfAborted();
+
+  const planManifest = deps.planSliceManifest ?? planSliceManifest;
+  const planned = await planManifest({
+    cwd: job.cwd,
+    chainId,
+    objective: plan.objective,
+    batchMode: plan.batchMode,
+    acceptance: plan.acceptance,
+    legacyVerification: plan.legacyVerification,
+    repositoryFingerprint,
+    signal
+  });
+  signal?.throwIfAborted();
+
+  if (!planned.ok) {
+    return {
+      status: "failed",
+      errorCode: "slice_plan_invalid",
+      reason: planned.reason
+    };
+  }
+
+  const writeManifest = deps.writeSliceManifestArtifact ?? writeSliceManifestArtifact;
+  const createChain = deps.createJobChainFromManifest ?? createJobChainFromManifest;
+  const pickReady = deps.selectNextReadySlice ?? selectNextReadySlice;
+  const markRunning = deps.markSliceRunning ?? markSliceRunning;
+  const updateRoot = deps.updateRoot ?? updateJobAuthoritative;
+  const createChild = deps.createChildJob ?? ((cwd, input) => createJobStore(cwd).create(input));
+  const spawnSupervisor = deps.spawnJobSupervisor ?? spawnJobSupervisor;
+
+  const manifestPath = writeManifest({
+    cwd: job.cwd,
+    rootJobId: job.id,
+    manifest: planned.manifest
+  });
+  const chain = createChain({
+    cwd: job.cwd,
+    rootJobId: job.id,
+    manifest: planned.manifest,
+    manifestPath
+  });
+  const slice = pickReady(planned.manifest, chain);
+  if (!slice) {
+    return {
+      status: "failed",
+      errorCode: "slice_plan_invalid",
+      reason: "Slice plan produced no dependency-ready slice to start."
+    };
+  }
+
+  const childRequest = buildSliceChildRequest(job, plan, slice);
+  const child = createChild(job.cwd, {
+    kind: job.kind,
+    task: slice.objective,
+    request: childRequest,
+    parentJobId: job.id,
+    chainId: planned.manifest.chainId,
+    sliceId: slice.id
+    // notificationTarget omitted — children must not notify
+  });
+  spawnSupervisor(job.cwd);
+  markRunning(job.cwd, planned.manifest.chainId, slice.id, child.id);
+
+  const sliceIndex = planned.manifest.slices.findIndex((entry) => entry.id === slice.id) + 1;
+  const summary = `Executing slice ${sliceIndex}/${planned.manifest.slices.length}: ${slice.title}`;
+  const reportPaths: JobReportPaths = {
+    ...(job.reportPaths ?? {}),
+    slices: manifestPath.replace(/\\/g, "/")
+  };
+  const root = await updateRoot(job.cwd, job.id, {
+    chainId: planned.manifest.chainId,
+    summary,
+    phase: "editing",
+    reportPaths
+  });
+
+  return {
+    status: "bootstrapped",
+    chainId: planned.manifest.chainId,
+    childJobId: child.id,
+    sliceId: slice.id,
+    summary,
+    reportPaths,
+    root,
+    child
+  };
+}
+
+export interface AdvanceJobChainAfterChildResult {
+  root: JobRecord;
+  startedChildId?: string;
+  rootTerminal?: boolean;
+  deliveryCreated?: boolean;
+  ignored?: boolean;
+}
+
+export interface AdvanceJobChainAfterChildDependencies {
+  readJob?: typeof readJob;
+  transitionJob?: typeof transitionJob;
+  updateRoot?: typeof updateJobAuthoritative;
+  createChildJob?: (cwd: string, input: CreateJobInput) => JobRecord;
+  spawnJobSupervisor?: typeof spawnJobSupervisor;
+  markSliceTerminal?: typeof markSliceTerminal;
+  markSliceRunning?: typeof markSliceRunning;
+  markPendingSlicesCancelled?: typeof markPendingSlicesCancelled;
+  selectNextReadySlice?: typeof selectNextReadySlice;
+  readJobChain?: typeof readJobChain;
+  readSliceManifest?: typeof readSliceManifestFromChain;
+  writeRootCheckpoint?: typeof refreshRootChainCheckpoint;
+}
+
+/**
+ * After a chain child reaches a durable terminal status: mark the slice, aggregate
+ * onto the root, then either start the next ready slice (null notify), finalize the
+ * root as completed, or mirror attention onto the root (root-only notification).
+ * Cancelled / cancel-requested roots never spawn further slices.
+ */
+export async function advanceJobChainAfterChild(input: {
+  cwd: string;
+  child: JobRecord;
+}, deps: AdvanceJobChainAfterChildDependencies = {}): Promise<AdvanceJobChainAfterChildResult> {
+  const child = input.child;
+  if (!isChainSliceChild(child)) {
+    return { root: child, ignored: true };
+  }
+
+  const sliceState = mapChildStatusToSliceState(child.status);
+  if (!sliceState) {
+    return { root: child, ignored: true };
+  }
+
+  const loadJob = deps.readJob ?? readJob;
+  const root = loadJob(input.cwd, child.parentJobId!);
+  if (!root) {
+    throw new Error(`Chain root job "${child.parentJobId}" was not found.`);
+  }
+
+  const loadChain = deps.readJobChain ?? readJobChain;
+  const chainBefore = loadChain(input.cwd, child.chainId!);
+  if (!chainBefore) {
+    throw new Error(`Job chain "${child.chainId}" was not found.`);
+  }
+
+  const priorState = chainBefore.sliceStates[child.sliceId!];
+  if (priorState && priorState !== "pending" && priorState !== "running") {
+    return {
+      root,
+      rootTerminal: isTerminalJobStatus(root.status),
+      ignored: true
+    };
+  }
+
+  const markTerminal = deps.markSliceTerminal ?? markSliceTerminal;
+  const chain = markTerminal(input.cwd, child.chainId!, child.sliceId!, sliceState);
+
+  const changedFiles = unionChangedFiles(root.changedFiles, child.changedFiles);
+  const verification = [...root.verification, ...child.verification];
+  const acceptance = mergeAcceptanceSummaries(root.acceptance, child.acceptance);
+  const reportPaths: JobReportPaths = {
+    ...(root.reportPaths ?? {}),
+    ...(child.reportPaths?.markdown ? { markdown: child.reportPaths.markdown } : {}),
+    ...(child.reportPaths?.json ? { json: child.reportPaths.json } : {}),
+    ...(child.reportPaths?.result ? { result: child.reportPaths.result } : {}),
+    ...(child.reportPaths?.diff ? { diff: child.reportPaths.diff } : {}),
+    ...(child.reportPaths?.verification ? { verification: child.reportPaths.verification } : {}),
+    ...(child.reportPaths?.checkpoint ? { checkpoint: child.reportPaths.checkpoint } : {})
+  };
+
+  const writeCheckpoint = deps.writeRootCheckpoint ?? refreshRootChainCheckpoint;
+  await writeCheckpoint({
+    cwd: input.cwd,
+    root: { ...root, changedFiles, verification, acceptance, reportPaths },
+    chain,
+    changedFiles
+  });
+
+  const updateRoot = deps.updateRoot ?? updateJobAuthoritative;
+  const transition = deps.transitionJob ?? transitionJob;
+  const cancelPending = deps.markPendingSlicesCancelled ?? markPendingSlicesCancelled;
+  const freshRoot = loadJob(input.cwd, root.id) ?? root;
+
+  if (!canContinueChainOrchestration(freshRoot)) {
+    cancelPending(input.cwd, chain.chainId);
+    if (freshRoot.status === "running" && freshRoot.cancellationRequestedAt) {
+      const cancelled = await transition(input.cwd, root.id, {
+        status: "cancelled",
+        summary: `Cancelled ${root.id}.`,
+        errorCode: "cancelled",
+        changedFiles,
+        verification,
+        ...(acceptance ? { acceptance } : {}),
+        reportPaths
+      });
+      return {
+        root: cancelled.job,
+        rootTerminal: true,
+        deliveryCreated: cancelled.deliveryCreated
+      };
+    }
+    return {
+      root: freshRoot,
+      rootTerminal: isTerminalJobStatus(freshRoot.status),
+      ignored: true
+    };
+  }
+
+  if (sliceState !== "completed") {
+    if (sliceState === "cancelled") {
+      cancelPending(input.cwd, chain.chainId);
+    }
+    const attention = buildRootAttentionTransition({
+      child,
+      sliceState,
+      changedFiles,
+      verification,
+      acceptance,
+      reportPaths
+    });
+    const result = await transition(input.cwd, root.id, attention);
+    return {
+      root: result.job,
+      rootTerminal: true,
+      deliveryCreated: result.deliveryCreated
+    };
+  }
+
+  return startNextReadySliceOrFinalizeRoot({
+    cwd: input.cwd,
+    root: { ...freshRoot, changedFiles, verification, acceptance, reportPaths },
+    chain,
+    changedFiles,
+    verification,
+    acceptance,
+    reportPaths,
+    deps: {
+      ...deps,
+      readJob: loadJob,
+      transitionJob: transition,
+      updateRoot,
+      markPendingSlicesCancelled: cancelPending
+    }
+  });
+}
+
+/**
+ * Crash-recovery / orphan continuation: when the orchestrator root is still running,
+ * no slice is live, and either a ready pending slice exists or every slice completed,
+ * start the next child or finalize the root.
+ */
+export async function continueJobChainOrchestration(input: {
+  cwd: string;
+  chain: JobChainRecord;
+}, deps: AdvanceJobChainAfterChildDependencies = {}): Promise<AdvanceJobChainAfterChildResult> {
+  const loadJob = deps.readJob ?? readJob;
+  const loadChain = deps.readJobChain ?? readJobChain;
+  const chain = loadChain(input.cwd, input.chain.chainId) ?? input.chain;
+  const root = loadJob(input.cwd, chain.rootJobId);
+  if (!root || !isChainOrchestratorRoot(root)) {
+    return { root: root ?? ({ id: chain.rootJobId } as JobRecord), ignored: true };
+  }
+
+  const cancelPending = deps.markPendingSlicesCancelled ?? markPendingSlicesCancelled;
+  if (!canContinueChainOrchestration(root)) {
+    cancelPending(input.cwd, chain.chainId);
+    return {
+      root,
+      rootTerminal: isTerminalJobStatus(root.status),
+      ignored: true
+    };
+  }
+
+  if (Object.values(chain.sliceStates).some((state) => state === "running")) {
+    return { root, ignored: true };
+  }
+
+  return startNextReadySliceOrFinalizeRoot({
+    cwd: input.cwd,
+    root,
+    chain,
+    changedFiles: root.changedFiles,
+    verification: root.verification,
+    acceptance: root.acceptance,
+    reportPaths: root.reportPaths ?? {},
+    deps
+  });
+}
+
+async function startNextReadySliceOrFinalizeRoot(input: {
+  cwd: string;
+  root: JobRecord;
+  chain: JobChainRecord;
+  changedFiles: string[];
+  verification: JobVerification[];
+  acceptance: JobAcceptanceSummary | undefined;
+  reportPaths: JobReportPaths;
+  deps: AdvanceJobChainAfterChildDependencies;
+}): Promise<AdvanceJobChainAfterChildResult> {
+  const { cwd, root, chain, changedFiles, verification, acceptance, reportPaths, deps } = input;
+  const transition = deps.transitionJob ?? transitionJob;
+  const updateRoot = deps.updateRoot ?? updateJobAuthoritative;
+  const loadManifest = deps.readSliceManifest ?? readSliceManifestFromChain;
+  const pickReady = deps.selectNextReadySlice ?? selectNextReadySlice;
+  const cancelPending = deps.markPendingSlicesCancelled ?? markPendingSlicesCancelled;
+  const loadJob = deps.readJob ?? readJob;
+
+  const freshRoot = loadJob(cwd, root.id) ?? root;
+  if (!canContinueChainOrchestration(freshRoot)) {
+    cancelPending(cwd, chain.chainId);
+    return {
+      root: freshRoot,
+      rootTerminal: isTerminalJobStatus(freshRoot.status),
+      ignored: true
+    };
+  }
+
+  const manifest = loadManifest(cwd, chain);
+  if (!manifest) {
+    const failed = await transition(cwd, root.id, {
+      status: "failed",
+      summary: "Slice chain manifest is missing after a completed child.",
+      error: "Slice chain manifest is missing after a completed child.",
+      errorCode: "slice_failed",
+      changedFiles,
+      verification,
+      ...(acceptance ? { acceptance } : {}),
+      reportPaths
+    });
+    return {
+      root: failed.job,
+      rootTerminal: true,
+      deliveryCreated: failed.deliveryCreated
+    };
+  }
+
+  const nextSlice = pickReady(manifest, chain);
+  if (nextSlice) {
+    const plan = resolveChainRootPlanInput(freshRoot) ?? resolveChainRootPlanInputFallback(freshRoot);
+    if (!plan) {
+      const failed = await transition(cwd, root.id, {
+        status: "failed",
+        summary: "Unable to rebuild slice child request for the next chain slice.",
+        error: "Unable to rebuild slice child request for the next chain slice.",
+        errorCode: "slice_failed",
+        changedFiles,
+        verification,
+        ...(acceptance ? { acceptance } : {}),
+        reportPaths
+      });
+      return {
+        root: failed.job,
+        rootTerminal: true,
+        deliveryCreated: failed.deliveryCreated
+      };
+    }
+
+    const createChild = deps.createChildJob ?? ((createCwd, createInput) => createJobStore(createCwd).create(createInput));
+    const spawnSupervisor = deps.spawnJobSupervisor ?? spawnJobSupervisor;
+    const markRunning = deps.markSliceRunning ?? markSliceRunning;
+
+    const childRequest = buildSliceChildRequest(freshRoot, plan, nextSlice);
+    const nextChild = createChild(cwd, {
+      kind: freshRoot.kind,
+      task: nextSlice.objective,
+      request: childRequest,
+      parentJobId: freshRoot.id,
+      chainId: chain.chainId,
+      sliceId: nextSlice.id
+      // notificationTarget omitted — children must not notify
+    });
+    spawnSupervisor(cwd);
+    markRunning(cwd, chain.chainId, nextSlice.id, nextChild.id);
+
+    const sliceIndex = manifest.slices.findIndex((entry) => entry.id === nextSlice.id) + 1;
+    const summary =
+      `Executing slice ${sliceIndex}/${manifest.slices.length}: ${nextSlice.title}`;
+    const updatedRoot = await updateRoot(cwd, root.id, {
+      changedFiles,
+      verification,
+      ...(acceptance ? { acceptance } : {}),
+      reportPaths,
+      summary,
+      phase: "editing"
+    });
+
+    return {
+      root: updatedRoot,
+      startedChildId: nextChild.id,
+      rootTerminal: false,
+      deliveryCreated: false
+    };
+  }
+
+  if (Object.values(chain.sliceStates).some((state) => state === "pending")) {
+    return { root: freshRoot, ignored: true };
+  }
+
+  const allCompleted = manifest.slices.every(
+    (slice) => chain.sliceStates[slice.id] === "completed"
+  );
+  if (!allCompleted) {
+    return { root: freshRoot, ignored: true };
+  }
+
+  const completed = await transition(cwd, root.id, {
+    status: "completed",
+    summary: `Completed ${chain.completedSliceIds.length} slice(s).`,
+    changedFiles,
+    verification,
+    ...(acceptance ? { acceptance } : {}),
+    reportPaths
+  });
+
+  return {
+    root: completed.job,
+    rootTerminal: true,
+    deliveryCreated: completed.deliveryCreated
+  };
+}
+
+function canContinueChainOrchestration(root: JobRecord): boolean {
+  return root.status === "running" && !root.cancellationRequestedAt;
+}
+
+function isTerminalJobStatus(status: JobStatus): boolean {
+  return status !== "queued" && status !== "running";
+}
+
+function mergeAcceptanceSummaries(
+  root: JobAcceptanceSummary | undefined,
+  child: JobAcceptanceSummary | undefined
+): JobAcceptanceSummary | undefined {
+  if (!root && !child) return undefined;
+  if (!root) return child;
+  if (!child) return root;
+  return {
+    stages: [...root.stages, ...child.stages],
+    ...(child.failedStage !== undefined
+      ? { failedStage: child.failedStage }
+      : root.failedStage !== undefined
+        ? { failedStage: root.failedStage }
+        : {}),
+    ...(child.failedCommand !== undefined
+      ? { failedCommand: child.failedCommand }
+      : root.failedCommand !== undefined
+        ? { failedCommand: root.failedCommand }
+        : {}),
+    ...(child.failedTests !== undefined
+      ? { failedTests: child.failedTests }
+      : root.failedTests !== undefined
+        ? { failedTests: root.failedTests }
+        : {}),
+    ...(child.suggestion !== undefined
+      ? { suggestion: child.suggestion }
+      : root.suggestion !== undefined
+        ? { suggestion: root.suggestion }
+        : {})
+  };
+}
+
+function buildRootAttentionTransition(input: {
+  child: JobRecord;
+  sliceState: Exclude<SliceRuntimeState, "pending" | "running">;
+  changedFiles: string[];
+  verification: JobVerification[];
+  acceptance: JobAcceptanceSummary | undefined;
+  reportPaths: JobReportPaths;
+}): JobTransition {
+  const sliceLabel = input.child.sliceId ?? "slice";
+  const base = {
+    changedFiles: input.changedFiles,
+    verification: input.verification,
+    ...(input.acceptance ? { acceptance: input.acceptance } : {}),
+    reportPaths: input.reportPaths
+  };
+
+  if (input.sliceState === "failed") {
+    return {
+      ...base,
+      status: "failed",
+      summary: `Slice ${sliceLabel} failed.`,
+      error: input.child.error ?? `Slice ${sliceLabel} failed.`,
+      errorCode: "slice_failed"
+    };
+  }
+
+  if (input.sliceState === "stalled") {
+    return {
+      ...base,
+      status: "stalled",
+      summary: input.child.summary ?? `Slice ${sliceLabel} stalled.`,
+      error: input.child.error ?? input.child.summary ?? `Slice ${sliceLabel} stalled.`,
+      ...(input.child.errorCode ? { errorCode: input.child.errorCode } : {})
+    };
+  }
+
+  if (input.sliceState === "needs_input") {
+    return {
+      ...base,
+      status: "needs_input",
+      summary: input.child.summary ?? `Slice ${sliceLabel} needs input.`,
+      ...(input.child.error ? { error: input.child.error } : {}),
+      ...(input.child.errorCode ? { errorCode: input.child.errorCode } : {})
+    };
+  }
+
+  if (input.sliceState === "blocked") {
+    return {
+      ...base,
+      status: "blocked",
+      summary: input.child.summary ?? `Slice ${sliceLabel} is blocked.`,
+      error: input.child.error ?? input.child.summary ?? `Slice ${sliceLabel} is blocked.`,
+      ...(input.child.errorCode ? { errorCode: input.child.errorCode } : {})
+    };
+  }
+
+  if (input.sliceState === "timeout") {
+    return {
+      ...base,
+      status: "timeout",
+      summary: input.child.summary ?? `Slice ${sliceLabel} timed out.`,
+      error: input.child.error ?? input.child.summary ?? `Slice ${sliceLabel} timed out.`,
+      ...(input.child.errorCode ? { errorCode: input.child.errorCode } : { errorCode: "timeout" })
+    };
+  }
+
+  return {
+    ...base,
+    status: "cancelled",
+    summary: input.child.summary ?? `Slice ${sliceLabel} was cancelled.`,
+    ...(input.child.errorCode ? { errorCode: input.child.errorCode } : { errorCode: "cancelled" })
+  };
+}
+
+async function refreshRootChainCheckpoint(input: {
+  cwd: string;
+  root: JobRecord;
+  chain: JobChainRecord;
+  changedFiles: string[];
+}): Promise<void> {
+  try {
+    const reportDir = path.join(input.cwd, ".codex-mimo", "reports");
+    const checkpointPath = input.root.reportPaths?.checkpoint
+      ?? path.join(reportDir, `${input.root.id}.checkpoint.json`);
+    const existing = readJobCheckpoint(checkpointPath);
+    if (existing) {
+      const next = {
+        ...existing,
+        chainId: input.chain.chainId,
+        changedFiles: input.changedFiles,
+        completedSlices: [...input.chain.completedSliceIds],
+        acceptance: input.root.acceptance ?? existing.acceptance,
+        artifactPaths: {
+          ...existing.artifactPaths,
+          ...(input.root.reportPaths ?? {})
+        }
+      };
+      fs.mkdirSync(path.dirname(checkpointPath), { recursive: true });
+      const temporary =
+        `${checkpointPath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+      try {
+        fs.writeFileSync(temporary, JSON.stringify(next, null, 2), "utf8");
+        renameWithWindowsRetry(temporary, checkpointPath);
+      } finally {
+        fs.rmSync(temporary, { force: true });
+      }
+      return;
+    }
+
+    await writeJobCheckpoint({
+      job: {
+        ...input.root,
+        chainId: input.chain.chainId,
+        changedFiles: input.changedFiles
+      },
+      objective: input.root.task,
+      changedFiles: input.changedFiles,
+      acceptance: input.root.acceptance,
+      existingReportPaths: input.root.reportPaths,
+      completedSlices: [...input.chain.completedSliceIds]
+    });
+  } catch {
+    // Root checkpoint refresh is best-effort; chain/job records remain authoritative.
+  }
+}
+
+function resolveChainRootPlanInputFallback(job: JobRecord): {
+  objective: string;
+  batchMode: BatchMode;
+  acceptance?: DevelopmentAcceptanceInput;
+  legacyVerification?: string[];
+  workflow?: ComposeWorkflowName;
+  model?: string;
+  timeoutMs?: number;
+  idleTimeoutMs?: number;
+  progressWarningMs?: number;
+  progressTimeoutMs?: number;
+} | null {
+  if (typeof job.request !== "object" || job.request === null) return null;
+  const request = job.request as Record<string, unknown>;
+  return {
+    objective: job.task,
+    batchMode: "single",
+    ...(typeof request.model === "string" ? { model: request.model } : {}),
+    ...(typeof request.timeoutMs === "number" ? { timeoutMs: request.timeoutMs } : {}),
+    ...(typeof request.idleTimeoutMs === "number" ? { idleTimeoutMs: request.idleTimeoutMs } : {}),
+    ...(typeof request.progressWarningMs === "number"
+      ? { progressWarningMs: request.progressWarningMs }
+      : {}),
+    ...(typeof request.progressTimeoutMs === "number"
+      ? { progressTimeoutMs: request.progressTimeoutMs }
+      : {}),
+    ...(typeof request.workflow === "string"
+      ? { workflow: request.workflow as ComposeWorkflowName }
+      : {}),
+    ...(request.acceptance && typeof request.acceptance === "object"
+      ? { acceptance: request.acceptance as DevelopmentAcceptanceInput }
+      : {})
+  };
+}
+
+function resolveChainRootPlanInput(job: JobRecord): {
+  objective: string;
+  batchMode: BatchMode;
+  acceptance?: DevelopmentAcceptanceInput;
+  legacyVerification?: string[];
+  workflow?: ComposeWorkflowName;
+  model?: string;
+  timeoutMs?: number;
+  idleTimeoutMs?: number;
+  progressWarningMs?: number;
+  progressTimeoutMs?: number;
+} | null {
+  if (job.kind === "implement") {
+    const parsed = ImplementRequestSchema.safeParse(job.request);
+    if (!parsed.success || !isBootstrapBatchMode(parsed.data.batchMode)) return null;
+    return {
+      objective: parsed.data.task,
+      batchMode: parsed.data.batchMode,
+      acceptance: parsed.data.acceptance,
+      model: parsed.data.model,
+      timeoutMs: parsed.data.timeoutMs,
+      idleTimeoutMs: parsed.data.idleTimeoutMs,
+      progressWarningMs: parsed.data.progressWarningMs,
+      progressTimeoutMs: parsed.data.progressTimeoutMs
+    };
+  }
+  if (job.kind === "compose") {
+    const parsed = ComposeRequestSchema.safeParse(job.request);
+    if (!parsed.success || !isBootstrapBatchMode(parsed.data.batchMode)) return null;
+    const workflow = getComposeWorkflow(parsed.data.workflow);
+    if (!workflow.writesAllowed) return null;
+    return {
+      objective: parsed.data.task?.trim() || job.task,
+      batchMode: parsed.data.batchMode ?? "auto",
+      acceptance: parsed.data.acceptance,
+      legacyVerification: parsed.data.verification,
+      workflow: parsed.data.workflow,
+      model: parsed.data.model,
+      timeoutMs: parsed.data.timeoutMs,
+      idleTimeoutMs: parsed.data.idleTimeoutMs,
+      progressWarningMs: parsed.data.progressWarningMs,
+      progressTimeoutMs: parsed.data.progressTimeoutMs
+    };
+  }
+  return null;
+}
+
+function buildSliceChildRequest(
+  root: JobRecord,
+  plan: NonNullable<ReturnType<typeof resolveChainRootPlanInput>>,
+  slice: SliceDefinition
+): unknown {
+  const common = {
+    cwd: root.cwd,
+    ...(plan.model ? { model: plan.model } : {}),
+    ...(plan.timeoutMs !== undefined ? { timeoutMs: plan.timeoutMs } : {}),
+    ...(plan.idleTimeoutMs !== undefined ? { idleTimeoutMs: plan.idleTimeoutMs } : {}),
+    ...(plan.progressWarningMs !== undefined ? { progressWarningMs: plan.progressWarningMs } : {}),
+    ...(plan.progressTimeoutMs !== undefined ? { progressTimeoutMs: plan.progressTimeoutMs } : {}),
+    acceptance: slice.acceptance,
+    allowedPaths: slice.allowedPaths,
+    // Prevent nested chain bootstrap on children.
+    batchMode: "single" as const
+  };
+
+  if (root.kind === "implement") {
+    return {
+      ...common,
+      task: slice.objective,
+      allowWrite: true as const
+    };
+  }
+
+  return {
+    ...common,
+    workflow: plan.workflow,
+    task: slice.objective
+  };
+}
+
+export { isChainOrchestratorRoot };

@@ -1,3 +1,5 @@
+import type { JobCheckpoint } from "./job-checkpoint.js";
+
 export function planPrompt(task: string): string {
   return [
     "Objective:",
@@ -51,6 +53,82 @@ export function reviewPrompt(diffSummary: string): string {
   ].join("\n");
 }
 
+export function slicePlanningPrompt(objective: string): string {
+  const example = JSON.stringify(
+    {
+      version: 1,
+      chainId: "chain-example",
+      objective: "Implement the feature",
+      repositoryFingerprint: "fp-example",
+      slices: [
+        {
+          id: "slice-1",
+          title: "Add schema module",
+          objective: "Add only the schema module",
+          dependsOn: [],
+          contextFiles: ["src/schema.ts"],
+          allowedPaths: ["src/schema.ts"],
+          acceptance: {
+            build: ["npm run build"],
+            test: ["npm test -- schema.test.ts"]
+          }
+        }
+      ]
+    },
+    null,
+    2
+  );
+  return [
+    "Objective:",
+    objective,
+    "",
+    "Execute this objective now. Do not ask what the task is; the Objective above is the task.",
+    "",
+    "You are being invoked by Codex-MiMo as a read-only slice planning agent.",
+    "",
+    "Rules:",
+    "- Do not edit files.",
+    "- Do not run commands that modify the workspace.",
+    "- Decompose the objective into one to eight bounded, sequential slices.",
+    "- Each slice must have one explicit deliverable with bounded allowedPaths.",
+    "- Each slice must include acceptance with build disposition and targeted test commands.",
+    "- Prefer narrow slices such as \"only add the schema\" rather than grouping an entire feature.",
+    "- Your final message must include one JSON SliceManifest envelope.",
+    "",
+    "Required final JSON envelope:",
+    "```json",
+    example,
+    "```"
+  ].join("\n");
+}
+
+export function diffReviewPrompt(diffPath: string): string {
+  const example = JSON.stringify({ verdict: "pass", findings: [] }, null, 2);
+  return [
+    "Objective:",
+    `Review the implementation diff attached as @${diffPath} for correctness, regressions, security issues, and missing test coverage.`,
+    "",
+    "Execute this objective now. Do not ask what the task is; the Objective above is the task.",
+    "",
+    "You are being invoked by Codex-MiMo as a read-only diff review agent for development acceptance.",
+    "",
+    "Rules:",
+    "- Do not edit files.",
+    "- Do not run commands that modify the workspace.",
+    "- Prioritize correctness bugs, regressions, security, and missing tests.",
+    "- Give file and line references when available.",
+    "- Your final message must include one JSON verdict envelope.",
+    "",
+    "Required final JSON envelope:",
+    "```json",
+    example,
+    "```",
+    "",
+    "Finding severities: blocker, major, minor, info.",
+    "Use verdict \"fail\" when any blocker or major finding exists."
+  ].join("\n");
+}
+
 export function resumePrompt(task: string, writesAllowed: boolean): string {
   return [
     "Objective:",
@@ -71,5 +149,41 @@ export function resumePrompt(task: string, writesAllowed: boolean): string {
           "- Continue only the parent session's analysis, planning, or review work."
         ]),
     "- Return the result and any remaining risks."
+  ].join("\n");
+}
+
+export function resumeContinuationPrompt(input: {
+  objective: string;
+  checkpoint: JobCheckpoint;
+  task?: string;
+}): string {
+  return [
+    "Objective:",
+    input.task?.trim() || input.objective,
+    "",
+    "Continue the existing MiMoCode job from the durable checkpoint. Do not restart discovery.",
+    "",
+    "Rules:",
+    "- Do not perform a broad project scan.",
+    "- Do not repeat completed checklist items or completed slices.",
+    "- Do not rerun still-valid passed gates listed in the checkpoint.",
+    "- Inspect only checkpoint contextFiles and changedFiles as needed.",
+    "- Prefer the first remainingChecklist item.",
+    "",
+    "Checkpoint:",
+    "```json",
+    JSON.stringify({
+      jobId: input.checkpoint.jobId,
+      chainId: input.checkpoint.chainId,
+      sessionId: input.checkpoint.sessionId,
+      contextFiles: input.checkpoint.contextFiles,
+      changedFiles: input.checkpoint.changedFiles,
+      completedSlices: input.checkpoint.completedSlices,
+      completedChecklist: input.checkpoint.completedChecklist,
+      remainingChecklist: input.checkpoint.remainingChecklist,
+      lastCommand: input.checkpoint.lastCommand,
+      acceptance: input.checkpoint.acceptance
+    }, null, 2),
+    "```"
   ].join("\n");
 }
