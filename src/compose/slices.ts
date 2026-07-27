@@ -2,6 +2,8 @@ import { normalizeDevelopmentAcceptancePlan } from "./acceptance.js";
 import { extractFinalText, parseMimoJsonLines } from "./events.js";
 import { slicePlanningPrompt } from "../core/prompt.js";
 import type { BatchMode } from "../core/jobs.js";
+import { SINGLE_MODE_ALLOWED_PATHS_REQUIRED_MESSAGE } from "../core/safety-contracts.js";
+import { validateAllowedPathPattern } from "../core/path-scope.js";
 import { preparePromptTransport } from "../mimo/prompt-transport.js";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
 import { runMimoCliStreaming } from "../mimo/streaming-runner.js";
@@ -114,6 +116,16 @@ function validateRepositoryRelativePaths(paths: string[], fieldName: string): st
   for (const pathValue of paths) {
     if (!isRepositoryRelativePath(pathValue)) {
       return `${fieldName} must contain repository-relative paths without absolute segments or ".." traversal (${pathValue}).`;
+    }
+  }
+  return null;
+}
+
+function validateAllowedPathPatterns(paths: string[], fieldName: string): string | null {
+  for (const pathValue of paths) {
+    const patternError = validateAllowedPathPattern(pathValue);
+    if (patternError) {
+      return `${fieldName} ${patternError} (${pathValue}).`;
     }
   }
   return null;
@@ -235,7 +247,7 @@ export function validateSliceManifest(
       return invalid(`Slice "${slice.id}" must declare at least one allowedPaths entry.`);
     }
 
-    const allowedPathError = validateRepositoryRelativePaths(slice.allowedPaths, `Slice "${slice.id}" allowedPaths`);
+    const allowedPathError = validateAllowedPathPatterns(slice.allowedPaths, `Slice "${slice.id}" allowedPaths`);
     if (allowedPathError) {
       return invalid(allowedPathError);
     }
@@ -347,6 +359,7 @@ export async function planSliceManifest(input: {
   acceptance?: DevelopmentAcceptanceInput;
   legacyVerification?: string[];
   repositoryFingerprint: string;
+  allowedPaths?: string[];
   signal?: AbortSignal;
   runMimo?: typeof runMimoCliStreaming;
 }): Promise<SliceManifestValidation> {
@@ -362,6 +375,7 @@ export async function planSliceManifest(input: {
         objective: input.objective,
         repositoryFingerprint: input.repositoryFingerprint,
         acceptance,
+        allowedPaths: input.allowedPaths,
         cwd: input.cwd
       });
       return { ok: true, manifest };
@@ -405,6 +419,10 @@ export function materializeSingleSliceManifest(input: {
   contextFiles?: string[];
   cwd?: string;
 }): SliceManifest {
+  if (!input.allowedPaths || input.allowedPaths.length === 0) {
+    throw new Error(SINGLE_MODE_ALLOWED_PATHS_REQUIRED_MESSAGE);
+  }
+
   const manifest: SliceManifest = {
     version: 1,
     chainId: input.chainId,
@@ -417,7 +435,7 @@ export function materializeSingleSliceManifest(input: {
         objective: input.objective,
         dependsOn: [],
         contextFiles: input.contextFiles ?? [],
-        allowedPaths: input.allowedPaths ?? ["**"],
+        allowedPaths: input.allowedPaths,
         acceptance: input.acceptance
       }
     ]

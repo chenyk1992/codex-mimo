@@ -1220,6 +1220,7 @@ export async function bootstrapWriteJobChain(
     acceptance: plan.acceptance,
     legacyVerification: plan.legacyVerification,
     repositoryFingerprint,
+    ...(plan.allowedPaths ? { allowedPaths: plan.allowedPaths } : {}),
     signal
   });
   signal?.throwIfAborted();
@@ -1835,6 +1836,7 @@ function resolveChainRootPlanInput(job: JobRecord): {
   batchMode: BatchMode;
   acceptance?: DevelopmentAcceptanceInput;
   legacyVerification?: string[];
+  allowedPaths?: string[];
   workflow?: ComposeWorkflowName;
   model?: string;
   timeoutMs?: number;
@@ -1849,6 +1851,7 @@ function resolveChainRootPlanInput(job: JobRecord): {
       objective: parsed.data.task,
       batchMode: parsed.data.batchMode,
       acceptance: parsed.data.acceptance,
+      ...(parsed.data.allowedPaths ? { allowedPaths: parsed.data.allowedPaths } : {}),
       model: parsed.data.model,
       timeoutMs: parsed.data.timeoutMs,
       idleTimeoutMs: parsed.data.idleTimeoutMs,
@@ -1866,6 +1869,7 @@ function resolveChainRootPlanInput(job: JobRecord): {
       batchMode: parsed.data.batchMode ?? "auto",
       acceptance: parsed.data.acceptance,
       legacyVerification: parsed.data.verification,
+      ...(parsed.data.allowedPaths ? { allowedPaths: parsed.data.allowedPaths } : {}),
       workflow: parsed.data.workflow,
       model: parsed.data.model,
       timeoutMs: parsed.data.timeoutMs,

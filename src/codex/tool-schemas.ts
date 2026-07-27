@@ -1,9 +1,12 @@
 import { z } from "zod";
 import {
   COMPOSE_WORKFLOW_NAMES,
+  getComposeWorkflow,
   normalizeComposeBatchMode,
   validateComposeWorkflowInput
 } from "../compose/workflow.js";
+import { SINGLE_MODE_ALLOWED_PATHS_REQUIRED_MESSAGE } from "../core/safety-contracts.js";
+import { validateAllowedPathPattern } from "../core/path-scope.js";
 
 const CodexNotifySchema = z.object({
   type: z.literal("codex"),
@@ -36,16 +39,48 @@ export const DevelopmentAcceptanceSchema = z.object({
   diffCheck: z.boolean().optional()
 }).strict();
 
+export const AllowedPathsSchema = z.array(z.string().min(1));
+
+function collectAllowedPathsIssues(
+  allowedPaths: string[] | undefined,
+  options: { required: boolean }
+): string[] {
+  const issues: string[] = [];
+  if (!allowedPaths || allowedPaths.length === 0) {
+    if (options.required) {
+      issues.push(SINGLE_MODE_ALLOWED_PATHS_REQUIRED_MESSAGE);
+    }
+    return issues;
+  }
+
+  for (const pattern of allowedPaths) {
+    const error = validateAllowedPathPattern(pattern);
+    if (error) {
+      issues.push(`allowedPaths: ${error}`);
+    }
+  }
+  return issues;
+}
+
 export const PlanInput = JobOptionsSchema.extend({
   task: z.string().min(1)
 }).strict();
 
-export const ImplementInput = JobOptionsSchema.extend({
+export const ImplementInputBase = JobOptionsSchema.extend({
   task: z.string().min(1),
   allowWrite: z.boolean(),
   acceptance: DevelopmentAcceptanceSchema.optional(),
-  batchMode: BatchModeSchema.default("auto")
+  batchMode: BatchModeSchema.default("auto"),
+  allowedPaths: AllowedPathsSchema.optional()
 }).strict();
+
+export const ImplementInput = ImplementInputBase.superRefine((input, context) => {
+  for (const message of collectAllowedPathsIssues(input.allowedPaths, {
+    required: input.batchMode === "single"
+  })) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message });
+  }
+});
 
 export const ReviewInput = JobOptionsSchema.extend({
   base: z.string().min(1).default("HEAD")
@@ -82,7 +117,8 @@ export const ComposeInputShape = {
     "Executable verification commands, not natural-language acceptance criteria"
   ),
   reportDir: z.string().min(1).optional(),
-  batchMode: BatchModeSchema.optional()
+  batchMode: BatchModeSchema.optional(),
+  allowedPaths: AllowedPathsSchema.optional()
 };
 
 export const ComposeInput = z.object(ComposeInputShape).strict();
@@ -90,6 +126,21 @@ export const ComposeInput = z.object(ComposeInputShape).strict();
 const ComposeInputWithWorkflowRequirements = ComposeInput.superRefine((input, context) => {
   for (const message of validateComposeWorkflowInput(input)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message });
+  }
+
+  const workflow = getComposeWorkflow(input.workflow);
+  if (!workflow.writesAllowed && input.allowedPaths !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Workflow ${input.workflow} does not accept allowedPaths.`
+    });
+    return;
+  }
+
+  if (workflow.writesAllowed) {
+    for (const message of collectAllowedPathsIssues(input.allowedPaths, { required: false })) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message });
+    }
   }
 });
 

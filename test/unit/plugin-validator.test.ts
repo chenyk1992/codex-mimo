@@ -88,7 +88,8 @@ const WORK_SCHEMAS: Record<string, Record<string, unknown>> = {
     task: string,
     allowWrite: { type: "boolean" },
     acceptance,
-    batchMode: batchModeWithDefault
+    batchMode: batchModeWithDefault,
+    allowedPaths: { type: "array", items: string }
   }, ["cwd", "task", "allowWrite"]),
   mimo_review: workSchema({ base: { ...string, default: "HEAD" } }, ["cwd"]),
   mimo_fix_ci: workSchema({ file: string, task: string }, ["cwd", "file"]),
@@ -104,7 +105,8 @@ const WORK_SCHEMAS: Record<string, Record<string, unknown>> = {
     acceptance,
     verification,
     reportDir: string,
-    batchMode
+    batchMode,
+    allowedPaths: { type: "array", items: string }
   }, ["cwd", "workflow"])
 };
 

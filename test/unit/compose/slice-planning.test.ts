@@ -135,6 +135,7 @@ describe("planSliceManifest", () => {
       batchMode: "single",
       repositoryFingerprint: "fp-root",
       acceptance: validAcceptance(),
+      allowedPaths: ["src/callback.ts"],
       runMimo
     });
 

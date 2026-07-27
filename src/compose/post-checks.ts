@@ -6,9 +6,12 @@ import type {
   GitHeadSnapshot,
   GitStatusSnapshot
 } from "../git/diff.js";
+import { findOutOfScopePaths, isPathWithinAllowedScope } from "../core/path-scope.js";
 import { extractFinalText, parseMimoJsonLines } from "./events.js";
 import { detectUnacceptedTask } from "../core/job-outcome.js";
 import type { AcceptanceStageResult } from "./acceptance.js";
+
+export { isPathWithinAllowedScope } from "../core/path-scope.js";
 
 export interface DiffAcceptanceInput {
   cwd: string;
@@ -27,10 +30,6 @@ export interface DiffAcceptanceInput {
 }
 
 const ACCIDENTAL_ARTIFACT_PREFIXES = ["node_modules/", ".next/", "dist/"];
-
-function normalizeRepoPath(file: string): string {
-  return file.replace(/\\/g, "/");
-}
 
 function gitArgs(cwd: string, args: string[]): string[] {
   const absolute = path.isAbsolute(cwd) || /^[a-zA-Z]:[\\/]/.test(cwd)
@@ -57,21 +56,11 @@ async function defaultRunGitDiffCheck(
   };
 }
 
-export function isPathWithinAllowedScope(file: string, allowedPaths: string[]): boolean {
-  const normalized = normalizeRepoPath(file);
-  return allowedPaths.some((allowed) => {
-    const normalizedAllowed = normalizeRepoPath(allowed).replace(/\/+$/, "");
-    return (
-      normalized === normalizedAllowed || normalized.startsWith(`${normalizedAllowed}/`)
-    );
-  });
-}
-
 export function findOutOfScopeChangedFiles(changedFiles: string[], allowedPaths: string[]): string[] {
   if (allowedPaths.length === 0) {
     return [];
   }
-  return changedFiles.filter((file) => !isPathWithinAllowedScope(file, allowedPaths));
+  return findOutOfScopePaths(changedFiles, allowedPaths);
 }
 
 export function findAccidentalArtifactFiles(
@@ -79,7 +68,7 @@ export function findAccidentalArtifactFiles(
   allowedPaths?: string[]
 ): string[] {
   return changedFiles.filter((file) => {
-    const normalized = normalizeRepoPath(file);
+    const normalized = file.replace(/\\/g, "/");
     const isArtifact = ACCIDENTAL_ARTIFACT_PREFIXES.some(
       (prefix) => normalized.includes(prefix) || normalized.startsWith(prefix.replace(/\/$/, ""))
     );

@@ -109,7 +109,11 @@ const CANONICAL_WORK_TOOL_SCHEMAS = {
       task: STRING_SCHEMA,
       allowWrite: { type: "boolean" },
       acceptance: ACCEPTANCE_SCHEMA,
-      batchMode: BATCH_MODE_WITH_DEFAULT_SCHEMA
+      batchMode: BATCH_MODE_WITH_DEFAULT_SCHEMA,
+      allowedPaths: {
+        type: "array",
+        items: STRING_SCHEMA
+      }
     },
     ["cwd", "task", "allowWrite"]
   ),
@@ -136,7 +140,11 @@ const CANONICAL_WORK_TOOL_SCHEMAS = {
     acceptance: ACCEPTANCE_SCHEMA,
     verification: VERIFICATION_SCHEMA,
     reportDir: STRING_SCHEMA,
-    batchMode: BATCH_MODE_SCHEMA
+    batchMode: BATCH_MODE_SCHEMA,
+    allowedPaths: {
+      type: "array",
+      items: STRING_SCHEMA
+    }
   }, ["cwd", "workflow"])
 };
 

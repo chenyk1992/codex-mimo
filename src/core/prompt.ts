@@ -91,6 +91,8 @@ export function slicePlanningPrompt(objective: string): string {
     "- Do not run commands that modify the workspace.",
     "- Decompose the objective into one to eight bounded, sequential slices.",
     "- Each slice must have one explicit deliverable with bounded allowedPaths.",
+    "- allowedPaths patterns must be repository-relative and use only: exact files (src/app.ts), directories (src/components), or trailing /** (src/components/**).",
+    "- Do not use repository-wide \"**\", bare globs, absolute paths, or \"..\" traversal in allowedPaths.",
     "- Each slice must include acceptance with build disposition and targeted test commands.",
     "- Prefer narrow slices such as \"only add the schema\" rather than grouping an entire feature.",
     "- Your final message must include one JSON SliceManifest envelope.",

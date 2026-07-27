@@ -4,6 +4,7 @@ import {
   ComposeInputShape,
   FixCiInput,
   ImplementInput,
+  ImplementInputBase,
   JobCancelInput,
   JobEventsInput,
   JobListInput,
@@ -84,12 +85,12 @@ describe("work tool schemas", () => {
 
   it("keeps exactly approved per-tool fields plus common options", () => {
     expect(Object.keys(PlanInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
-    expect(Object.keys(ImplementInput.shape).sort()).toEqual(["acceptance", "allowWrite", "batchMode", "cwd", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
+    expect(Object.keys(ImplementInputBase.shape).sort()).toEqual(["acceptance", "allowWrite", "allowedPaths", "batchMode", "cwd", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
     expect(Object.keys(ReviewInput.shape).sort()).toEqual(["base", "cwd", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "timeoutMs"]);
     expect(Object.keys(FixCiInput.shape).sort()).toEqual(["cwd", "file", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
     expect(Object.keys(ResumeInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "jobId", "model", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
     expect(Object.keys(ComposeInputShape).sort()).toEqual([
-      "acceptance", "batchMode", "cwd", "file", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "reportDir", "since", "task", "timeoutMs", "verification", "workflow"
+      "acceptance", "allowedPaths", "batchMode", "cwd", "file", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "reportDir", "since", "task", "timeoutMs", "verification", "workflow"
     ]);
   });
 
@@ -172,7 +173,8 @@ describe("work tool schemas", () => {
       cwd: "E:/project",
       task: "Build",
       allowWrite: true,
-      batchMode: "single"
+      batchMode: "single",
+      allowedPaths: ["src/app.ts"]
     }).batchMode).toBe("single");
     expect(parseComposeInput({
       cwd: "E:/project",
