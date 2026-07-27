@@ -125,8 +125,8 @@ export async function runVerificationCommands(
         failureKind
       });
     } catch (error) {
+      options.signal?.throwIfAborted();
       if (isAbortError(error)) {
-        options.signal?.throwIfAborted();
         results.push({
           requestedCommand: resolved.requestedCommand,
           command: resolved.executedCommand,

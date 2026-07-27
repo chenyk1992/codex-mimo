@@ -3,7 +3,7 @@ import {
   ComposeInput,
   FixCiInput,
   HealthcheckInput,
-  ImplementInput,
+  ImplementInputBase,
   JobCancelInput,
   JobEventsInput,
   JobListInput,
@@ -40,7 +40,7 @@ describe("MCP work schema registration", () => {
     createMcpServer();
     const expected = new Map<string, unknown>([
       ["mimo_plan", PlanInput],
-      ["mimo_implement", ImplementInput],
+      ["mimo_implement", ImplementInputBase],
       ["mimo_review", ReviewInput],
       ["mimo_fix_ci", FixCiInput],
       ["mimo_resume", ResumeInput],

@@ -13,7 +13,7 @@ import { MIMO_TOOL_NAMES } from "../../src/codex/tool-names.js";
 import {
   ComposeInput,
   FixCiInput,
-  ImplementInput,
+  ImplementInputBase,
   PlanInput,
   ResumeInput,
   ReviewInput
@@ -96,7 +96,7 @@ describe("codex work tool handlers", () => {
   });
 
   it("keeps background and wait out of every work tool schema", () => {
-    for (const schema of [PlanInput, ImplementInput, ReviewInput, FixCiInput, ResumeInput, ComposeInput]) {
+    for (const schema of [PlanInput, ImplementInputBase, ReviewInput, FixCiInput, ResumeInput, ComposeInput]) {
       expect(schema.keyof().options).not.toContain("background");
       expect(schema.keyof().options).not.toContain("wait");
     }

@@ -738,7 +738,8 @@ describe("chain crash recovery", () => {
           task: "Implement feature",
           allowWrite: true,
           acceptance,
-          batchMode: "single"
+          batchMode: "single",
+          allowedPaths: ["src/**"]
         },
         notificationTarget: { type: "codex", threadId: "thread-root" }
       });
