@@ -487,6 +487,14 @@ function toCompactTests(stages: AcceptanceStageResult[]): CompactAcceptanceResul
   );
 }
 
+function resolveCommandSource(
+  planSource: DevelopmentAcceptancePlan["source"]
+): "explicit" | "detected" {
+  return planSource === "explicit" || planSource === "legacy_verification"
+    ? "explicit"
+    : "detected";
+}
+
 export async function runDevelopmentAcceptance(
   cwd: string,
   plan: DevelopmentAcceptancePlan,
@@ -494,6 +502,7 @@ export async function runDevelopmentAcceptance(
     signal?: AbortSignal;
     runDiffCheck?: (cwd: string, signal?: AbortSignal) => Promise<AcceptanceStageResult>;
     execute?: VerificationCommandExecutor;
+    platform?: NodeJS.Platform;
   } = {}
 ): Promise<DevelopmentAcceptanceResult> {
   const stages: AcceptanceStageResult[] = [];
@@ -550,7 +559,9 @@ export async function runDevelopmentAcceptance(
 
     const results = await runVerificationCommands(cwd, stagePlan.commands, {
       signal: options.signal,
-      execute: options.execute
+      execute: options.execute,
+      platform: options.platform,
+      source: resolveCommandSource(plan.source)
     });
 
     let stageFailed = false;
