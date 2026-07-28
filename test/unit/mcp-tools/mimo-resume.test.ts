@@ -141,10 +141,10 @@ describe("mimo_resume", () => {
   });
 
   it.each([
-    ["plan", { task: "Plan", cwd: "" }, { agent: "plan", writesAllowed: false }],
-    ["review", { base: "HEAD", cwd: "" }, { agent: "plan", writesAllowed: false }],
-    ["compose", { workflow: "plan", task: "Plan", cwd: "" }, { agent: "compose", writesAllowed: false }],
-    ["compose", { workflow: "dev", task: "Build", cwd: "" }, { agent: "compose", writesAllowed: true }]
+    ["plan", { task: "Plan", cwd: "" }, { agent: "codex-mimo-readonly", writesAllowed: false }],
+    ["review", { base: "HEAD", cwd: "" }, { agent: "codex-mimo-readonly", writesAllowed: false }],
+    ["compose", { workflow: "plan", task: "Plan", cwd: "" }, { agent: "codex-mimo-readonly", writesAllowed: false }],
+    ["compose", { workflow: "dev", task: "Build", cwd: "" }, { agent: "build", writesAllowed: true }]
   ] as const)("freezes the effective %s parent policy into the child request", async (kind, template, expected) => {
     const cwd = tempWorkspace();
     const source = createJobStore(cwd).create({
@@ -207,7 +207,7 @@ describe("mimo_resume", () => {
     });
 
     expect(readJob(cwd, second.jobId)?.request).toMatchObject({
-      executionPolicy: { agent: "plan", writesAllowed: false }
+      executionPolicy: { agent: "codex-mimo-readonly", writesAllowed: false }
     });
   });
 
@@ -244,9 +244,10 @@ describe("mimo_resume", () => {
       child.request as never,
       ACTIVE_SIGNAL
     );
-    expect(prompt.message).toMatch(/Do not perform a broad project scan/i);
-    expect(prompt.message).toContain("src/feature.ts");
-    expect(prompt.message).toContain("remainingChecklist");
+    const promptText = fs.readFileSync(prompt.files[0], "utf-8");
+    expect(promptText).toMatch(/Do not perform a broad project scan/i);
+    expect(promptText).toContain("src/feature.ts");
+    expect(promptText).toContain("remainingChecklist");
   });
 
   it("rejects resume when process still alive or fingerprint conflicts", async () => {

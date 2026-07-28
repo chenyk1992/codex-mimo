@@ -98,7 +98,7 @@ describe("unified CLI work commands", () => {
 
   it("parses common job options once for every work command", async () => {
     const result = await invoke([
-      "plan", "Plan 中文支持", "--cwd", cwd, "--model", "mimo-v2",
+      "plan", "Plan 中文支持", "--cwd", cwd,
       "--timeout-ms", "9000", "--notify", "codex", "--thread-id", "thread-1"
     ]);
 
@@ -106,7 +106,6 @@ describe("unified CLI work commands", () => {
     expect(result.deps.mimoPlan).toHaveBeenCalledWith({
       cwd,
       task: "Plan 中文支持",
-      model: "mimo-v2",
       timeoutMs: 9000,
       notify: { type: "codex", threadId: "thread-1" }
     });
@@ -243,7 +242,7 @@ describe("strict CLI surface", () => {
     expect(result.stderr).toContain(`Unknown command: ${command}`);
   });
 
-  it.each(["--background", "--wait", "--session", "--attach", "--fork", "--continue", "--dry-run"])(
+  it.each(["--background", "--wait", "--session", "--attach", "--fork", "--continue", "--dry-run", "--model"])(
     "rejects removed %s flag",
     async (flag) => {
       const result = await invoke(["plan", "Task", flag]);

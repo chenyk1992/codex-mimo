@@ -12,6 +12,10 @@ import {
   type HookGuardFailure,
   type JobFailureCause
 } from "../core/safety-contracts.js";
+import {
+  buildBridgeRuntimeConfig,
+  buildBridgeRuntimeEnvironment
+} from "./runtime-config.js";
 
 export const CALLBACK_HEADER = "x-codex-mimo-callback-token";
 export type MimoHookEventName = "session.post";
@@ -39,6 +43,7 @@ export interface HookConfigPaths {
   configDir: string;
   pluginDir: string;
   hookFile: string;
+  configFile: string;
 }
 
 export interface HookCallbackController {
@@ -139,11 +144,13 @@ export function writeHookConfig(input: {
   const configDir = path.join(input.cwd, ".codex-mimo", "runtime-hooks", input.invocationId);
   const pluginDir = path.join(configDir, "plugin");
   const hookFile = path.join(pluginDir, "codex-mimo-callback.js");
+  const configFile = path.join(configDir, "mimocode.jsonc");
 
   fs.mkdirSync(pluginDir, { recursive: true });
   fs.writeFileSync(hookFile, buildHookSource(), "utf-8");
+  fs.writeFileSync(configFile, JSON.stringify(buildBridgeRuntimeConfig(), null, 2), "utf-8");
 
-  return { configDir, pluginDir, hookFile };
+  return { configDir, pluginDir, hookFile, configFile };
 }
 
 function buildHookSource(): string {
@@ -173,6 +180,21 @@ function timingSafeEqualHex(left, right) {
 
 function hashQuery(query) {
   return createHash("sha256").update(String(query ?? ""), "utf8").digest("hex");
+}
+
+function queryMatchesExpectedHash(query, expectedHash) {
+  const rawQuery = String(query ?? "");
+  if (timingSafeEqualHex(hashQuery(rawQuery), expectedHash)) return true;
+
+  const trimmedQuery = rawQuery.trim();
+  if (!trimmedQuery.startsWith('"') || !trimmedQuery.endsWith('"')) return false;
+  try {
+    const decodedQuery = JSON.parse(trimmedQuery);
+    return typeof decodedQuery === "string" &&
+      timingSafeEqualHex(hashQuery(decodedQuery), expectedHash);
+  } catch {
+    return false;
+  }
 }
 
 function normalizeRepositoryPath(filePath) {
@@ -271,8 +293,7 @@ export default async function codexMimoCallbackPlugin() {
       firstPrimaryQueryChecked = true;
       const expectedHash = process.env.CODEX_MIMO_EXPECTED_QUERY_HASH;
       if (!expectedHash) return;
-      const actualHash = hashQuery(input.query);
-      if (timingSafeEqualHex(actualHash, expectedHash)) return;
+      if (queryMatchesExpectedHash(input.query, expectedHash)) return;
       guardFailure = { code: "prompt_identity_mismatch", sessionId: sessionID };
       output.cancel = true;
       output.cancelReason = PROMPT_MISMATCH_CANCEL_REASON;
@@ -530,12 +551,12 @@ export async function createHookCallbackController(
     getRunSession,
     getDiagnostics: () => [...diagnostics],
     env: {
+      ...buildBridgeRuntimeEnvironment(hookConfig.hookFile),
       CODEX_MIMO_INVOCATION_ID: invocationId,
       CODEX_MIMO_CALLBACK_ENDPOINT: endpoint,
       CODEX_MIMO_CALLBACK_TOKEN: token,
       CODEX_MIMO_EXPECTED_QUERY_HASH: input.expectedQueryHash,
-      ...(allowedPathsJson ? { CODEX_MIMO_ALLOWED_PATHS_JSON: allowedPathsJson } : {}),
-      MIMOCODE_CONFIG_DIR: hookConfig.configDir
+      ...(allowedPathsJson ? { CODEX_MIMO_ALLOWED_PATHS_JSON: allowedPathsJson } : {})
     },
     waitForCallback: () => {
       flushFirstStagedCallback();

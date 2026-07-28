@@ -21,13 +21,13 @@ import {
 
 const forbidden = [
   "background", "wait", "pollMs", "agent", "allowInstall",
-  "session", "attach", "fork", "continue", "dryRun"
+  "session", "attach", "fork", "continue", "dryRun", "model"
 ] as const;
 
 describe("work tool schemas", () => {
   it("accepts only the common job options", () => {
     expect(Object.keys(JobOptionsSchema.shape).sort()).toEqual([
-      "cwd", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "timeoutMs"
+      "cwd", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "timeoutMs"
     ]);
   });
 
@@ -84,13 +84,13 @@ describe("work tool schemas", () => {
   });
 
   it("keeps exactly approved per-tool fields plus common options", () => {
-    expect(Object.keys(PlanInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
-    expect(Object.keys(ImplementInputBase.shape).sort()).toEqual(["acceptance", "allowWrite", "allowedPaths", "batchMode", "cwd", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
-    expect(Object.keys(ReviewInput.shape).sort()).toEqual(["base", "cwd", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "timeoutMs"]);
-    expect(Object.keys(FixCiInput.shape).sort()).toEqual(["cwd", "file", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
-    expect(Object.keys(ResumeInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "jobId", "model", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
+    expect(Object.keys(PlanInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
+    expect(Object.keys(ImplementInputBase.shape).sort()).toEqual(["acceptance", "allowWrite", "allowedPaths", "batchMode", "cwd", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
+    expect(Object.keys(ReviewInput.shape).sort()).toEqual(["base", "cwd", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "timeoutMs"]);
+    expect(Object.keys(FixCiInput.shape).sort()).toEqual(["cwd", "file", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
+    expect(Object.keys(ResumeInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "jobId", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
     expect(Object.keys(ComposeInputShape).sort()).toEqual([
-      "acceptance", "allowedPaths", "batchMode", "cwd", "file", "idleTimeoutMs", "model", "notify", "progressTimeoutMs", "progressWarningMs", "reportDir", "since", "task", "timeoutMs", "verification", "workflow"
+      "acceptance", "allowedPaths", "batchMode", "cwd", "file", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "reportDir", "since", "task", "timeoutMs", "verification", "workflow"
     ]);
   });
 

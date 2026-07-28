@@ -84,7 +84,6 @@ const NOTIFY_SCHEMA = {
 };
 const COMMON_JOB_PROPERTIES = {
   cwd: STRING_SCHEMA,
-  model: STRING_SCHEMA,
   timeoutMs: { type: "integer", exclusiveMinimum: 0, default: 1_800_000 },
   idleTimeoutMs: { type: "integer", minimum: 0, default: 1_800_000 },
   progressWarningMs: { type: "integer", minimum: 0, default: 120_000 },

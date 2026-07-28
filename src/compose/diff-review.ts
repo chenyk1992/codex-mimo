@@ -8,9 +8,11 @@ import {
   mergeChangedFiles
 } from "./post-checks.js";
 import { diffReviewPrompt } from "../core/prompt.js";
+import { CODEX_MIMO_READONLY_AGENT } from "../core/safety-contracts.js";
 import { captureGitStatus, type GitStatusSnapshot } from "../git/diff.js";
 import { preparePromptTransport } from "../mimo/prompt-transport.js";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
+import { buildBridgeRuntimeEnvironment } from "../mimo/runtime-config.js";
 import { runMimoCliStreaming } from "../mimo/streaming-runner.js";
 
 export interface DiffReviewFinding {
@@ -213,7 +215,7 @@ export async function runReadOnlyDiffReview(
   const diffFile = resolveDiffFile(input.diffPath, input.cwd);
   const args = buildMimoRunArgs({
     cwd: input.cwd,
-    agent: "plan",
+    agent: CODEX_MIMO_READONLY_AGENT,
     message: prompt.message,
     title: "codex-mimo diff-review",
     ...(input.sessionId ? { session: input.sessionId } : {}),
@@ -221,7 +223,10 @@ export async function runReadOnlyDiffReview(
   });
 
   const runMimo = input.runMimo ?? runMimoCliStreaming;
-  const run = await runMimo(input.cwd, args, { signal: input.signal });
+  const run = await runMimo(input.cwd, args, {
+    signal: input.signal,
+    env: buildBridgeRuntimeEnvironment()
+  });
 
   const statusAfter = await captureStatus(input.cwd, { signal: input.signal });
   const violations = detectReadOnlyViolationFiles(false, [], statusBefore, statusAfter);

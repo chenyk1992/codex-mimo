@@ -2,10 +2,14 @@ import { normalizeDevelopmentAcceptancePlan } from "./acceptance.js";
 import { extractFinalText, parseMimoJsonLines } from "./events.js";
 import { slicePlanningPrompt } from "../core/prompt.js";
 import type { BatchMode } from "../core/jobs.js";
-import { SINGLE_MODE_ALLOWED_PATHS_REQUIRED_MESSAGE } from "../core/safety-contracts.js";
+import {
+  CODEX_MIMO_READONLY_AGENT,
+  SINGLE_MODE_ALLOWED_PATHS_REQUIRED_MESSAGE
+} from "../core/safety-contracts.js";
 import { validateAllowedPathPattern } from "../core/path-scope.js";
 import { preparePromptTransport } from "../mimo/prompt-transport.js";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
+import { buildBridgeRuntimeEnvironment } from "../mimo/runtime-config.js";
 import { runMimoCliStreaming } from "../mimo/streaming-runner.js";
 import type { DevelopmentAcceptanceInput } from "./workflow.js";
 
@@ -384,17 +388,29 @@ export async function planSliceManifest(input: {
     }
   }
 
-  const prompt = preparePromptTransport(slicePlanningPrompt(input.objective), { cwd: input.cwd });
+  const acceptance = resolveSingleSliceAcceptance(input);
+  if ("ok" in acceptance) {
+    return invalid(acceptance.reason);
+  }
+
+  const prompt = preparePromptTransport(slicePlanningPrompt(input.objective, {
+    chainId: input.chainId,
+    repositoryFingerprint: input.repositoryFingerprint,
+    acceptance
+  }), { cwd: input.cwd });
   const args = buildMimoRunArgs({
     cwd: input.cwd,
-    agent: "plan",
+    agent: CODEX_MIMO_READONLY_AGENT,
     message: prompt.message,
     title: "codex-mimo slice-planning",
     files: prompt.files
   });
 
   const runMimo = input.runMimo ?? runMimoCliStreaming;
-  const run = await runMimo(input.cwd, args, { signal: input.signal });
+  const run = await runMimo(input.cwd, args, {
+    signal: input.signal,
+    env: buildBridgeRuntimeEnvironment()
+  });
 
   if (run.exitCode !== 0) {
     return invalid(`Slice planning MiMo process exited with code ${run.exitCode}`);
@@ -407,7 +423,43 @@ export async function planSliceManifest(input: {
   }
 
   const minSlices = input.batchMode === "sliced" ? 2 : 1;
-  return validateSliceManifest(parsed, { cwd: input.cwd, minSlices });
+  return validateSliceManifest(
+    applySlicePlanningDefaults(parsed, {
+      chainId: input.chainId,
+      objective: input.objective,
+      repositoryFingerprint: input.repositoryFingerprint,
+      acceptance
+    }),
+    { cwd: input.cwd, minSlices }
+  );
+}
+
+function applySlicePlanningDefaults(
+  input: unknown,
+  defaults: {
+    chainId: string;
+    objective: string;
+    repositoryFingerprint: string;
+    acceptance: DevelopmentAcceptanceInput;
+  }
+): unknown {
+  if (!isRecord(input) || !Array.isArray(input.slices)) return input;
+  return {
+    ...input,
+    chainId: defaults.chainId,
+    objective: defaults.objective,
+    repositoryFingerprint: defaults.repositoryFingerprint,
+    slices: input.slices.map((slice) => {
+      if (!isRecord(slice)) return slice;
+      return {
+        ...slice,
+        acceptance: {
+          ...defaults.acceptance,
+          ...(isRecord(slice.acceptance) ? slice.acceptance : {})
+        }
+      };
+    })
+  };
 }
 
 export function materializeSingleSliceManifest(input: {

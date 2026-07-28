@@ -504,7 +504,8 @@ function transitionRecordPatch(
       : {}),
     ...(transition.reportPaths !== undefined ? { reportPaths: transition.reportPaths } : {}),
     ...(transition.error !== undefined ? { error: transition.error } : {}),
-    ...(transition.errorCode !== undefined ? { errorCode: transition.errorCode } : {})
+    ...(transition.errorCode !== undefined ? { errorCode: transition.errorCode } : {}),
+    ...(transition.failureCauses !== undefined ? { failureCauses: transition.failureCauses } : {})
   };
 }
 

@@ -110,7 +110,47 @@ describe("hook callback payload helpers", () => {
     expect(paths.configDir).toBe(path.join(cwd, ".codex-mimo", "runtime-hooks", "implement-mk85jpc0-abc123"));
     expect(paths.pluginDir).toBe(path.join(paths.configDir, "plugin"));
     expect(paths.hookFile).toBe(path.join(paths.pluginDir, "codex-mimo-callback.js"));
+    expect(paths.configFile).toBe(path.join(paths.configDir, "mimocode.jsonc"));
     expect(fs.existsSync(paths.hookFile)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(paths.configFile, "utf-8"))).toEqual({
+      dream: { auto: false },
+      distill: { auto: false },
+      mcp: {
+        "codex-mimocode": { enabled: false }
+      },
+      agent: {
+        "codex-mimo-readonly": {
+          mode: "primary",
+          description: "Codex-MiMo read-only execution policy.",
+          tool_allowlist: [
+            "read",
+            "glob",
+            "grep",
+            "list",
+            "lsp",
+            "webfetch",
+            "websearch",
+            "codesearch",
+            "skill",
+            "view_image"
+          ],
+          permission: {
+            "*": "deny",
+            read: "allow",
+            glob: "allow",
+            grep: "allow",
+            list: "allow",
+            lsp: "allow",
+            webfetch: "allow",
+            websearch: "allow",
+            codesearch: "allow",
+            skill: { "compose:*": "allow" },
+            view_image: "allow"
+          }
+        }
+      }
+    });
+    expect(fs.readFileSync(paths.configFile, "utf-8")).not.toMatch(/model|provider/i);
 
     const source = fs.readFileSync(paths.hookFile, "utf-8");
     expect(source).toContain("export default async function codexMimoCallbackPlugin()");
@@ -134,6 +174,8 @@ describe("hook callback payload helpers", () => {
     expect(source).toContain("session.userQuery.pre");
     expect(source).toContain("tool.execute.before");
     expect(source).toContain("CODEX_MIMO_EXPECTED_QUERY_HASH");
+    expect(source).toContain("queryMatchesExpectedHash(input.query, expectedHash)");
+    expect(source).toContain("JSON.parse(trimmedQuery)");
     expect(source).toContain("CODEX_MIMO_ALLOWED_PATHS_JSON");
   });
 });

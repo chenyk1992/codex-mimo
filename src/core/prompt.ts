@@ -53,13 +53,24 @@ export function reviewPrompt(diffSummary: string): string {
   ].join("\n");
 }
 
-export function slicePlanningPrompt(objective: string): string {
+export function slicePlanningPrompt(
+  objective: string,
+  context?: {
+    chainId: string;
+    repositoryFingerprint: string;
+    acceptance: {
+      build?: string[];
+      test?: string[];
+      diffCheck?: boolean;
+    };
+  }
+): string {
   const example = JSON.stringify(
     {
       version: 1,
-      chainId: "chain-example",
-      objective: "Implement the feature",
-      repositoryFingerprint: "fp-example",
+      chainId: context?.chainId ?? "chain-example",
+      objective,
+      repositoryFingerprint: context?.repositoryFingerprint ?? "fp-example",
       slices: [
         {
           id: "slice-1",
@@ -68,7 +79,7 @@ export function slicePlanningPrompt(objective: string): string {
           dependsOn: [],
           contextFiles: ["src/schema.ts"],
           allowedPaths: ["src/schema.ts"],
-          acceptance: {
+          acceptance: context?.acceptance ?? {
             build: ["npm run build"],
             test: ["npm test -- schema.test.ts"]
           }
@@ -94,6 +105,12 @@ export function slicePlanningPrompt(objective: string): string {
     "- allowedPaths patterns must be repository-relative and use only: exact files (src/app.ts), directories (src/components), or trailing /** (src/components/**).",
     "- Do not use repository-wide \"**\", bare globs, absolute paths, or \"..\" traversal in allowedPaths.",
     "- Each slice must include acceptance with build disposition and targeted test commands.",
+    ...(context
+      ? [
+          `- Use the exact chainId ${JSON.stringify(context.chainId)} and repositoryFingerprint ${JSON.stringify(context.repositoryFingerprint)}.`,
+          `- Use these caller-supplied acceptance defaults when a slice has no narrower command: ${JSON.stringify(context.acceptance)}.`
+        ]
+      : []),
     "- Prefer narrow slices such as \"only add the schema\" rather than grouping an entire feature.",
     "- Your final message must include one JSON SliceManifest envelope.",
     "",

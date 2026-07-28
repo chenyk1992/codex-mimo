@@ -111,7 +111,7 @@ describe("job definition registry", () => {
   });
 
   it.each([
-    ["plan", { cwd: "E:/project", task: "plan it" }, "plan"],
+    ["plan", { cwd: "E:/project", task: "plan it" }, "codex-mimo-readonly"],
     ["implement", { cwd: "E:/project", task: "build it", allowWrite: true }, "build"],
     ["fix-ci", { cwd: "E:/project", file: "ci.log", task: "fix it" }, "build"],
     ["resume", {
@@ -121,7 +121,12 @@ describe("job definition registry", () => {
       sessionId: "ses_1",
       executionPolicy: { agent: "build", writesAllowed: true }
     }, "build"],
-    ["compose", { cwd: "E:/project", workflow: "dev", task: "build it" }, "compose"]
+    ["compose", {
+      cwd: "E:/project",
+      workflow: "plan",
+      task: "plan it"
+    }, "codex-mimo-readonly"],
+    ["compose", { cwd: "E:/project", workflow: "dev", task: "build it" }, "build"]
   ] as const)("uses the fixed MiMo agent for %s", async (kind, request, agent) => {
     const definition = getJobDefinition(kind);
     const prompt = await definition.buildPrompt(request, ACTIVE_SIGNAL);
@@ -146,10 +151,10 @@ describe("job definition registry", () => {
   });
 
   it.each([
-    [{ agent: "plan", writesAllowed: false } as const, "plan", "failed", "read_only_violation"],
-    [{ agent: "compose", writesAllowed: false } as const, "compose", "failed", "read_only_violation"],
+    [{ agent: "codex-mimo-readonly", writesAllowed: false } as const, "codex-mimo-readonly", "failed", "read_only_violation"],
+    [{ agent: "compose", writesAllowed: false } as const, "codex-mimo-readonly", "failed", "read_only_violation"],
     [{ agent: "build", writesAllowed: true } as const, "build", "completed", undefined]
-  ])("enforces a resumed parent's immutable %j execution policy", async (executionPolicy, agent, status, errorCode) => {
+  ])("enforces a resumed parent's %j write policy", async (executionPolicy, agent, status, errorCode) => {
     const cwd = tempDir();
     const request: JobRequestByKind["resume"] = {
       cwd,
@@ -179,7 +184,9 @@ describe("job definition registry", () => {
     });
 
     expect(args[args.indexOf("--agent") + 1]).toBe(agent);
-    if (!executionPolicy.writesAllowed) expect(prompt.message).toContain("Do not edit files");
+    if (!executionPolicy.writesAllowed) {
+      expect(fs.readFileSync(prompt.files[0], "utf-8")).toContain("Do not edit files");
+    }
     expect(outcome).toMatchObject({ status, ...(errorCode ? { errorCode } : {}) });
   });
 
@@ -198,14 +205,14 @@ describe("job definition registry", () => {
       .rejects.toThrow();
   });
 
-  it("describes an empty review diff without creating an attachment", async () => {
+  it("describes an empty review diff through the prompt attachment", async () => {
     const cwd = initGitRepo();
     const prompt = await getJobDefinition("review").buildPrompt({ cwd, base: "HEAD" }, ACTIVE_SIGNAL);
     const args = getJobDefinition("review").buildMimoArgs({ cwd, base: "HEAD" }, prompt);
 
-    expect(prompt.files).toEqual([]);
-    expect(prompt.message).toContain("No changes found against base HEAD");
-    expect(args).toEqual(expect.arrayContaining(["--agent", "plan"]));
+    expect(prompt.files).toHaveLength(1);
+    expect(fs.readFileSync(prompt.files[0], "utf-8")).toContain("No changes found against base HEAD");
+    expect(args).toEqual(expect.arrayContaining(["--agent", "codex-mimo-readonly"]));
   });
 
   it("freezes a large non-ASCII review diff as the exact prompt attachment", async () => {
@@ -214,35 +221,37 @@ describe("job definition registry", () => {
     const expected = await captureGitDiff(cwd, "HEAD");
     const definition = getJobDefinition("review");
     const prompt = await definition.buildPrompt(
-      { cwd, base: "HEAD", model: "mimo-v2" },
+      { cwd, base: "HEAD" },
       ACTIVE_SIGNAL
     );
-    const args = definition.buildMimoArgs({ cwd, base: "HEAD", model: "mimo-v2" }, prompt);
+    const args = definition.buildMimoArgs({ cwd, base: "HEAD" }, prompt);
 
-    expect(prompt.files).toHaveLength(1);
-    expect(path.extname(prompt.files[0])).toBe(".diff");
-    expect(fs.readFileSync(prompt.files[0], "utf-8")).toBe(expected.diff);
-    expect(prompt.message).toContain("base HEAD");
+    expect(prompt.files).toHaveLength(2);
+    const diffFile = prompt.files.find((file) => path.extname(file) === ".diff")!;
+    const promptFile = prompt.files.find((file) => path.extname(file) === ".md")!;
+    expect(fs.readFileSync(diffFile, "utf-8")).toBe(expected.diff);
+    expect(fs.readFileSync(promptFile, "utf-8")).toContain("base HEAD");
     expect(prompt.message).not.toContain(expected.diff);
-    expect(args).toEqual(expect.arrayContaining(["--model", "mimo-v2", "--file", prompt.files[0]]));
-    expect(args.filter((item) => item === "--file")).toHaveLength(1);
+    expect(args).toEqual(expect.arrayContaining(["--file", diffFile]));
+    expect(args).not.toContain("--model");
+    expect(args.filter((item) => item === "--file")).toHaveLength(2);
   });
 
-  it("passes model, fixed attachments, and transported prompt files to MiMo", async () => {
+  it("passes fixed attachments and transported prompt files to MiMo", async () => {
     const cwd = tempDir();
     const definition = getJobDefinition("fix-ci");
     const request = {
       cwd,
       file: "ci.log",
       task: "修复 Windows 构建",
-      model: "mimo-v2",
       timeoutMs: 42_000
     };
     const prompt = await definition.buildPrompt(request, ACTIVE_SIGNAL);
     const args = definition.buildMimoArgs(request, prompt);
 
     expect(prompt.files).toHaveLength(1);
-    expect(args).toEqual(expect.arrayContaining(["--model", "mimo-v2", "--file", "ci.log"]));
+    expect(args).toEqual(expect.arrayContaining(["--file", "ci.log"]));
+    expect(args).not.toContain("--model");
     expect(args.filter((item) => item === "--file")).toHaveLength(2);
   });
 
@@ -257,20 +266,24 @@ describe("job definition registry", () => {
     const prompt = await definition.buildPrompt(request, ACTIVE_SIGNAL);
     const args = definition.buildMimoArgs(request, prompt);
 
-    expect(prompt.message).toContain("compose:execute -> compose:tdd -> compose:verify -> compose:review");
-    expect(prompt.message).toContain("@approved-plan.md");
-    expect(args).toEqual(expect.arrayContaining(["--agent", "compose", "--file", "approved-plan.md"]));
+    const promptText = fs.readFileSync(prompt.files[0], "utf-8");
+    expect(promptText).toContain("compose:execute -> compose:tdd -> compose:verify -> compose:review");
+    expect(promptText).toContain("@approved-plan.md");
+    expect(args).toEqual(expect.arrayContaining(["--agent", "build", "--file", "approved-plan.md"]));
   });
 
   it("validates a stored request once and returns bound zero-argument methods", async () => {
     const cwd = tempDir();
-    const job = makeJob("plan", { cwd, task: "plan the change", model: "mimo-v2" });
+    const job = makeJob("plan", { cwd, task: "plan the change" });
     const bound = bindJobDefinition(job);
     job.request = { cwd, task: "", unexpected: true };
 
     const prompt = await bound.buildPrompt(ACTIVE_SIGNAL);
     expect(bound.kind).toBe("plan");
-    expect(bound.buildMimoArgs(prompt)).toEqual(expect.arrayContaining(["--agent", "plan", "--model", "mimo-v2"]));
+    expect(bound.buildMimoArgs(prompt)).toEqual(
+      expect.arrayContaining(["--agent", "codex-mimo-readonly"])
+    );
+    expect(bound.buildMimoArgs(prompt)).not.toContain("--model");
   });
 
   it("rejects an invalid stored request before any work starts", () => {
@@ -309,6 +322,47 @@ describe("job definition registry", () => {
 });
 
 describe("job finalization", () => {
+  it.each([
+    ["implement", {
+      task: "build it",
+      allowWrite: true as const,
+      acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: true }
+    }],
+    ["compose dev", {
+      workflow: "dev" as const,
+      task: "build it",
+      acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: true }
+    }]
+  ] as const)("does not run development acceptance after %s prompt identity failure", async (label, requestPatch) => {
+    const cwd = tempDir();
+    const kind = label === "implement" ? "implement" : "compose";
+    const request = { cwd, ...requestPatch } as JobRequestByKind[typeof kind];
+    const runDevelopmentAcceptance = vi.fn(async () => passingAcceptanceResult());
+
+    const outcome = await getJobDefinition(kind).finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob(kind, request),
+      request,
+      run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
+      events: [],
+      executionCallback: { invocationId: "inv", outcome: "cancelled", sessionId: "ses-1" },
+      failureCauses: [{ code: "prompt_identity_mismatch", stage: "prompt" }],
+      verification: [],
+      deps: {
+        runDevelopmentAcceptance,
+        writeComposeReport: () => undefined
+      }
+    });
+
+    expect(runDevelopmentAcceptance).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({
+      status: "failed",
+      errorCode: "prompt_identity_mismatch",
+      verification: []
+    });
+    expect(outcome.acceptance).toBeUndefined();
+  });
+
   it("does not complete compose dev with zero acceptance commands", async () => {
     const cwd = tempDir();
     const request: JobRequestByKind["compose"] = { cwd, workflow: "dev", task: "build it" };

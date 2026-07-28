@@ -12,7 +12,10 @@ export function preparePromptTransport(
   options: { cwd: string; forceFile?: boolean; maxInlineLength?: number }
 ): PromptTransportResult {
   const maxInlineLength = options.maxInlineLength ?? 8_000;
-  const shouldUseFile = Boolean(options.forceFile) || message.length > maxInlineLength || hasNonAscii(message);
+  const shouldUseFile = Boolean(options.forceFile) ||
+    message.length > maxInlineLength ||
+    hasNonAscii(message) ||
+    hasLineBreak(message);
   if (!shouldUseFile) {
     return { message, files: [] };
   }
@@ -20,11 +23,7 @@ export function preparePromptTransport(
   const file = writePromptAttachment(message, { cwd: options.cwd, label: "prompt", extension: ".md" });
 
   return {
-    message: [
-      `Objective is stored in UTF-8 prompt file: @${file}`,
-      "Read that file as the full task input before acting.",
-      `On Windows PowerShell, use \`Get-Content -Encoding UTF8 "${file}"\` rather than omitting the encoding flag.`
-    ].join("\n"),
+    message: `Read the full UTF-8 task from @${promptFileReference(options.cwd, file)} before acting.`,
     files: [file]
   };
 }
@@ -48,4 +47,12 @@ export function writePromptAttachment(
 
 function hasNonAscii(value: string): boolean {
   return /[^\u0000-\u007f]/.test(value);
+}
+
+function hasLineBreak(value: string): boolean {
+  return /[\r\n]/.test(value);
+}
+
+function promptFileReference(cwd: string, file: string): string {
+  return path.relative(cwd, file).split(path.sep).join("/");
 }

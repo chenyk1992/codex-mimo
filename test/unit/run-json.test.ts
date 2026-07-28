@@ -18,7 +18,6 @@ describe("buildMimoRunArgs", () => {
         cwd: "E:/project/app",
         message: "Fix CI",
         agent: "build",
-        model: "mimo/mimo-v2.5-pro",
         session: "sess_123",
         fork: true,
         files: ["ci.log"]
@@ -29,8 +28,6 @@ describe("buildMimoRunArgs", () => {
       "json",
       "--agent",
       "build",
-      "--model",
-      "mimo/mimo-v2.5-pro",
       "--session",
       "sess_123",
       "--fork",

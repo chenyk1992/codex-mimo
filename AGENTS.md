@@ -62,7 +62,7 @@ src/
 
 The 11 workflows registered in `src/compose/workflow.ts` (`COMPOSE_WORKFLOW_NAMES`): `brainstorm`, `plan`, `dev`, `fix`, `fix-ci`, `execute-plan`, `review`, `parallel`, `worktree`, `merge`, `new-skill`. Each declares `writesAllowed`, `requiresTask`, `requiresFile`, and a `skillChain` used by `buildComposePrompt()`. Read-only workflows (`brainstorm`, `plan`, `review`) are checked after the run with git status/diff snapshots; unexpected modifications fail the report.
 
-The `compose` agent itself has no `prompt` field — its behaviour comes entirely from the skill library below. Our `buildComposePrompt()` is the single instruction the agent receives for a run.
+Write Compose workflows run through MiMoCode's `build` agent; read-only workflows run through the bridge's read-only agent. Their behaviour comes from the skill library below, and `buildComposePrompt()` is the single workflow instruction the agent receives for a run. The bridge's run-scoped config disables only the `codex-mimocode` MCP entry to prevent recursive self-invocation; it preserves MiMoCode-owned model/provider configuration and every other MCP entry.
 
 The upstream MiMo-Code compose skill bundle (`packages/opencode/src/skill/compose/.bundle/`) contains 14 skills: `ask`, `brainstorm`, `debug`, `execute`, `feedback`, `merge`, `parallel`, `plan`, `report`, `review`, `subagent`, `tdd`, `verify`, `worktree`. Our workflow `skillChain`s reference 12 of these (every one except `ask` and `report`, which no current workflow invokes directly). `new-skill` is **not** an upstream skill name; the workflow invokes `compose:execute` + `compose:verify` instead.
 

@@ -140,7 +140,15 @@ describe("runReadOnlyDiffReview", () => {
     });
     expect(runMimo).toHaveBeenCalledWith(
       tmpDir,
-      expect.arrayContaining(["run", "--format", "json", "--agent", "plan", "--session", "sess-parent"]),
+      expect.arrayContaining([
+        "run",
+        "--format",
+        "json",
+        "--agent",
+        "codex-mimo-readonly",
+        "--session",
+        "sess-parent"
+      ]),
       expect.any(Object)
     );
   });

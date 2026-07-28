@@ -119,6 +119,22 @@ describe("slicePlanningPrompt", () => {
     expect(prompt).toContain("Do not edit files.");
     expect(prompt).toContain("SliceManifest envelope");
   });
+
+  it("includes authoritative chain identity and caller acceptance defaults", () => {
+    const prompt = slicePlanningPrompt("Update README", {
+      chainId: "chain-live",
+      repositoryFingerprint: "fp-live",
+      acceptance: {
+        build: ["node --version"],
+        test: ["node --test"]
+      }
+    });
+
+    expect(prompt).toContain('"chainId": "chain-live"');
+    expect(prompt).toContain('"repositoryFingerprint": "fp-live"');
+    expect(prompt).toContain('"build": [');
+    expect(prompt).toContain('"node --version"');
+  });
 });
 
 describe("planSliceManifest", () => {
@@ -153,7 +169,7 @@ describe("planSliceManifest", () => {
     });
   });
 
-  it("runs a read-only plan agent for auto mode and validates the parsed manifest", async () => {
+  it("runs the bridge read-only agent for auto mode and validates the parsed manifest", async () => {
     const cwd = makeProject({
       "package.json": JSON.stringify({ scripts: { build: "tsc", test: "vitest run" } })
     });
@@ -172,12 +188,54 @@ describe("planSliceManifest", () => {
     expect(runMimo).toHaveBeenCalledOnce();
     const args = runMimo.mock.calls[0][1] as string[];
     expect(args).toContain("--agent");
-    expect(args).toContain("plan");
+    expect(args).toContain("codex-mimo-readonly");
     expect(result.ok).toBe(true);
     if (!result.ok) {
       throw new Error("expected valid manifest");
     }
     expect(result.manifest.slices).toHaveLength(1);
+  });
+
+  it("uses caller identity and acceptance to fill incomplete model output", async () => {
+    const cwd = makeProject();
+    const raw = baseManifest({
+      chainId: "hallucinated-chain",
+      objective: "hallucinated objective",
+      repositoryFingerprint: "hallucinated-fingerprint",
+      slices: [{
+        ...baseManifest().slices[0],
+        acceptance: { test: ["node --test"] }
+      }]
+    });
+    const runMimo = vi.fn(async () => makeRunResult(JSON.stringify(raw)));
+
+    const result = await planSliceManifest({
+      cwd,
+      chainId: "chain-root",
+      objective: "Update README",
+      batchMode: "auto",
+      acceptance: {
+        build: ["node --version"],
+        test: ["node --test"]
+      },
+      repositoryFingerprint: "fp-root",
+      runMimo
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      manifest: {
+        chainId: "chain-root",
+        objective: "Update README",
+        repositoryFingerprint: "fp-root",
+        slices: [{
+          acceptance: {
+            build: ["node --version"],
+            test: ["node --test"]
+          }
+        }]
+      }
+    });
   });
 
   it("requires at least two slices in sliced mode", async () => {

@@ -355,7 +355,7 @@ describe("unified background jobs", () => {
       child.request as never,
       new AbortController().signal
     );
-    expect(prompt.message).toMatch(/Do not perform a broad project scan/i);
+    expect(fs.readFileSync(prompt.files[0]!, "utf-8")).toMatch(/Do not perform a broad project scan/i);
   }, 15_000);
 
   it("honors cancellation while the fake MiMo process is running", async () => {

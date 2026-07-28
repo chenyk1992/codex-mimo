@@ -4,8 +4,11 @@ import path from "node:path";
 import { execa } from "execa";
 import { describe, expect, it, vi } from "vitest";
 import { createHookCallbackController } from "../../src/mimo/hook-callback.js";
-import { createJobStore, readJob } from "../../src/core/job-store.js";
-import { runJobWorker } from "../../src/core/job-worker.js";
+import { buildBridgeRuntimeEnvironment } from "../../src/mimo/runtime-config.js";
+import { createJobStore, listJobs, readJob } from "../../src/core/job-store.js";
+import { runJobWorker, type JobWorkerDependencies } from "../../src/core/job-worker.js";
+import { planSliceManifest } from "../../src/compose/slices.js";
+import { runReadOnlyDiffReview } from "../../src/compose/diff-review.js";
 
 const runSmoke = process.env.RUN_LOCAL_MIMO_HOOK_SMOKE === "1";
 const describeSmoke = runSmoke ? describe : describe.skip;
@@ -55,11 +58,12 @@ async function withHookSmokeTempDirectories(
   }
 }
 
-function writeCancelHookToConfigDir(configDir: string): void {
+function writeCancelHookToConfigDir(configDir: string): string {
   const pluginDir = path.join(configDir, "plugin");
+  const hookFile = path.join(pluginDir, "cancel.js");
   fs.mkdirSync(pluginDir, { recursive: true });
   fs.writeFileSync(
-    path.join(pluginDir, "cancel.js"),
+    hookFile,
     `
 export default async () => ({
   "session.pre": async (_input, output) => {
@@ -70,6 +74,7 @@ export default async () => ({
 `,
     "utf-8"
   );
+  return hookFile;
 }
 
 describe("local MiMoCode hook smoke cleanup", () => {
@@ -95,8 +100,128 @@ describe("local MiMoCode hook smoke cleanup", () => {
 });
 
 describeSmoke("local MiMoCode hooks", () => {
+  it("keeps a real plan job read-only while inheriting MiMoCode model configuration", async () => {
+    await withHookSmokeTempDirectories(async (root) => {
+      await execa("git", ["init"], { cwd: root });
+      await execa("git", ["config", "user.email", "smoke@example.com"], { cwd: root });
+      await execa("git", ["config", "user.name", "Smoke Test"], { cwd: root });
+      fs.writeFileSync(path.join(root, "README.md"), "# Sample\n", "utf8");
+      fs.writeFileSync(path.join(root, ".gitignore"), ".codex-mimo/\n", "utf8");
+      await execa("git", ["add", "README.md", ".gitignore"], { cwd: root });
+      await execa("git", ["commit", "-m", "initial"], { cwd: root });
+
+      const job = createJobStore(root).create({
+        kind: "plan",
+        task: "Plan a minimal change that adds one sentence to README.md. Do not edit files.",
+        request: {
+          cwd: root,
+          task: "Plan a minimal change that adds one sentence to README.md. Do not edit files.",
+          timeoutMs: 60_000
+        }
+      });
+
+      await runJobWorker(root, job.id);
+
+      expect(readJob(root, job.id)).toMatchObject({
+        status: "completed",
+        changedFiles: [],
+        executionCallback: { outcome: "completed" }
+      });
+      expect(fs.existsSync(path.join(root, ".mimocode", "plans"))).toBe(false);
+      expect((await execa("git", ["status", "--short"], { cwd: root })).stdout).toBe("");
+    });
+  }, 90_000);
+
+  it("keeps a real Compose plan read-only under the same MiMoCode configuration", async () => {
+    await withHookSmokeTempDirectories(async (root) => {
+      await execa("git", ["init"], { cwd: root });
+      await execa("git", ["config", "user.email", "smoke@example.com"], { cwd: root });
+      await execa("git", ["config", "user.name", "Smoke Test"], { cwd: root });
+      fs.writeFileSync(path.join(root, "README.md"), "# Sample\n", "utf8");
+      fs.writeFileSync(path.join(root, ".gitignore"), ".codex-mimo/\n", "utf8");
+      await execa("git", ["add", "README.md", ".gitignore"], { cwd: root });
+      await execa("git", ["commit", "-m", "initial"], { cwd: root });
+
+      const job = createJobStore(root).create({
+        kind: "compose",
+        task: "Plan a minimal change that adds one sentence to README.md.",
+        request: {
+          cwd: root,
+          workflow: "plan",
+          task: "Plan a minimal change that adds one sentence to README.md.",
+          timeoutMs: 60_000
+        }
+      });
+
+      await runJobWorker(root, job.id);
+
+      expect(readJob(root, job.id)).toMatchObject({
+        status: "completed",
+        changedFiles: [],
+        executionCallback: { outcome: "completed" }
+      });
+      expect(fs.existsSync(path.join(root, ".mimocode", "plans"))).toBe(false);
+      expect((await execa("git", ["status", "--short"], { cwd: root })).stdout).toBe("");
+    });
+  }, 90_000);
+
+  it("runs real read-only slice planning without project side effects", async () => {
+    await withHookSmokeTempDirectories(async (root) => {
+      await execa("git", ["init"], { cwd: root });
+      await execa("git", ["config", "user.email", "smoke@example.com"], { cwd: root });
+      await execa("git", ["config", "user.name", "Smoke Test"], { cwd: root });
+      fs.writeFileSync(path.join(root, "README.md"), "# Sample\n", "utf8");
+      fs.writeFileSync(path.join(root, ".gitignore"), ".codex-mimo/\n", "utf8");
+      await execa("git", ["add", "README.md", ".gitignore"], { cwd: root });
+      await execa("git", ["commit", "-m", "initial"], { cwd: root });
+
+      const result = await planSliceManifest({
+        cwd: root,
+        chainId: "chain-smoke",
+        objective: "Add one sentence to README.md.",
+        batchMode: "auto",
+        acceptance: {
+          build: ["node --version"],
+          test: ["node --version"],
+          diffCheck: false
+        },
+        repositoryFingerprint: "smoke-fingerprint"
+      });
+
+      if (!result.ok) {
+        throw new Error(`Real slice planning failed: ${result.reason}`);
+      }
+      expect(fs.existsSync(path.join(root, ".mimocode", "plans"))).toBe(false);
+      expect((await execa("git", ["status", "--short"], { cwd: root })).stdout).toBe("");
+    });
+  }, 90_000);
+
+  it("runs a real read-only diff review without adding review artifacts", async () => {
+    await withHookSmokeTempDirectories(async (root) => {
+      await execa("git", ["init"], { cwd: root });
+      await execa("git", ["config", "user.email", "smoke@example.com"], { cwd: root });
+      await execa("git", ["config", "user.name", "Smoke Test"], { cwd: root });
+      fs.writeFileSync(path.join(root, "README.md"), "# Sample\n", "utf8");
+      fs.writeFileSync(path.join(root, ".gitignore"), ".codex-mimo/\n", "utf8");
+      await execa("git", ["add", "README.md", ".gitignore"], { cwd: root });
+      await execa("git", ["commit", "-m", "initial"], { cwd: root });
+      fs.writeFileSync(path.join(root, "README.md"), "# Sample\n\nOne extra sentence.\n", "utf8");
+      const diffDir = path.join(root, ".codex-mimo", "diffs");
+      const diffPath = path.join(diffDir, "smoke.diff");
+      fs.mkdirSync(diffDir, { recursive: true });
+      fs.writeFileSync(diffPath, (await execa("git", ["diff"], { cwd: root })).stdout, "utf8");
+      const statusBefore = (await execa("git", ["status", "--short"], { cwd: root })).stdout;
+
+      const result = await runReadOnlyDiffReview({ cwd: root, diffPath });
+
+      expect(result.outcome).toBe("passed");
+      expect(fs.existsSync(path.join(root, ".mimocode", "plans"))).toBe(false);
+      expect((await execa("git", ["status", "--short"], { cwd: root })).stdout).toBe(statusBefore);
+    });
+  }, 90_000);
+
   it("loads runtime hooks through the unified background job worker", async () => {
-    await withHookSmokeTempDirectories(async (root, home) => {
+    await withHookSmokeTempDirectories(async (root) => {
       await execa("git", ["init"], { cwd: root });
       await execa("git", ["config", "user.email", "smoke@example.com"], { cwd: root });
       await execa("git", ["config", "user.name", "Smoke Test"], { cwd: root });
@@ -110,20 +235,36 @@ describeSmoke("local MiMoCode hooks", () => {
           cwd: root,
           task: "local runtime hook smoke",
           allowWrite: true,
-          timeoutMs: 60_000
+          timeoutMs: 60_000,
+          batchMode: "single",
+          allowedPaths: ["probe.txt"],
+          acceptance: {
+            build: ["node --version"],
+            test: ["node --version"],
+            diffCheck: false
+          }
         }
       });
 
-      await runJobWorker(root, job.id, {
+      const dependencies: JobWorkerDependencies = {
         createHookCallbackController: async (input) => {
           const hook = await createHookCallbackController({ ...input, callbackWaitMs: 15_000 });
-          writeCancelHookToConfigDir(hook.configDir);
-          hook.env.MIMOCODE_HOME = home;
+          const cancelHook = writeCancelHookToConfigDir(hook.configDir);
+          Object.assign(hook.env, buildBridgeRuntimeEnvironment(cancelHook, hook.env));
           return hook;
         }
-      });
+      };
+
+      await runJobWorker(root, job.id, dependencies);
+      const child = listJobs(root).find((candidate) => candidate.parentJobId === job.id);
+      expect(child).toBeTruthy();
+      await runJobWorker(root, child!.id, dependencies);
 
       expect(readJob(root, job.id)).toMatchObject({
+        status: "failed",
+        errorCode: "callback_cancelled"
+      });
+      expect(readJob(root, child!.id)).toMatchObject({
         status: "failed",
         errorCode: "callback_cancelled",
         executionCallback: {
@@ -131,7 +272,7 @@ describeSmoke("local MiMoCode hooks", () => {
           error: "MiMoCode completion callback reported cancellation."
         }
       });
-      expect(readJob(root, job.id)?.executionCallback?.sessionId).toBeTruthy();
+      expect(readJob(root, child!.id)?.executionCallback?.sessionId).toBeTruthy();
     });
   }, 60_000);
 });

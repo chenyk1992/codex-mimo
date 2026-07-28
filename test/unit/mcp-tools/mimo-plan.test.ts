@@ -13,7 +13,7 @@ describe("mimo_plan", () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mimo-plan-"));
     dirs.push(cwd);
     const spawnJobSupervisor = vi.fn().mockReturnValue(123);
-    const result = await mimoPlan({ cwd, task: "Plan it", model: "mimo-v2" }, {
+    const result = await mimoPlan({ cwd, task: "Plan it" }, {
       env: {}, spawnJobSupervisor
     });
 
@@ -22,7 +22,7 @@ describe("mimo_plan", () => {
       actions: { status: "mimo_status", events: "mimo_events", result: "mimo_result", cancel: "mimo_cancel" }
     });
     expect(readJob(cwd, result.jobId)?.request).toEqual({
-      cwd, task: "Plan it", model: "mimo-v2", timeoutMs: 1_800_000, idleTimeoutMs: 1_800_000,
+      cwd, task: "Plan it", timeoutMs: 1_800_000, idleTimeoutMs: 1_800_000,
       progressWarningMs: 120_000, progressTimeoutMs: 300_000
     });
     expect(spawnJobSupervisor).toHaveBeenCalledWith(cwd);

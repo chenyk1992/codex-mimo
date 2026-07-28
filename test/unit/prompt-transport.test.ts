@@ -23,7 +23,8 @@ describe("prompt transport", () => {
     tempDirs.push(cwd);
     const longTask = "x".repeat(9000);
     const result = preparePromptTransport(longTask, { cwd });
-    expect(result.message).toContain("Objective is stored in UTF-8 prompt file");
+    expect(result.message).toMatch(/^Read the full UTF-8 task from @\.codex-mimo\/inputs\/.+\.md before acting\.$/);
+    expect(result.message).not.toMatch(/[\r\n]/);
     expect(result.files).toHaveLength(1);
     expect(fs.readFileSync(result.files[0], "utf-8")).toBe(longTask);
   });
@@ -33,7 +34,9 @@ describe("prompt transport", () => {
     tempDirs.push(cwd);
     const chineseTask = "基于附件生成计划";
     const result = preparePromptTransport(chineseTask, { cwd });
-    expect(result.message).toContain("Objective is stored in UTF-8 prompt file");
+    expect(result.message).toMatch(/^Read the full UTF-8 task from @\.codex-mimo\/inputs\/.+\.md before acting\.$/);
+    expect(result.message).not.toMatch(/[\r\n]/);
+    expect(result.message).not.toContain(cwd);
     expect(result.files).toHaveLength(1);
     expect(fs.readFileSync(result.files[0], "utf-8")).toBe(chineseTask);
   });
@@ -42,7 +45,19 @@ describe("prompt transport", () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "prompt-transport-"));
     tempDirs.push(cwd);
     const result = preparePromptTransport("short", { cwd, forceFile: true });
-    expect(result.message).toContain("Objective is stored in UTF-8 prompt file");
+    expect(result.message).toContain("Read the full UTF-8 task from @.codex-mimo/inputs/");
     expect(result.files).toHaveLength(1);
+  });
+
+  it("moves short multi-line ASCII prompts into a file with a single-line pointer", () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "prompt-transport-"));
+    tempDirs.push(cwd);
+    const prompt = "First line\nSecond line";
+
+    const result = preparePromptTransport(prompt, { cwd });
+
+    expect(result.message).not.toMatch(/[\r\n]/);
+    expect(result.files).toHaveLength(1);
+    expect(fs.readFileSync(result.files[0], "utf-8")).toBe(prompt);
   });
 });

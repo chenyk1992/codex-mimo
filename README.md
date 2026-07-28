@@ -102,6 +102,8 @@ The MCP server exposes exactly 13 tools:
 | `mimo_cancel` | Cancel a queued or running job |
 | `mimo_jobs` | List recent workspace jobs |
 
+Model and provider selection remain owned by MiMoCode. The bridge does not expose a model override, read provider credentials, or add `--model`; each job inherits MiMoCode's resolved configuration.
+
 Every work tool returns:
 
 ```json

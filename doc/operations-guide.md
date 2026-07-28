@@ -20,7 +20,7 @@ Every `plan`, `implement`, `review`, `fix-ci`, `resume`, and `compose` request f
 1. Validate the request and resolve one notification target.
 2. Persist an authoritative `queued` job and immutable target.
 3. Start one workspace-scoped internal supervisor and return a receipt; the supervisor starts `job-worker` and `notify-worker` processes as needed.
-4. Transition to `running`, capture process identity, and execute `mimo run --format json`.
+4. Transition to `running`, capture process identity, and execute `mimo run --format json` without a model override; MiMoCode resolves its own model and provider configuration. The run-scoped config disables only the `codex-mimocode` MCP entry to prevent the delegated process from recursively calling the bridge, while preserving every other MiMoCode MCP entry.
 5. Persist JSONL events and wait for the internal `session.post` callback.
 6. Capture Git evidence, run ordered development acceptance when required (or legacy verification), write reports, and classify the outcome.
 7. Atomically persist the new status, attention signal, and outbox delivery.

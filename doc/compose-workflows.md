@@ -56,7 +56,7 @@ Rejected: bare `**`, absolute paths, `..`, UNC paths, and mid-path globs such as
 
 ## Execution and Status
 
-The common worker validates the stored request, builds `mimo run --format json --agent compose` arguments, captures Git evidence, creates the internal `session.post` controller, streams events, runs finalization, and transitions the job.
+The common worker validates the stored request, runs write workflows with MiMoCode's `build` agent and read-only workflows with the bridge's read-only agent, captures Git evidence, creates the internal `session.post` controller, streams events, runs finalization, and transitions the job. The workflow's Compose skill chain remains the behavior source in both cases.
 
 Compose uses the platform job statuses: `queued`, `running`, `needs_input`, `blocked`, `stalled`, `completed`, `failed`, `cancelled`, and `timeout`. Report status (`passed`, `failed`, `needs_review`, or `timeout`) is an artifact-level assessment and does not replace job status.
 

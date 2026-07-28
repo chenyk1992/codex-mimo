@@ -105,7 +105,7 @@ The `plan` workflow is read-only: MiMoCode must return the plan in its final res
 { "workflow": "dev", "task": "Implement the feature", "acceptance": { "build": ["npm run build"], "test": ["npm test"], "diffCheck": true } }
 ```
 
-All work tools accept optional `model`, `timeoutMs`, `idleTimeoutMs`, `progressWarningMs`, `progressTimeoutMs`, and one notification target:
+All work tools accept optional `timeoutMs`, `idleTimeoutMs`, `progressWarningMs`, `progressTimeoutMs`, and one notification target. Model and provider selection are intentionally not exposed: every run inherits MiMoCode's own configuration and credentials.
 
 - `idleTimeoutMs`: optional transport idle stop-loss in milliseconds (default 30 minutes; `0` disables). Measures silence since the last stdout JSONL line.
 - `progressWarningMs`: optional internal warning before effective-progress stop-loss (default 2 minutes; `120_000`).

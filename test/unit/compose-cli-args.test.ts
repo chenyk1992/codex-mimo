@@ -13,7 +13,6 @@ it("passes the complete Compose request through the shared work API", async () =
     "--verify", "npm test",
     "--verify", "npm run build",
     "--report-dir", "reports",
-    "--model", "mimo-v2",
     "--timeout-ms", "45000",
     "Fix the pipeline"
   ], {
@@ -32,7 +31,6 @@ it("passes the complete Compose request through the shared work API", async () =
     since: "origin/main",
     verification: ["npm test", "npm run build"],
     reportDir: "reports",
-    model: "mimo-v2",
     timeoutMs: 45000,
     idleTimeoutMs: 1_800_000,
     progressWarningMs: 120_000,

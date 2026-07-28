@@ -63,7 +63,7 @@ import type { StreamingRunResult } from "../mimo/streaming-runner.js";
 import { preflightVerificationCommand } from "../compose/verify.js";
 import { runScopeCheck } from "./path-scope.js";
 import { isRuntimeArtifactPath } from "./runtime-paths.js";
-import { SCOPE_CHECK_GATE } from "./safety-contracts.js";
+import { CODEX_MIMO_READONLY_AGENT, SCOPE_CHECK_GATE } from "./safety-contracts.js";
 import type { JobFailureCause } from "./jobs.js";
 import { implementPrompt, planPrompt, resumeContinuationPrompt, resumePrompt, reviewPrompt } from "./prompt.js";
 import { classifyRunOutcome, type JobOutcome, type RunEvidence } from "./job-outcome.js";
@@ -75,7 +75,8 @@ import {
   writeJobCheckpoint,
   readJobCheckpoint,
   type JobCheckpoint,
-  captureRepositoryFingerprint
+  captureRepositoryFingerprint,
+  RESUMABLE_FAILURE_CODES
 } from "./job-checkpoint.js";
 import type {
   BatchMode,
@@ -126,7 +127,6 @@ const BatchModeSchema = z.enum(["auto", "single", "sliced"]);
 
 const CommonRequestSchema = z.object({
   cwd: z.string().min(1),
-  model: z.string().min(1).optional(),
   timeoutMs: z.number().int().positive().default(DEFAULT_TIMEOUT_MS),
   idleTimeoutMs: z.number().int().min(0).default(DEFAULT_TIMEOUT_MS),
   progressWarningMs: z.number().int().min(0).default(120_000),
@@ -161,7 +161,7 @@ const FixCiRequestSchema = CommonRequestSchema.extend({
 });
 
 const JobExecutionPolicySchema = z.object({
-  agent: z.enum(["plan", "build", "compose"]),
+  agent: z.enum(["plan", CODEX_MIMO_READONLY_AGENT, "build", "compose"]),
   writesAllowed: z.boolean()
 }).strict();
 
@@ -306,7 +306,7 @@ export interface BoundJobDefinition {
 
 const planDefinition: JobDefinition<"plan", PlanJobRequest> = directDefinition({
   kind: "plan",
-  agent: "plan",
+  agent: CODEX_MIMO_READONLY_AGENT,
   writesAllowed: false,
   requireFinalText: true,
   prompt: (request) => planPrompt(request.task),
@@ -323,7 +323,7 @@ const implementDefinition: JobDefinition<"implement", ImplementJobRequest> = dir
 
 const reviewDefinition: JobDefinition<"review", ReviewJobRequest> = {
   kind: "review",
-  executionPolicy: () => ({ agent: "plan", writesAllowed: false }),
+  executionPolicy: () => ({ agent: CODEX_MIMO_READONLY_AGENT, writesAllowed: false }),
   async buildPrompt(request, signal) {
     const base = request.base ?? "HEAD";
     const diff = await captureGitDiff(request.cwd, base, { signal });
@@ -341,8 +341,7 @@ const reviewDefinition: JobDefinition<"review", ReviewJobRequest> = {
   buildMimoArgs(request, prompt) {
     return buildMimoRunArgs({
       cwd: request.cwd,
-      agent: "plan",
-      model: request.model,
+      agent: CODEX_MIMO_READONLY_AGENT,
       message: prompt.message,
       title: "codex-mimo review",
       files: prompt.files
@@ -364,7 +363,9 @@ const fixCiDefinition: JobDefinition<"fix-ci", FixCiJobRequest> = directDefiniti
 
 const resumeDefinition: JobDefinition<"resume", ResumeJobRequest> = {
   kind: "resume",
-  executionPolicy: (request) => ({ ...request.executionPolicy }),
+  executionPolicy: (request) => request.executionPolicy.writesAllowed
+    ? { ...request.executionPolicy }
+    : { agent: CODEX_MIMO_READONLY_AGENT, writesAllowed: false },
   async buildPrompt(request) {
     const task = request.task ?? request.checkpoint?.remainingChecklist[0] ?? "Continue the job.";
     const promptText = request.checkpoint
@@ -379,8 +380,9 @@ const resumeDefinition: JobDefinition<"resume", ResumeJobRequest> = {
   buildMimoArgs(request, prompt) {
     return buildMimoRunArgs({
       cwd: request.cwd,
-      agent: request.executionPolicy.agent,
-      model: request.model,
+      agent: request.executionPolicy.writesAllowed
+        ? request.executionPolicy.agent
+        : CODEX_MIMO_READONLY_AGENT,
       ...(request.sessionId ? { session: request.sessionId } : {}),
       message: prompt.message,
       title: "codex-mimo resume",
@@ -394,10 +396,13 @@ const resumeDefinition: JobDefinition<"resume", ResumeJobRequest> = {
 
 const composeDefinition: JobDefinition<"compose", ComposeJobRequest> = {
   kind: "compose",
-  executionPolicy: (request) => ({
-    agent: "compose",
-    writesAllowed: getComposeWorkflow(request.workflow).writesAllowed
-  }),
+  executionPolicy: (request) => {
+    const writesAllowed = getComposeWorkflow(request.workflow).writesAllowed;
+    return {
+      agent: writesAllowed ? "build" : CODEX_MIMO_READONLY_AGENT,
+      writesAllowed
+    };
+  },
   async buildPrompt(request) {
     const workflow = getComposeWorkflow(request.workflow);
     return preparePromptTransport(buildComposePrompt({
@@ -408,10 +413,10 @@ const composeDefinition: JobDefinition<"compose", ComposeJobRequest> = {
     }), { cwd: request.cwd });
   },
   buildMimoArgs(request, prompt) {
+    const writesAllowed = getComposeWorkflow(request.workflow).writesAllowed;
     return buildMimoRunArgs({
       cwd: request.cwd,
-      agent: "compose",
-      model: request.model,
+      agent: writesAllowed ? "build" : CODEX_MIMO_READONLY_AGENT,
       message: prompt.message,
       title: `codex-mimo compose ${request.workflow}`,
       files: mergeChangedFiles(prompt.files, request.file ? [request.file] : [])
@@ -472,10 +477,10 @@ function bind<Kind extends JobKind, Request extends { cwd: string }>(
 
 interface DirectDefinitionInput<
   Kind extends Exclude<JobKind, "compose" | "resume">,
-  Request extends { cwd: string; model?: string }
+  Request extends { cwd: string }
 > {
   kind: Kind;
-  agent: "plan" | "build";
+  agent: typeof CODEX_MIMO_READONLY_AGENT | "build";
   writesAllowed: boolean;
   requireFinalText?: boolean;
   prompt: (request: Request) => string;
@@ -485,7 +490,7 @@ interface DirectDefinitionInput<
 
 function directDefinition<
   Kind extends Exclude<JobKind, "compose" | "resume">,
-  Request extends { cwd: string; model?: string }
+  Request extends { cwd: string }
 >(
   input: DirectDefinitionInput<Kind, Request>
 ): JobDefinition<Kind, Request> {
@@ -499,7 +504,6 @@ function directDefinition<
       return buildMimoRunArgs({
         cwd: request.cwd,
         agent: input.agent,
-        model: request.model,
         message: prompt.message,
         title: input.title,
         files: mergeChangedFiles(prompt.files, input.files?.(request) ?? [])
@@ -518,7 +522,11 @@ async function finalizeDirect<Request extends { cwd: string; acceptance?: Develo
 ): Promise<JobOutcome> {
   const requiresAcceptance = context.job.kind === "implement";
   const changedFiles = collectChangedFiles(context, writesAllowed);
-  const acceptanceRun = requiresAcceptance
+  const initialOutcome = classifyRunOutcome(runEvidenceFromContext(context, {
+    verification: [],
+    ...(requireFinalText ? { requireFinalText: true } : {})
+  }));
+  const acceptanceRun = requiresAcceptance && shouldRunAcceptance(initialOutcome)
     ? await runAcceptanceForFinalize(context, {
         writesAllowed,
         acceptance: context.request.acceptance,
@@ -603,21 +611,27 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
   let compact: JobVerification[] = [];
   let acceptanceResult: DevelopmentAcceptanceResult | undefined;
   let acceptanceMissing: { reason: string; code: "acceptance_config_missing" } | undefined;
+  const initialOutcome = classifyRunOutcome(runEvidenceFromContext(context, {
+    verification: [],
+    ...(workflow.name === "plan" ? { requireFinalText: true } : {})
+  }));
 
   if (requiresAcceptance) {
-    const acceptanceRun = await runAcceptanceForFinalize(context, {
-      writesAllowed: workflow.writesAllowed,
-      acceptance: context.request.acceptance,
-      legacyVerification: context.request.verification,
-      changedFiles,
-      reportDiff
-    });
-    if (acceptanceRun.missing) {
-      acceptanceMissing = acceptanceRun.missing;
-    } else if (acceptanceRun.result) {
-      acceptanceResult = acceptanceRun.result;
-      verificationDetails = acceptanceResult.verificationDetails;
-      compact = compactVerificationFromAcceptance(acceptanceResult);
+    if (shouldRunAcceptance(initialOutcome)) {
+      const acceptanceRun = await runAcceptanceForFinalize(context, {
+        writesAllowed: workflow.writesAllowed,
+        acceptance: context.request.acceptance,
+        legacyVerification: context.request.verification,
+        changedFiles,
+        reportDiff
+      });
+      if (acceptanceRun.missing) {
+        acceptanceMissing = acceptanceRun.missing;
+      } else if (acceptanceRun.result) {
+        acceptanceResult = acceptanceRun.result;
+        verificationDetails = acceptanceResult.verificationDetails;
+        compact = compactVerificationFromAcceptance(acceptanceResult);
+      }
     }
   } else {
     const runVerification = context.deps?.runVerification ?? runVerificationCommands;
@@ -1120,6 +1134,10 @@ function applyAcceptanceFailure(
     verification: compact,
     acceptance: acceptanceSummary
   };
+}
+
+function shouldRunAcceptance(outcome: JobOutcome): boolean {
+  return outcome.errorCode !== "prompt_identity_mismatch";
 }
 
 function toAcceptanceSummary(result: DevelopmentAcceptanceResult): JobAcceptanceSummary {
@@ -1658,6 +1676,9 @@ export async function advanceJobChainAfterChild(input: {
     if (sliceState === "cancelled") {
       cancelPending(input.cwd, chain.chainId);
     }
+    if (sliceState === "failed" && !isResumableSliceFailure(child)) {
+      cancelPending(input.cwd, chain.chainId);
+    }
     const attention = buildRootAttentionTransition({
       child,
       sliceState,
@@ -1924,6 +1945,17 @@ function buildRootAttentionTransition(input: {
   };
 
   if (input.sliceState === "failed") {
+    if (!isResumableSliceFailure(input.child)) {
+      return {
+        ...base,
+        status: "failed",
+        summary: input.child.summary ?? `Slice ${sliceLabel} failed.`,
+        error: input.child.error ?? input.child.summary ?? `Slice ${sliceLabel} failed.`,
+        ...(input.child.errorCode ? { errorCode: input.child.errorCode } : {}),
+        ...(input.child.sessionId !== undefined ? { sessionId: input.child.sessionId } : {}),
+        ...(input.child.failureCauses !== undefined ? { failureCauses: input.child.failureCauses } : {})
+      };
+    }
     return {
       ...base,
       status: "failed",
@@ -1979,6 +2011,10 @@ function buildRootAttentionTransition(input: {
     summary: input.child.summary ?? `Slice ${sliceLabel} was cancelled.`,
     ...(input.child.errorCode ? { errorCode: input.child.errorCode } : { errorCode: "cancelled" })
   };
+}
+
+function isResumableSliceFailure(child: JobRecord): boolean {
+  return child.errorCode !== undefined && RESUMABLE_FAILURE_CODES.has(child.errorCode);
 }
 
 async function refreshRootChainCheckpoint(input: {
@@ -2039,7 +2075,6 @@ function resolveChainRootPlanInputFallback(job: JobRecord): {
   acceptance?: DevelopmentAcceptanceInput;
   legacyVerification?: string[];
   workflow?: ComposeWorkflowName;
-  model?: string;
   timeoutMs?: number;
   idleTimeoutMs?: number;
   progressWarningMs?: number;
@@ -2050,7 +2085,6 @@ function resolveChainRootPlanInputFallback(job: JobRecord): {
   return {
     objective: job.task,
     batchMode: "single",
-    ...(typeof request.model === "string" ? { model: request.model } : {}),
     ...(typeof request.timeoutMs === "number" ? { timeoutMs: request.timeoutMs } : {}),
     ...(typeof request.idleTimeoutMs === "number" ? { idleTimeoutMs: request.idleTimeoutMs } : {}),
     ...(typeof request.progressWarningMs === "number"
@@ -2075,7 +2109,6 @@ function resolveChainRootPlanInput(job: JobRecord): {
   legacyVerification?: string[];
   allowedPaths?: string[];
   workflow?: ComposeWorkflowName;
-  model?: string;
   timeoutMs?: number;
   idleTimeoutMs?: number;
   progressWarningMs?: number;
@@ -2089,7 +2122,6 @@ function resolveChainRootPlanInput(job: JobRecord): {
       batchMode: parsed.data.batchMode,
       acceptance: parsed.data.acceptance,
       ...(parsed.data.allowedPaths ? { allowedPaths: parsed.data.allowedPaths } : {}),
-      model: parsed.data.model,
       timeoutMs: parsed.data.timeoutMs,
       idleTimeoutMs: parsed.data.idleTimeoutMs,
       progressWarningMs: parsed.data.progressWarningMs,
@@ -2108,7 +2140,6 @@ function resolveChainRootPlanInput(job: JobRecord): {
       legacyVerification: parsed.data.verification,
       ...(parsed.data.allowedPaths ? { allowedPaths: parsed.data.allowedPaths } : {}),
       workflow: parsed.data.workflow,
-      model: parsed.data.model,
       timeoutMs: parsed.data.timeoutMs,
       idleTimeoutMs: parsed.data.idleTimeoutMs,
       progressWarningMs: parsed.data.progressWarningMs,
@@ -2125,7 +2156,6 @@ function buildSliceChildRequest(
 ): unknown {
   const common = {
     cwd: root.cwd,
-    ...(plan.model ? { model: plan.model } : {}),
     ...(plan.timeoutMs !== undefined ? { timeoutMs: plan.timeoutMs } : {}),
     ...(plan.idleTimeoutMs !== undefined ? { idleTimeoutMs: plan.idleTimeoutMs } : {}),
     ...(plan.progressWarningMs !== undefined ? { progressWarningMs: plan.progressWarningMs } : {}),

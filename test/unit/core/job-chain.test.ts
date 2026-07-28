@@ -523,6 +523,47 @@ describe("advanceJobChainAfterChild", () => {
     expect(deliveries.some((delivery) => delivery.jobId === child.id)).toBe(false);
   });
 
+  it("preserves a non-resumable child failure and cancels remaining slices", async () => {
+    const cwd = tempWorkspace();
+    const boot = await seedTwoSliceChain(cwd);
+    const child = readJob(cwd, boot.childJobId)!;
+    await transitionJob(cwd, child.id, {
+      status: "running",
+      summary: "running slice 1",
+      phase: "editing"
+    });
+    await transitionJob(cwd, child.id, {
+      status: "failed",
+      summary: "MiMoCode prompt identity did not match the job query.",
+      error: "MiMoCode prompt identity did not match the job query.",
+      errorCode: "prompt_identity_mismatch",
+      sessionId: "ses-identity",
+      failureCauses: [{ code: "prompt_identity_mismatch", stage: "prompt" }]
+    });
+
+    const advanced = await advanceJobChainAfterChild(
+      { cwd, child: readJob(cwd, child.id)! },
+      {
+        writeRootCheckpoint: async () => undefined,
+        spawnJobSupervisor: () => 1
+      }
+    );
+
+    expect(advanced.rootTerminal).toBe(true);
+    expect(advanced.root).toMatchObject({
+      status: "failed",
+      errorCode: "prompt_identity_mismatch",
+      sessionId: "ses-identity",
+      failureCauses: [{ code: "prompt_identity_mismatch", stage: "prompt" }]
+    });
+
+    const chain = readJobChain(cwd, boot.chainId)!;
+    expect(chain.sliceStates).toMatchObject({
+      "slice-1": "failed",
+      "slice-2": "cancelled"
+    });
+  });
+
   it("ignores non-chain children", async () => {
     const cwd = tempWorkspace();
     const job = createJobStore(cwd).create({

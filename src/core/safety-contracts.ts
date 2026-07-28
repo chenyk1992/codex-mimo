@@ -89,6 +89,13 @@ export const SINGLE_MODE_ALLOWED_PATHS_REQUIRED_MESSAGE =
 export const MAX_ALLOWED_PATHS_JSON_ENV_CHARS = 16_384;
 export const MAX_STAGED_CALLBACKS = 8;
 
+/**
+ * Bridge-owned execution policy for tasks that must not mutate the workspace.
+ * It intentionally omits model/provider settings so MiMoCode resolves those
+ * exclusively from its own configuration.
+ */
+export const CODEX_MIMO_READONLY_AGENT = "codex-mimo-readonly" as const;
+
 export const WRITE_TOOL_NAMES = ["write", "edit"] as const;
 export const WRITE_PATH_FIELD_PRIORITY = ["file_path", "filepath", "filePath", "path"] as const;
 

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { execa } from "execa";
@@ -12,6 +13,14 @@ const describeSmoke = runSmoke ? describe : describe.skip;
 function writeFullHookProject(root: string, markerPath: string): void {
   const pluginDir = path.join(root, ".mimocode", "plugin");
   fs.mkdirSync(pluginDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(root, ".mimocode", "mimocode.jsonc"),
+    JSON.stringify({
+      dream: { auto: false },
+      distill: { auto: false }
+    }, null, 2),
+    "utf-8"
+  );
   fs.writeFileSync(
     path.join(pluginDir, "capture.js"),
     `
@@ -32,6 +41,9 @@ export default async function capturePlugin() {
     "session.pre": async (input, output) => {
       await dump("pre", { input, output });
     },
+    "session.userQuery.pre": async (input, output) => {
+      await dump("user-query-pre", { input, output });
+    },
     "session.post": async (input) => {
       await dump("post", input);
     }
@@ -45,7 +57,6 @@ export default async function capturePlugin() {
 describeSmoke("local MiMoCode hook payload shape", () => {
   it("captures session.pre + session.post payload + raw JSONL", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-shape-"));
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-shape-home-"));
     const marker = path.join(root, "marker.json");
     writeFullHookProject(root, marker);
 
@@ -57,8 +68,7 @@ describeSmoke("local MiMoCode hook payload shape", () => {
     const proc = execa(resolveMimoCommand(), ["run", "--format", "json", "respond with the single word: ok"], {
       cwd: root,
       reject: false,
-      stdin: "ignore",
-      env: { MIMOCODE_HOME: home }
+      stdin: "ignore"
     });
     proc.stdout?.pipe(stdoutStream);
     proc.stderr?.pipe(stderrStream);
@@ -69,6 +79,9 @@ describeSmoke("local MiMoCode hook payload shape", () => {
 
     // Read all three capture artifacts and stdout
     const prePayload = fs.existsSync(marker + ".pre.json") ? JSON.parse(fs.readFileSync(marker + ".pre.json", "utf-8")) : null;
+    const userQueryPrePayload = fs.existsSync(marker + ".user-query-pre.json")
+      ? JSON.parse(fs.readFileSync(marker + ".user-query-pre.json", "utf-8"))
+      : null;
     const postPayload = fs.existsSync(marker + ".post.json") ? JSON.parse(fs.readFileSync(marker + ".post.json", "utf-8")) : null;
     const rawStdout = fs.readFileSync(stdoutLog, "utf-8");
     const lines = rawStdout.split(/\r?\n/).filter((l) => l.trim().length > 0);
@@ -95,6 +108,7 @@ describeSmoke("local MiMoCode hook payload shape", () => {
       eventTypeCounts: typeCounts,
       toolSamples,
       prePayloadKeys: prePayload ? Object.keys(prePayload.input ?? {}) : null,
+      userQueryPrePayload,
       postPayloadKeys: postPayload ? Object.keys(postPayload) : null,
       postHasFinalText: postPayload && typeof (postPayload as Record<string, unknown>).finalText === "string",
       postFinalTextSample: postPayload && typeof (postPayload as Record<string, unknown>).finalText === "string"
@@ -116,16 +130,19 @@ describeSmoke("local MiMoCode hook payload shape", () => {
 
     expect(result.exitCode).toBe(0);
     expect(parsed.length).toBeGreaterThan(0);
+    expect(JSON.parse(userQueryPrePayload.input.query.trim())).toBe("respond with the single word: ok");
     expect(postPayload).toBeTruthy();
   }, 60_000);
 
   it("confirms createHookCallbackController receives the same payload over HTTP", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-runtime-shape-"));
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-runtime-shape-home-"));
     const hook = await createHookCallbackController({
       cwd: root,
       kind: "smoke-shape",
-      callbackWaitMs: 15_000
+      callbackWaitMs: 15_000,
+      expectedQueryHash: crypto.createHash("sha256")
+        .update("respond with the single word: pong", "utf-8")
+        .digest("hex")
     });
 
     try {
@@ -135,7 +152,7 @@ describeSmoke("local MiMoCode hook payload shape", () => {
         cwd: root,
         reject: false,
         stdin: "ignore",
-        env: { ...hook.env, MIMOCODE_HOME: home }
+        env: hook.env
       });
       proc.stdout?.pipe(stdoutStream);
       const result = await proc;

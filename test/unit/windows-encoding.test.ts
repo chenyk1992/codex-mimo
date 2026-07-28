@@ -32,7 +32,8 @@ describe("Windows UTF-8 encoding regressions", () => {
     expect(fs.readFileSync(promptFile)).toEqual(Buffer.from(prompt, "utf-8"));
     expect(fs.readFileSync(promptFile, "utf-8")).toBe(prompt);
     expect(transported.message).toContain("UTF-8");
-    expect(transported.message).toContain("Get-Content -Encoding UTF8");
+    expect(transported.message).not.toMatch(/[\r\n]/);
+    expect(transported.message).not.toContain(cwd);
 
     const report = createComposeReport({
       id: "utf8-run",

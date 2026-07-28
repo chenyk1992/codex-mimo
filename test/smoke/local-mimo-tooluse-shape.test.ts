@@ -11,7 +11,6 @@ const describeSmoke = runSmoke ? describe : describe.skip;
 describeSmoke("local MiMoCode tool_use event shape", () => {
   it("captures a real tool_use payload from a file-writing prompt", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-tooluse-"));
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-tooluse-home-"));
     const stdoutLog = path.join(root, "stdout.jsonl");
     const stderrLog = path.join(root, "stderr.txt");
     const stdoutStream = fs.createWriteStream(stdoutLog);
@@ -23,8 +22,7 @@ describeSmoke("local MiMoCode tool_use event shape", () => {
     const proc = execa(resolveMimoCommand(), ["run", "--format", "json", prompt], {
       cwd: root,
       reject: false,
-      stdin: "ignore",
-      env: { MIMOCODE_HOME: home }
+      stdin: "ignore"
     });
     proc.stdout?.pipe(stdoutStream);
     proc.stderr?.pipe(stderrStream);
