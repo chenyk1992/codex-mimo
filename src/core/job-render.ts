@@ -132,9 +132,33 @@ export function renderCompactJobResult(
       ? (job.reportPaths?.plan ?? job.reportPaths?.result ?? job.reportPaths?.markdown)
       : (job.reportPaths?.markdown ?? job.reportPaths?.result)),
     ...(semantic ? { summary: semantic } : {}),
-    ...(attention ? { attention } : {})
+    ...(attention ? { attention } : {}),
+    ...(job.reconciliation
+      ? { reconciliation: publicReconciliation(job.reconciliation) }
+      : {})
   };
   return fitCompactResult(result);
+}
+
+function publicReconciliation(
+  reconciliation: NonNullable<JobRecord["reconciliation"]>
+): NonNullable<CompactJobResult["reconciliation"]> {
+  return {
+    status: reconciliation.status,
+    changeDetection: {
+      status: reconciliation.changeDetection.status,
+      sources: [...reconciliation.changeDetection.sources],
+      candidates: reconciliation.changeDetection.candidates
+        .slice(0, MAX_COMPACT_FILES)
+        .map(compactFilePath),
+      ...(reconciliation.changeDetection.reason
+        ? { reason: reconciliation.changeDetection.reason }
+        : {})
+    },
+    ...(reconciliation.warnings
+      ? { warnings: reconciliation.warnings.map((warning) => ({ ...warning })) }
+      : {})
+  };
 }
 
 export function isSemanticResultJob(job: JobRecord): boolean {
@@ -425,7 +449,8 @@ function compactVerification(result: JobVerification): JobVerification {
     command: compactLine(redactDiagnosticText(result.command)),
     exitCode: result.exitCode,
     passed: result.passed,
-    ...(result.durationMs === undefined ? {} : { durationMs: result.durationMs })
+    ...(result.durationMs === undefined ? {} : { durationMs: result.durationMs }),
+    ...(result.source ? { source: result.source } : {})
   };
 }
 

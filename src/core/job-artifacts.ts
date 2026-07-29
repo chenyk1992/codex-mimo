@@ -157,6 +157,9 @@ function normalizeReportPaths(reportPaths: JobReportPaths): JobReportPaths {
     ...(reportPaths.verification ? { verification: normalize(reportPaths.verification)! } : {}),
     ...(reportPaths.diff ? { diff: normalize(reportPaths.diff)! } : {}),
     ...(reportPaths.checkpoint ? { checkpoint: normalize(reportPaths.checkpoint)! } : {}),
-    ...(reportPaths.slices ? { slices: normalize(reportPaths.slices)! } : {})
+    ...(reportPaths.slices ? { slices: normalize(reportPaths.slices)! } : {}),
+    ...(reportPaths.executionEvidence
+      ? { executionEvidence: normalize(reportPaths.executionEvidence)! }
+      : {})
   };
 }

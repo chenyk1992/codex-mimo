@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
+import type { MimoCommandEvidence } from "./events.js";
 
 import type {
   AcceptanceOutcome,
@@ -47,6 +49,7 @@ export interface AcceptanceStageResult {
   reason?: string;
   failedTests?: string[];
   suggestion?: string;
+  source?: "executed" | "mimo_event";
 }
 
 export interface DevelopmentAcceptanceResult {
@@ -503,6 +506,8 @@ export async function runDevelopmentAcceptance(
     runDiffCheck?: (cwd: string, signal?: AbortSignal) => Promise<AcceptanceStageResult>;
     execute?: VerificationCommandExecutor;
     platform?: NodeJS.Platform;
+    commandEvidence?: MimoCommandEvidence[];
+    finalRepositoryFingerprint?: string;
   } = {}
 ): Promise<DevelopmentAcceptanceResult> {
   const stages: AcceptanceStageResult[] = [];
@@ -557,6 +562,39 @@ export async function runDevelopmentAcceptance(
       continue;
     }
 
+    const reusable = reusableStageEvidence(
+      cwd,
+      stagePlan.commands,
+      options.commandEvidence,
+      options.finalRepositoryFingerprint
+    );
+    if (reusable) {
+      for (const evidence of reusable) {
+        const detail: JobVerificationDetails = {
+          command: evidence.command,
+          exitCode: 0,
+          passed: true,
+          durationMs: 0,
+          stdout: JSON.stringify({
+            source: "mimo_event",
+            repositoryFingerprint: options.finalRepositoryFingerprint
+          }),
+          stderr: "",
+          source: "mimo_event"
+        };
+        verificationDetails.push(detail);
+        stages.push({
+          stage: stagePlan.stage,
+          outcome: "passed",
+          command: evidence.command,
+          exitCode: 0,
+          durationMs: 0,
+          source: "mimo_event"
+        });
+      }
+      continue;
+    }
+
     const results = await runVerificationCommands(cwd, stagePlan.commands, {
       signal: options.signal,
       execute: options.execute,
@@ -572,7 +610,8 @@ export async function runDevelopmentAcceptance(
         passed: result.passed,
         durationMs: result.durationMs,
         stdout: result.stdout,
-        stderr: result.stderr
+        stderr: result.stderr,
+        source: "executed"
       });
 
       const stageResult: AcceptanceStageResult = {
@@ -582,7 +621,8 @@ export async function runDevelopmentAcceptance(
         exitCode: result.exitCode,
         stdout: result.stdout,
         stderr: result.stderr,
-        durationMs: result.durationMs
+        durationMs: result.durationMs,
+        source: "executed"
       };
 
       if (!result.passed) {
@@ -625,4 +665,39 @@ export async function runDevelopmentAcceptance(
     compactTests: toCompactTests(stages),
     verificationDetails
   };
+}
+
+function reusableStageEvidence(
+  cwd: string,
+  commands: string[],
+  evidence: MimoCommandEvidence[] | undefined,
+  finalRepositoryFingerprint: string | undefined
+): MimoCommandEvidence[] | undefined {
+  if (!evidence?.length || !finalRepositoryFingerprint) return undefined;
+  const resolvedCwd = path.resolve(cwd);
+  const matched: MimoCommandEvidence[] = [];
+  for (const command of commands) {
+    const normalized = normalizeCommand(command);
+    const candidate = [...evidence].reverse().find((entry) =>
+      entry.exitCode === 0 &&
+      entry.afterLastWrite &&
+      entry.repositoryFingerprint === finalRepositoryFingerprint &&
+      path.resolve(entry.cwd) === resolvedCwd &&
+      (
+        entry.commandHash === commandHash(normalized) ||
+        normalizeCommand(entry.command) === normalized
+      )
+    );
+    if (!candidate) return undefined;
+    matched.push(candidate);
+  }
+  return matched;
+}
+
+function normalizeCommand(command: string): string {
+  return command.trim().replace(/\s+/g, " ");
+}
+
+function commandHash(command: string): string {
+  return crypto.createHash("sha256").update(normalizeCommand(command)).digest("hex");
 }

@@ -16,10 +16,6 @@ export const COMPOSE_WORKFLOW_NAMES = [
 
 export type ComposeWorkflowName = typeof COMPOSE_WORKFLOW_NAMES[number];
 
-export function composeWorkflowUsage(): string {
-  return COMPOSE_WORKFLOW_NAMES.join("|");
-}
-
 export interface ComposeWorkflow {
   name: ComposeWorkflowName;
   description: string;

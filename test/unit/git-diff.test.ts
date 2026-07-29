@@ -90,7 +90,8 @@ describe("git diff helpers", () => {
     await expect(captureGitStatus("E:/repo")).resolves.toEqual({
       short: "",
       dirty: false,
-      fingerprints: {}
+      fingerprints: {},
+      repositoryAvailable: false
     });
     expect(mockedExeca).toHaveBeenCalledTimes(1);
   });
@@ -236,6 +237,52 @@ describe("git diff helpers", () => {
       diffStat: "",
       diff: ""
     });
+  });
+
+  it("returns an empty diff snapshot for an unborn HEAD", async () => {
+    mockedExeca.mockResolvedValue({
+      exitCode: 128,
+      stdout: "",
+      stderr: "fatal: Needed a single revision"
+    });
+
+    await expect(captureGitDiff("E:/repo")).resolves.toEqual({
+      changedFiles: [],
+      diffStat: "",
+      diff: ""
+    });
+    expect(mockedExeca).toHaveBeenCalledTimes(1);
+  });
+
+  it("captures every tracked file when the job creates the first commit", async () => {
+    mockedExeca
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: "1672c89 feat: initial implementation",
+        stderr: ""
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: "src/app.ts\ntest/app.test.ts",
+        stderr: ""
+      });
+
+    await expect(
+      captureGitCommitChanges(
+        "E:/repo",
+        { oid: "", short: "", subject: "" },
+        { oid: "1672c89", short: "1672c89", subject: "feat" }
+      )
+    ).resolves.toEqual({
+      commits: ["1672c89 feat: initial implementation"],
+      changedFiles: ["src/app.ts", "test/app.test.ts"]
+    });
+    expect(mockedExeca).toHaveBeenNthCalledWith(
+      2,
+      "git",
+      ["-c", "safe.directory=E:/repo", "ls-tree", "-r", "--name-only", "1672c89"],
+      { cwd: "E:/repo" }
+    );
   });
 
   it("captures commits and files between two git heads", async () => {

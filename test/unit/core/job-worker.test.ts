@@ -27,6 +27,7 @@ import {
   type StreamingRunResult
 } from "../../../src/mimo/streaming-runner.js";
 import type { MimoProcessSelection } from "../../../src/mimo/run-json.js";
+import { writeExecutionEvidence } from "../../../src/core/job-execution-evidence.js";
 
 const tempDirs: string[] = [];
 
@@ -1457,8 +1458,7 @@ describe("runJobWorker", () => {
     ["buildPrompt", "prompt setup failed"],
     ["hook", "hook setup failed"],
     ["run", "spawn mimo ENOENT"],
-    ["callback", "callback wait failed"],
-    ["finalize", "verification execution failed"]
+    ["callback", "callback wait failed"]
   ] as const)("turns a %s exception into one failed outcome", async (stage, message) => {
     const cwd = tempWorkspace();
     const job = seedJob(cwd, "compose");
@@ -1473,8 +1473,6 @@ describe("runJobWorker", () => {
       vi.mocked(controller.waitForCallback).mockRejectedValueOnce(new Error(message));
       overrides.createHookCallbackController = async () => controller;
     }
-    if (stage === "finalize") vi.mocked(bound.finalize).mockRejectedValueOnce(new Error(message));
-
     await runJobWorker(cwd, job.id, workerDeps(overrides));
 
     const stored = readJob(cwd, job.id)!;
@@ -1482,6 +1480,117 @@ describe("runJobWorker", () => {
     expect(stored.error).toBe("MiMoCode job failed.");
     expect(JSON.stringify(stored)).not.toContain(message);
     expect(readJobSignals(stored.signalsFile).signals.filter((signal) => signal.kind === "failed")).toHaveLength(1);
+  });
+
+  it("retries reconciliation without rerunning MiMoCode", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "compose");
+    const bound = definition();
+    vi.mocked(bound.finalize).mockRejectedValueOnce(new Error("transient writer failure"));
+    const deps = workerDeps({ bindJobDefinition: () => bound });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)).toMatchObject({ status: "completed", pid: null });
+    expect(bound.finalize).toHaveBeenCalledTimes(2);
+    expect(deps.runMimoStreaming).toHaveBeenCalledOnce();
+  });
+
+  it("does not claim execution success when reconciliation fails before evidence is durable", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "compose");
+    const deps = workerDeps({
+      captureDiff: async () => {
+        throw new Error("diff capture unavailable");
+      }
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "reconciliation_failed"
+    });
+    expect(deps.runMimoStreaming).toHaveBeenCalledOnce();
+  });
+
+  it("preserves execution evidence when reconciliation retries are exhausted", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "compose");
+    const bound = definition();
+    vi.mocked(bound.finalize).mockRejectedValue(new Error("persistent writer failure"));
+    const deps = workerDeps({
+      bindJobDefinition: () => bound,
+      captureDiff: async () => ({
+        changedFiles: ["src/generated.ts"],
+        diffStat: "1 file changed",
+        diff: "diff"
+      })
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    const stored = readJob(cwd, job.id)!;
+    expect(stored).toMatchObject({
+      status: "completed",
+      errorCode: "reconciliation_failed",
+      changedFiles: ["src/generated.ts"],
+      reconciliation: {
+        status: "degraded",
+        warnings: expect.arrayContaining([
+          { code: "reconciliation_failed", stage: "reconciliation" }
+        ])
+      },
+      reportPaths: {
+        executionEvidence: expect.any(String),
+        result: expect.any(String)
+      }
+    });
+    expect(bound.finalize).toHaveBeenCalledTimes(2);
+    expect(deps.runMimoStreaming).toHaveBeenCalledOnce();
+    expect(readJobSignals(stored.signalsFile).signals.filter(
+      (signal) => signal.kind === "completed"
+    )).toHaveLength(1);
+  });
+
+  it("recovers a crashed finalizer from durable evidence without rerunning MiMoCode", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "compose");
+    const running = (await transitionJob(cwd, job.id, {
+      status: "running",
+      phase: "finalizing",
+      summary: "reconciling",
+      pid: null,
+      changedFiles: ["src/generated.ts"]
+    })).job;
+    writeExecutionEvidence(running, {
+      reconciliationAttempts: 1,
+      run: { exitCode: 0 },
+      executionCallback: { invocationId: "inv-recovery", outcome: "completed" },
+      changeDetection: {
+        files: ["src/generated.ts"],
+        candidates: [],
+        status: "complete",
+        sources: ["git_diff"]
+      },
+      commandEvidence: [],
+      finalRepositoryFingerprint: "fingerprint"
+    }, "Recovered result.");
+    const bound = definition({
+      status: "completed",
+      summary: "Recovered.",
+      changedFiles: ["src/generated.ts"]
+    });
+    const deps = workerDeps({ bindJobDefinition: () => bound });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "completed",
+      changedFiles: ["src/generated.ts"]
+    });
+    expect(bound.finalize).toHaveBeenCalledOnce();
+    expect(deps.runMimoStreaming).not.toHaveBeenCalled();
   });
 
   it("persists every raw line and normalized high-signal progress without failing on malformed lines", async () => {

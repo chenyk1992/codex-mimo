@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import crypto from "node:crypto";
 
 import {
   runDevelopmentAcceptance,
@@ -152,5 +153,110 @@ describe("runDevelopmentAcceptance", () => {
         })
       ])
     );
+  });
+
+  it("reuses exact successful MiMo command evidence after the last write", async () => {
+    const execute = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+    const runDiffCheck = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const
+    }));
+
+    const result = await runDevelopmentAcceptance("/tmp/project", makePlan(), {
+      execute,
+      runDiffCheck,
+      finalRepositoryFingerprint: "final-fingerprint",
+      commandEvidence: [
+        {
+          command: "npm run build",
+          cwd: "/tmp/project",
+          exitCode: 0,
+          eventIndex: 5,
+          afterLastWrite: true,
+          repositoryFingerprint: "final-fingerprint"
+        },
+        {
+          command: "npm test",
+          cwd: "/tmp/project",
+          exitCode: 0,
+          eventIndex: 6,
+          afterLastWrite: true,
+          repositoryFingerprint: "final-fingerprint"
+        }
+      ]
+    });
+
+    expect(result.passed).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+    expect(runDiffCheck).toHaveBeenCalledOnce();
+    expect(result.verificationDetails).toEqual([
+      expect.objectContaining({ command: "npm run build", source: "mimo_event", passed: true }),
+      expect.objectContaining({ command: "npm test", source: "mimo_event", passed: true })
+    ]);
+  });
+
+  it("reruns acceptance when matching evidence predates the last write", async () => {
+    const execute = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+
+    await runDevelopmentAcceptance("/tmp/project", makePlan({
+      stages: [{ stage: "test", commands: ["npm test"], required: true }]
+    }), {
+      execute,
+      finalRepositoryFingerprint: "final-fingerprint",
+      commandEvidence: [{
+        command: "npm test",
+        cwd: "/tmp/project",
+        exitCode: 0,
+        eventIndex: 1,
+        afterLastWrite: false
+      }]
+    });
+
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("reruns acceptance when evidence belongs to another repository state", async () => {
+    const execute = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+
+    await runDevelopmentAcceptance("/tmp/project", makePlan({
+      stages: [{ stage: "test", commands: ["npm test"], required: true }]
+    }), {
+      execute,
+      finalRepositoryFingerprint: "final-fingerprint",
+      commandEvidence: [{
+        command: "npm test",
+        cwd: "/tmp/project",
+        exitCode: 0,
+        eventIndex: 2,
+        afterLastWrite: true,
+        repositoryFingerprint: "older-fingerprint"
+      }]
+    });
+
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it("reuses redacted persisted evidence through its command hash", async () => {
+    const execute = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+    const command = "npm test -- --token secret";
+    const commandHash = crypto.createHash("sha256").update(command).digest("hex");
+
+    await runDevelopmentAcceptance("/tmp/project", makePlan({
+      stages: [{ stage: "test", commands: [command], required: true }]
+    }), {
+      execute,
+      finalRepositoryFingerprint: "final-fingerprint",
+      commandEvidence: [{
+        command: "npm test -- --token [REDACTED]",
+        commandHash,
+        cwd: "/tmp/project",
+        exitCode: 0,
+        eventIndex: 2,
+        afterLastWrite: true,
+        repositoryFingerprint: "final-fingerprint"
+      }]
+    });
+
+    expect(execute).not.toHaveBeenCalled();
   });
 });

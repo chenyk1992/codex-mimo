@@ -104,6 +104,42 @@ describe("compact job rendering", () => {
     expect(JSON.stringify(result)).not.toMatch(/PRIVATE|session|notification|actions|output/);
   });
 
+  it("exposes partial change detection without treating candidates as verified files", () => {
+    const result = renderCompactJobResult(job({
+      status: "completed",
+      phase: undefined,
+      changedFiles: ["src/verified.ts"],
+      reconciliation: {
+        status: "degraded",
+        changeDetection: {
+          status: "partial",
+          sources: ["git_fingerprint", "scope_manifest"],
+          candidates: ["src/candidate.ts"],
+          reason: "Git was unavailable for one evidence source."
+        },
+        warnings: [{
+          code: "reconciliation_failed",
+          stage: "reconciliation"
+        }]
+      }
+    }));
+
+    expect(result.changedFiles).toEqual(["src/verified.ts"]);
+    expect(result.reconciliation).toEqual({
+      status: "degraded",
+      changeDetection: {
+        status: "partial",
+        sources: ["git_fingerprint", "scope_manifest"],
+        candidates: ["src/candidate.ts"],
+        reason: "Git was unavailable for one evidence source."
+      },
+      warnings: [{
+        code: "reconciliation_failed",
+        stage: "reconciliation"
+      }]
+    });
+  });
+
   it("adds only a bounded semantic summary for planning results", () => {
     const result = renderCompactJobResult(job({
       kind: "plan",

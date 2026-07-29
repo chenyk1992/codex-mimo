@@ -28,7 +28,7 @@ import {
 } from "./doctor.js";
 import { CLI_USAGE } from "./hints.js";
 
-export { CLI_USAGE, DOCTOR_HINT } from "./hints.js";
+export { CLI_USAGE } from "./hints.js";
 
 type OutputWriter = (line: string) => void;
 type AsyncCommand = (input: unknown) => Promise<unknown>;

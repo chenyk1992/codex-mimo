@@ -146,6 +146,7 @@ export async function updateRunningJobObservation(
   cwd: string,
   jobId: string,
   patch: {
+    phase?: JobRecord["phase"];
     lastEventAt?: string;
     lastActivityAt?: string;
     lastProgressAt?: string;
@@ -156,6 +157,10 @@ export async function updateRunningJobObservation(
     sessionId?: string | null;
     idleTimeoutMs?: number;
     quietSince?: string | null;
+    changedFiles?: string[];
+    executionCallback?: JobRecord["executionCallback"];
+    reportPaths?: JobRecord["reportPaths"];
+    reconciliation?: JobRecord["reconciliation"];
   }
 ): Promise<JobRecord> {
   return withProcessLock(resolveJobStateLock(cwd, jobId), async () => {
@@ -298,7 +303,10 @@ function buildPendingTransition(
     ...(transition.reportPaths !== undefined ? { reportPaths: transition.reportPaths } : {}),
     ...(transition.error !== undefined ? { error: publicSummary } : {}),
     ...(transition.errorCode !== undefined ? { errorCode: transition.errorCode } : {}),
-    ...(transition.failureCauses !== undefined ? { failureCauses: transition.failureCauses } : {})
+    ...(transition.failureCauses !== undefined ? { failureCauses: transition.failureCauses } : {}),
+    ...(transition.reconciliation !== undefined
+      ? { reconciliation: transition.reconciliation }
+      : {})
   };
 }
 

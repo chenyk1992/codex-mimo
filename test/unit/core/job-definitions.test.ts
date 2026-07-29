@@ -503,10 +503,10 @@ describe("job finalization", () => {
     const runDiffAcceptanceSelfCheck = vi.fn(async () => ({
       stage: "diff_check" as const,
       outcome: "passed" as const,
-      summary: { changedFileCount: 1, samplePaths: ["src/app.ts"] }
+      summary: { changedFileCount: 1, samplePaths: ["package.json"] }
     }));
     const captureDiff = vi.fn(async () => ({
-      changedFiles: ["src/app.ts"],
+      changedFiles: ["package.json"],
       diffStat: "1 file changed",
       diff: "diff --git a/src/app.ts\n+++ b/src/app.ts\n+hello\n"
     }));
@@ -541,6 +541,52 @@ describe("job finalization", () => {
     expect(outcome).toMatchObject({ status: "completed" });
   });
 
+  it("skips the secondary MiMo review for a small low-risk diff", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "dev",
+      task: "build it",
+      acceptance: {
+        build: ["node -e process.exit(0)"],
+        test: ["node -e process.exit(0)"],
+        diffCheck: true
+      }
+    };
+    const runReadOnlyDiffReview = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const
+    }));
+
+    const outcome = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("compose", request),
+      request,
+      run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      diff: {
+        changedFiles: ["src/app.ts"],
+        diffStat: "1 file changed, 3 insertions(+)",
+        diff: "diff --git a/src/app.ts b/src/app.ts\n+small\n"
+      },
+      verification: [],
+      deps: {
+        executeVerification: async () => ({ exitCode: 0, stdout: "ok", stderr: "" }),
+        runDiffAcceptanceSelfCheck: async () => ({
+          stage: "diff_check",
+          outcome: "passed",
+          summary: { changedFileCount: 1, samplePaths: ["src/app.ts"] }
+        }),
+        runReadOnlyDiffReview,
+        writeComposeReport: () => undefined
+      }
+    });
+
+    expect(runReadOnlyDiffReview).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ status: "completed" });
+  });
+
   it("fails diff_check when workspace changes exist but no usable diff artifact can be produced", async () => {
     const cwd = tempDir();
     const request: JobRequestByKind["compose"] = {
@@ -557,10 +603,10 @@ describe("job finalization", () => {
     const runDiffAcceptanceSelfCheck = vi.fn(async () => ({
       stage: "diff_check" as const,
       outcome: "passed" as const,
-      summary: { changedFileCount: 2, samplePaths: ["src/a.ts", "src/b.ts"] }
+      summary: { changedFileCount: 1, samplePaths: ["package-lock.json"] }
     }));
     const captureDiff = vi.fn(async () => ({
-      changedFiles: ["src/a.ts"],
+      changedFiles: ["package-lock.json"],
       diffStat: "",
       diff: ""
     }));
@@ -590,6 +636,57 @@ describe("job finalization", () => {
     expect(outcome).toMatchObject({
       status: "failed",
       errorCode: "delivery_contract_missing"
+    });
+  });
+
+  it("keeps deterministic acceptance and degrades when diff artifact capture fails", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "dev",
+      task: "build it",
+      acceptance: {
+        build: ["node -e process.exit(0)"],
+        test: ["node -e process.exit(0)"],
+        diffCheck: true
+      }
+    };
+    const runReadOnlyDiffReview = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const
+    }));
+
+    const outcome = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("compose", request),
+      request,
+      run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      verification: [],
+      deps: {
+        executeVerification: async () => ({ exitCode: 0, stdout: "ok", stderr: "" }),
+        runDiffAcceptanceSelfCheck: async () => ({
+          stage: "diff_check",
+          outcome: "passed",
+          summary: { changedFileCount: 1, samplePaths: ["package-lock.json"] }
+        }),
+        captureDiff: async () => { throw new Error("git unavailable"); },
+        runReadOnlyDiffReview,
+        writeComposeReport: () => undefined
+      }
+    });
+
+    expect(runReadOnlyDiffReview).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({
+      status: "completed",
+      reconciliation: {
+        status: "degraded",
+        warnings: [{
+          code: "diff_artifact_write_failed",
+          stage: "diff_artifact"
+        }]
+      }
     });
   });
 
@@ -975,7 +1072,7 @@ describe("job finalization", () => {
     expect(filled).toMatchObject({ status: "completed" });
   });
 
-  it.each(["verification", "report"] as const)("propagates Compose %s writer failures", async (failure) => {
+  it("propagates Compose verification failures", async () => {
     const cwd = tempDir();
     const request: JobRequestByKind["compose"] = {
       cwd,
@@ -984,7 +1081,7 @@ describe("job finalization", () => {
       acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
     };
     const bound = bindJobDefinition(makeJob("compose", request));
-    const error = new Error(`${failure} exploded`);
+    const error = new Error("verification exploded");
 
     await expect(bound.finalize({
       signal: ACTIVE_SIGNAL,
@@ -993,12 +1090,41 @@ describe("job finalization", () => {
       executionCallback: { invocationId: "inv", outcome: "completed" },
       verification: [],
       deps: {
-        runDevelopmentAcceptance: failure === "verification"
-          ? async () => { throw error; }
-          : async () => passingAcceptanceResult(),
-        writeComposeReport: failure === "report" ? () => { throw error; } : () => undefined
+        runDevelopmentAcceptance: async () => { throw error; },
+        writeComposeReport: () => undefined
       }
-    })).rejects.toThrow(`${failure} exploded`);
+    })).rejects.toThrow("verification exploded");
+  });
+
+  it("degrades without losing the outcome when Compose report writing fails", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "dev",
+      task: "compose",
+      acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
+    };
+    const bound = bindJobDefinition(makeJob("compose", request));
+
+    const outcome = await bound.finalize({
+      signal: ACTIVE_SIGNAL,
+      run: { stdout: '{"type":"message","text":"done"}\n', stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      verification: [],
+      deps: {
+        runDevelopmentAcceptance: async () => passingAcceptanceResult(),
+        writeComposeReport: () => { throw new Error("report exploded"); }
+      }
+    });
+
+    expect(outcome).toMatchObject({
+      status: "completed",
+      reconciliation: {
+        status: "degraded",
+        warnings: [{ code: "compose_report_write_failed", stage: "report" }]
+      }
+    });
   });
 });
 

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { extractSessionIdFromEvents, normalizeMimoEvent, parseMimoJsonLines, summarizeEvents } from "../../src/compose/events.js";
+import {
+  extractPassingCommandEvidence,
+  extractSessionIdFromEvents,
+  extractToolUseWritePaths,
+  normalizeMimoEvent,
+  parseMimoJsonLines,
+  summarizeEvents
+} from "../../src/compose/events.js";
 
 describe("compose event parsing", () => {
   it("normalizes public message events", () => {
@@ -144,5 +151,43 @@ describe("compose event parsing", () => {
     ];
 
     expect(extractSessionIdFromEvents(events)).toBe("ses_nested");
+  });
+
+  it("extracts canonical write paths without treating bash as a file write", () => {
+    const events = parseMimoJsonLines([
+      '{"type":"tool_use","part":{"type":"tool","tool":"write","state":{"input":{"file_path":"src/a.ts"}}}}',
+      '{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"input":{"filePath":"src/b.ts"}}}}',
+      '{"type":"tool_use","part":{"type":"tool","tool":"bash","state":{"metadata":{"exit":0},"input":{"command":"npm test"}}}}'
+    ].join("\n"));
+
+    expect(extractToolUseWritePaths(events)).toEqual(["src/a.ts", "src/b.ts"]);
+  });
+
+  it("accepts only successful commands that ran after the last declared write", () => {
+    const events = parseMimoJsonLines([
+      '{"type":"tool_use","timestamp":"2026-07-29T00:00:00.000Z","part":{"type":"tool","tool":"bash","state":{"metadata":{"exit":0},"input":{"command":"npm test"}}}}',
+      '{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"input":{"file_path":"src/a.ts"}}}}',
+      '{"type":"tool_use","timestamp":"2026-07-29T00:01:00.000Z","part":{"type":"tool","tool":"bash","state":{"metadata":{"exit":"0"},"input":{"command":"npm test","cwd":"E:/repo"}}}}',
+      '{"type":"tool_use","part":{"type":"tool","tool":"bash","state":{"metadata":{"exit":1},"input":{"command":"npm run build"}}}}'
+    ].join("\n"));
+
+    expect(extractPassingCommandEvidence(events, "E:/fallback")).toEqual([
+      {
+        command: "npm test",
+        cwd: "E:/fallback",
+        exitCode: 0,
+        eventIndex: 0,
+        afterLastWrite: false,
+        timestamp: "2026-07-29T00:00:00.000Z"
+      },
+      {
+        command: "npm test",
+        cwd: "E:/repo",
+        exitCode: 0,
+        eventIndex: 2,
+        afterLastWrite: true,
+        timestamp: "2026-07-29T00:01:00.000Z"
+      }
+    ]);
   });
 });

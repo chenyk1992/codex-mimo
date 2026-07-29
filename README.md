@@ -24,7 +24,7 @@ The six work tools and matching CLI commands share one launcher, definition regi
 
 ```text
 work request -> queued receipt -> job worker -> MiMoCode JSONL + session.post
-             -> finalization/verification -> attention signal -> notification outbox
+             -> execution evidence -> reconciliation/verification -> attention signal -> notification outbox
              -> webhook receiver or original Codex task
 ```
 
@@ -35,7 +35,7 @@ Job status is one of:
 - `needs_input`: paused until the caller supplies information
 - `blocked`: paused because an external condition prevents progress
 - `stalled`: no effective progress within the progress stop-loss; durable checkpoint written
-- `completed`: execution and required verification succeeded
+- `completed`: execution succeeded; required verification passed, or reconciliation degradation is explicitly recorded
 - `failed`: execution, callback, validation, or verification failed
 - `cancelled`: the caller cancelled the job
 - `timeout`: the configured execution deadline expired
@@ -124,13 +124,13 @@ The default Codex Desktop flow omits `notify` and uses a native in-chat schedule
 
 ## Result delivery and artifacts
 
-`mimo_result` defaults to a compact delivery record: status, changed files, compact verification/acceptance stage results, failure, report path, and a bounded plan/review summary when applicable. Complete final text is not returned by default. `reportPath` is repository-relative when the artifact is inside the requested workspace. Default compact `mimo_result` JSON must not exceed 6,000 UTF-8 bytes. Acceptance failures include compact fields such as `failedStage`, failed command/tests, and a shortest-fix `suggestion`. When multiple failures occur, compact `failure.causes` keeps at most three entries (primary first); `standard` and `full` retain the complete list in `failureCauses`.
+`mimo_result` defaults to a compact delivery record: status, changed files, compact verification/acceptance stage results, failure, report path, reconciliation status, and a bounded plan/review summary when applicable. Reconciliation distinguishes verified changed files from unverified tool-event candidates and reports whether detection was `complete`, `partial`, or `unavailable`; it never silently converts unknown detection into `changedFiles: []`. Complete final text is not returned by default. `reportPath` is repository-relative when the artifact is inside the requested workspace. Default compact `mimo_result` JSON must not exceed 6,000 UTF-8 bytes. Acceptance failures include compact fields such as `failedStage`, failed command/tests, and a shortest-fix `suggestion`. When multiple failures occur, compact `failure.causes` keeps at most three entries (primary first); `standard` and `full` retain the complete list in `failureCauses`.
 
 Use `level: "standard"` for bounded operator diagnostics and `level: "full"` only for explicit manual troubleshooting. `full` reads complete semantic and verification artifacts; normal Desktop heartbeat and automatic callback delivery remain compact.
 
 Full responses inline at most 1,000,000 bytes per artifact. A larger artifact is not truncated: the result contains `artifact_too_large`, the exact artifact path, and its byte count.
 
-Every finalized job has structural report paths. Complete semantic output is saved separately as `<jobId>.result.md`; plans additionally use `<jobId>.plan.md`; full verification stdout/stderr uses `<jobId>.verification.json`; stall checkpoints use `<jobId>.checkpoint.json`; slice chains use `<rootJobId>.slices.json` plus `.codex-mimo/jobs/<chainId>.chain.json`. Structural `.json`/`.md` reports link to these files and do not inline their content. Recognized credentials are redacted before semantic or verification artifacts are persisted and before full diagnostics are returned.
+Before finalization starts, the worker atomically saves `<jobId>.execution.json` with run/callback evidence, Git snapshots, multi-source change detection, successful command evidence, and the final repository fingerprint. Complete semantic output is saved separately as `<jobId>.result.md`; plans additionally use `<jobId>.plan.md`; full verification stdout/stderr uses `<jobId>.verification.json`; stall checkpoints use `<jobId>.checkpoint.json`; slice chains use `<rootJobId>.slices.json` plus `.codex-mimo/jobs/<chainId>.chain.json`. Structural `.json`/`.md` reports link to these files and do not inline their content. Recognized credentials are redacted before semantic or verification artifacts are persisted and before full diagnostics are returned.
 
 CLI `status` defaults to `standard` for humans; MCP `mimo_status` defaults to compact.
 
@@ -251,7 +251,7 @@ CLI exit codes are: `0` success; `2` command, input, or schema error; and `1` ru
 
 Registered workflows are `brainstorm`, `plan`, `dev`, `fix`, `fix-ci`, `execute-plan`, `review`, `parallel`, `worktree`, `merge`, and `new-skill`. Compose uses the same worker and job lifecycle as every other kind; only its prompt, workflow rules, verification, and report finalization differ. See [Compose workflows](doc/compose-workflows.md).
 
-Prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck` for write acceptance. Stages run fail-fast: build → test → diffCheck (deterministic self-check plus read-only MiMo review). Legacy `verification[]` remains accepted and maps to the **test stage only** — it does not satisfy build. Put scope or state prose in `task`. `dev`, `execute-plan`, and `implement` cannot complete without acceptance: missing build/test disposition at finalize pauses as `needs_input` with `acceptance_config_missing`; stage failures finish `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing`. Resume those codes (and checkpoint-backed stalls/timeouts) via Phase 2 `mimo_resume`. For Maven/Gradle projects, detected `mvn` / `gradle` commands resolve to repository wrappers before execution and preflight: on Windows prefer `mvnw.cmd` / `gradlew.bat`; on POSIX prefer `./mvnw` / `./gradlew`. Explicit path entries are not rewritten. Missing or non-executable commands fail before edits with `acceptance_command_unavailable`. The `plan` workflow is read-only; MiMoCode returns the plan in its final response and does not write project files. The bridge saves the complete plan to `.codex-mimo/reports/<jobId>.plan.md`; default `mimo_result` returns only a bounded summary and `reportPath`. Asking it to write a plan file ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
+Prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck` for write acceptance. Stages run fail-fast: build → test → diffCheck. Exact successful MiMo commands may be reused only when command, working directory, zero exit code, last-write ordering, and final repository fingerprint all match; otherwise the host reruns them. Diff checking always performs the deterministic self-check, then invokes the read-only MiMo review only for partial change detection, sensitive files/workflows, more than five files, or more than 200 changed lines. Legacy `verification[]` remains accepted and maps to the **test stage only** — it does not satisfy build. Put scope or state prose in `task`. `dev`, `execute-plan`, and `implement` cannot complete without acceptance: missing build/test disposition at finalize pauses as `needs_input` with `acceptance_config_missing`; stage failures finish `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing`. Resume those codes (and checkpoint-backed stalls/timeouts) via Phase 2 `mimo_resume`. For Maven/Gradle projects, detected `mvn` / `gradle` commands resolve to repository wrappers before execution and preflight: on Windows prefer `mvnw.cmd` / `gradlew.bat`; on POSIX prefer `./mvnw` / `./gradlew`. Explicit path entries are not rewritten. Missing or non-executable commands fail before edits with `acceptance_command_unavailable`. The `plan` workflow is read-only; MiMoCode returns the plan in its final response and does not write project files. The bridge saves the complete plan to `.codex-mimo/reports/<jobId>.plan.md`; default `mimo_result` returns only a bounded summary and `reportPath`. Asking it to write a plan file ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
 
 ```json
 { "workflow": "plan", "task": "Plan the feature; return the plan only" }

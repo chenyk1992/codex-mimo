@@ -8,9 +8,6 @@ import {
 } from "../compose/report.js";
 import {
   buildReadOnlyReportDiff,
-  changedFingerprintFiles,
-  detectNewFilesFromStatus,
-  detectReadOnlyViolationFiles,
   gitHeadChanged,
   mergeChangedFiles,
   readOnlyViolationError
@@ -45,7 +42,12 @@ import {
   type ComposeWorkflowName,
   type DevelopmentAcceptanceInput
 } from "../compose/workflow.js";
-import { extractFinalText, type NormalizedMimoEvent } from "../compose/events.js";
+import {
+  extractFinalText,
+  extractToolUseWritePaths,
+  type MimoCommandEvidence,
+  type NormalizedMimoEvent
+} from "../compose/events.js";
 import {
   captureGitDiff,
   type GitCommitChangeSnapshot,
@@ -83,6 +85,8 @@ import type {
   ExecutionCallbackSummary,
   JobAcceptanceSummary,
   JobKind,
+  JobReconciliationSummary,
+  JobReconciliationWarning,
   JobRecord,
   JobReportPaths,
   JobStatus,
@@ -120,6 +124,11 @@ import {
 import { spawnJobSupervisor } from "./job-process.js";
 import { transitionJob, type JobTransition } from "./job-transition.js";
 import { execa } from "execa";
+import {
+  detectChangedFiles,
+  type ChangeDetectionResult
+} from "./changed-files.js";
+import { redactDiagnosticText } from "./job-output.js";
 
 const DEFAULT_TIMEOUT_MS = 1_800_000;
 
@@ -245,6 +254,8 @@ export interface JobFinalizeDependencies {
       signal?: AbortSignal;
       runDiffCheck?: (cwd: string, signal?: AbortSignal) => Promise<AcceptanceStageResult>;
       execute?: VerificationCommandExecutor;
+      commandEvidence?: MimoCommandEvidence[];
+      finalRepositoryFingerprint?: string;
     }
   ) => Promise<DevelopmentAcceptanceResult>;
   runDiffCheck?: (cwd: string, signal?: AbortSignal) => Promise<AcceptanceStageResult>;
@@ -275,6 +286,10 @@ export interface JobExecutionFinalizeContext {
   gitHeadAfter?: GitHeadSnapshot;
   diff?: GitDiffSnapshot;
   commitChanges?: GitCommitChangeSnapshot;
+  changeDetection?: ChangeDetectionResult;
+  commandEvidence?: MimoCommandEvidence[];
+  finalRepositoryFingerprint?: string;
+  reconciliationWarnings?: JobReconciliationWarning[];
   verification?: VerificationResult[];
   deps?: JobFinalizeDependencies;
 }
@@ -521,7 +536,7 @@ async function finalizeDirect<Request extends { cwd: string; acceptance?: Develo
   requireFinalText = false
 ): Promise<JobOutcome> {
   const requiresAcceptance = context.job.kind === "implement";
-  const changedFiles = collectChangedFiles(context, writesAllowed);
+  const changedFiles = collectChangedFiles(context);
   const initialOutcome = classifyRunOutcome(runEvidenceFromContext(context, {
     verification: [],
     ...(requireFinalText ? { requireFinalText: true } : {})
@@ -599,7 +614,8 @@ async function finalizeDirect<Request extends { cwd: string; acceptance?: Develo
 async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): Promise<JobOutcome> {
   const workflow = getComposeWorkflow(context.request.workflow);
   const requiresAcceptance = workflowRequiresDevelopmentAcceptance(workflow.name);
-  const changedFiles = collectChangedFiles(context, workflow.writesAllowed);
+  const changeDetection = collectChangeDetection(context);
+  const changedFiles = changeDetection.files;
   let reportDiff = context.diff ?? emptyDiff();
   if (!workflow.writesAllowed) {
     reportDiff = buildReadOnlyReportDiff(reportDiff, changedFiles);
@@ -719,34 +735,45 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
   };
   const writeArtifacts = context.deps?.writeJobArtifacts ?? writeJobArtifacts;
   const writeCheckpoint = context.deps?.writeJobCheckpoint ?? writeJobCheckpoint;
-  const checkpointPaths = await writeCheckpoint({
-    job: context.job,
-    objective: context.job.task,
-    changedFiles,
-    acceptance: acceptanceSummary ?? outcome.acceptance,
-    existingReportPaths: {
-      ...context.job.reportPaths,
-      ...baseReportPaths
-    },
-    reportDir: context.request.reportDir ??
-      path.join(context.request.cwd, ".codex-mimo", "reports")
-  });
-  const reportPaths = writeArtifacts({
-    job: context.job,
-    status: outcome.status,
-    ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
-    changedFiles,
-    verification: verificationDetails,
-    finalText: finalTextFrom(context),
-    plan: workflow.name === "plan",
-    reportDir: context.request.reportDir ??
-      path.join(context.request.cwd, ".codex-mimo", "reports"),
-    existingReportPaths: {
-      ...context.job.reportPaths,
-      ...baseReportPaths,
-      ...checkpointPaths
-    }
-  });
+  const warnings: JobReconciliationWarning[] = [];
+  let checkpointPaths: JobReportPaths = {};
+  try {
+    checkpointPaths = await writeCheckpoint({
+      job: context.job,
+      objective: context.job.task,
+      changedFiles,
+      acceptance: acceptanceSummary ?? outcome.acceptance,
+      existingReportPaths: {
+        ...context.job.reportPaths,
+        ...baseReportPaths
+      },
+      reportDir: context.request.reportDir ??
+        path.join(context.request.cwd, ".codex-mimo", "reports")
+    });
+  } catch {
+    warnings.push({ code: "checkpoint_write_failed", stage: "checkpoint" });
+  }
+  let reportPaths: JobReportPaths = {
+    ...context.job.reportPaths,
+    ...baseReportPaths,
+    ...checkpointPaths
+  };
+  try {
+    reportPaths = writeArtifacts({
+      job: context.job,
+      status: outcome.status,
+      ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
+      changedFiles,
+      verification: verificationDetails,
+      finalText: finalTextFrom(context),
+      plan: workflow.name === "plan",
+      reportDir: context.request.reportDir ??
+        path.join(context.request.cwd, ".codex-mimo", "reports"),
+      existingReportPaths: reportPaths
+    });
+  } catch {
+    warnings.push({ code: "artifact_write_failed", stage: "artifacts" });
+  }
 
   report.reportPaths = {
     json: report.reportPaths.json,
@@ -758,7 +785,11 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     ...(reportPaths.checkpoint ? { checkpoint: reportPaths.checkpoint } : {})
   };
   context.signal.throwIfAborted();
-  (context.deps?.writeComposeReport ?? writeComposeReport)(report);
+  try {
+    (context.deps?.writeComposeReport ?? writeComposeReport)(report);
+  } catch {
+    warnings.push({ code: "compose_report_write_failed", stage: "report" });
+  }
 
   return {
     ...outcome,
@@ -768,51 +799,37 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
       ? { acceptance: acceptanceSummary ?? outcome.acceptance }
       : {}),
     ...(outcome.causes && outcome.causes.length > 0 ? { failureCauses: outcome.causes } : {}),
-    reportPaths
+    reportPaths,
+    reconciliation: reconciliationSummary(
+      changeDetection,
+      warnings,
+      context.reconciliationWarnings
+    )
   };
 }
 
+function collectChangeDetection(
+  context: JobFinalizeContext<{ cwd: string }>
+): ChangeDetectionResult {
+  if (context.changeDetection) return context.changeDetection;
+  return detectChangedFiles({
+    cwd: context.request.cwd,
+    gitStatusBefore: context.gitStatusBefore,
+    gitStatusAfter: context.gitStatusAfter,
+    diff: context.diff,
+    commitChanges: context.commitChanges,
+    toolUsePaths: extractToolUseWritePaths(context.events)
+  });
+}
+
 function collectChangedFiles(
-  context: JobExecutionFinalizeContext,
-  writesAllowed: boolean
+  context: JobFinalizeContext<{ cwd: string }>
 ): string[] {
-  const commitFiles = excludeRuntimeChangedFiles(context.commitChanges?.changedFiles ?? []);
-  if (!writesAllowed) {
-    const diffFiles = context.diff?.changedFiles ?? [];
-    const statusFiles = detectReadOnlyViolationFiles(
-      false,
-      diffFiles,
-      context.gitStatusBefore,
-      context.gitStatusAfter
-    );
-    return excludeRuntimeChangedFiles(mergeChangedFiles(statusFiles, commitFiles));
-  }
-  if (context.gitStatusBefore && context.gitStatusAfter) {
-    const attributed = attributedJobChangedFiles(context.gitStatusBefore, context.gitStatusAfter);
-    return excludeRuntimeChangedFiles(mergeChangedFiles(attributed, commitFiles));
-  }
-  return excludeRuntimeChangedFiles(
-    mergeChangedFiles(context.diff?.changedFiles ?? [], commitFiles)
-  );
+  return collectChangeDetection(context).files;
 }
 
 function excludeRuntimeChangedFiles(files: string[]): string[] {
   return files.filter((file) => !isRuntimeArtifactPath(file));
-}
-
-function attributedJobChangedFiles(before: GitStatusSnapshot, after: GitStatusSnapshot): string[] {
-  const hasFingerprintData = Boolean(
-    before.fingerprints &&
-    after.fingerprints &&
-    (
-      Object.keys(before.fingerprints).length > 0 ||
-      Object.keys(after.fingerprints).length > 0
-    )
-  );
-  if (hasFingerprintData) {
-    return changedFingerprintFiles(before, after);
-  }
-  return detectNewFilesFromStatus(before, after);
 }
 
 async function lookupExecutableOnPath(command: string): Promise<string | undefined> {
@@ -990,10 +1007,6 @@ function composeReportStatus(
   return "passed";
 }
 
-function defaultComposeTask(workflow: ComposeWorkflowName): string {
-  return `Run ${workflow} workflow.`;
-}
-
 async function finalizeWithArtifacts<Request extends { cwd: string }>(
   context: JobFinalizeContext<Request>,
   outcome: JobOutcome,
@@ -1003,41 +1016,83 @@ async function finalizeWithArtifacts<Request extends { cwd: string }>(
   const writeArtifacts = context.deps?.writeJobArtifacts ?? writeJobArtifacts;
   const writeCheckpoint = context.deps?.writeJobCheckpoint ?? writeJobCheckpoint;
   const changedFiles = outcome.changedFiles ?? [];
-  const checkpointPaths = await writeCheckpoint({
-    job: context.job,
-    objective: context.job.task,
-    changedFiles,
-    acceptance: outcome.acceptance,
-    existingReportPaths: context.job.reportPaths
-  });
-  const reportPaths = writeArtifacts({
-    job: context.job,
-    status: outcome.status,
-    ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
-    changedFiles,
-    verification: verificationDetails,
-    finalText: finalTextFrom(context),
-    ...(context.diff?.diff ? { diff: context.diff.diff } : {}),
-    plan: context.job.kind === "plan",
-    existingReportPaths: {
-      ...context.job.reportPaths,
-      ...checkpointPaths
-    }
-  });
+  const warnings: JobReconciliationWarning[] = [];
+  let checkpointPaths: JobReportPaths = {};
+  try {
+    checkpointPaths = await writeCheckpoint({
+      job: context.job,
+      objective: context.job.task,
+      changedFiles,
+      acceptance: outcome.acceptance,
+      existingReportPaths: context.job.reportPaths
+    });
+  } catch {
+    warnings.push({ code: "checkpoint_write_failed", stage: "checkpoint" });
+  }
+  let reportPaths: JobReportPaths = {
+    ...context.job.reportPaths,
+    ...checkpointPaths
+  };
+  try {
+    reportPaths = writeArtifacts({
+      job: context.job,
+      status: outcome.status,
+      ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
+      changedFiles,
+      verification: verificationDetails,
+      finalText: finalTextFrom(context),
+      ...(context.diff?.diff ? { diff: context.diff.diff } : {}),
+      plan: context.job.kind === "plan",
+      existingReportPaths: reportPaths
+    });
+  } catch {
+    warnings.push({ code: "artifact_write_failed", stage: "artifacts" });
+  }
+  const changeDetection = collectChangeDetection(context);
   return {
     ...outcome,
     changedFiles,
     verification: outcome.verification ?? toCompactJobVerification(verificationDetails),
-    reportPaths
+    reportPaths,
+    reconciliation: reconciliationSummary(
+      changeDetection,
+      warnings,
+      context.reconciliationWarnings
+    )
+  };
+}
+
+function reconciliationSummary(
+  changeDetection: ChangeDetectionResult,
+  warnings: JobReconciliationWarning[],
+  inheritedWarnings: JobReconciliationWarning[] = []
+): JobReconciliationSummary {
+  const allWarnings = [...inheritedWarnings, ...warnings].filter(
+    (warning, index, entries) => entries.findIndex((candidate) =>
+      candidate.code === warning.code && candidate.stage === warning.stage
+    ) === index
+  );
+  return {
+    status: allWarnings.length > 0 || changeDetection.status !== "complete"
+      ? "degraded"
+      : "complete",
+    changeDetection: {
+      status: changeDetection.status,
+      sources: [...changeDetection.sources],
+      candidates: [...changeDetection.candidates],
+      ...(changeDetection.reason ? { reason: changeDetection.reason } : {})
+    },
+    ...(allWarnings.length > 0 ? { warnings: allWarnings } : {})
   };
 }
 
 function toCompactJobVerification(details: JobVerificationDetails[]): JobVerification[] {
-  return details.map(({ command, exitCode, passed, durationMs }) => ({
+  return details.map(({ command, exitCode, passed, durationMs, source }) => ({
     command,
     exitCode,
     passed,
-    ...(durationMs === undefined ? {} : { durationMs })
+    ...(durationMs === undefined ? {} : { durationMs }),
+    ...(source ? { source } : {})
   }));
 }
 
@@ -1245,7 +1300,11 @@ async function runAcceptanceForFinalize<Request extends { cwd: string }>(
   const result = await runAcceptance(context.request.cwd, acceptancePlan, {
     signal: context.signal,
     runDiffCheck,
-    ...(context.deps?.executeVerification ? { execute: context.deps.executeVerification } : {})
+    ...(context.deps?.executeVerification ? { execute: context.deps.executeVerification } : {}),
+    ...(context.commandEvidence ? { commandEvidence: context.commandEvidence } : {}),
+    ...(context.finalRepositoryFingerprint
+      ? { finalRepositoryFingerprint: context.finalRepositoryFingerprint }
+      : {})
   });
   context.signal.throwIfAborted();
 
@@ -1274,10 +1333,18 @@ function ensureDiffArtifact(
   const text = diff?.diff?.trim();
   if (!text) return undefined;
   const diffsDir = path.join(context.request.cwd, ".codex-mimo", "diffs");
-  fs.mkdirSync(diffsDir, { recursive: true });
-  const diffPath = path.join(diffsDir, `${context.job.id}.diff`);
-  fs.writeFileSync(diffPath, text, "utf8");
-  return diffPath;
+  try {
+    fs.mkdirSync(diffsDir, { recursive: true });
+    const diffPath = path.join(diffsDir, `${context.job.id}.diff`);
+    fs.writeFileSync(diffPath, redactDiagnosticText(text), "utf8");
+    return diffPath;
+  } catch {
+    recordReconciliationWarning(context, {
+      code: "diff_artifact_write_failed",
+      stage: "diff_artifact"
+    });
+    return undefined;
+  }
 }
 
 function hasUsableDiffFile(diffPath: string | undefined): boolean {
@@ -1305,8 +1372,16 @@ async function resolveDiffPathForReview(
   const fromContext = ensureDiffArtifact(context, context.diff);
   if (fromContext) return fromContext;
 
-  const snapshot = await captureDiff(context.request.cwd, "HEAD", { signal });
-  return ensureDiffArtifact(context, snapshot);
+  try {
+    const snapshot = await captureDiff(context.request.cwd, "HEAD", { signal });
+    return ensureDiffArtifact(context, snapshot);
+  } catch {
+    recordReconciliationWarning(context, {
+      code: "diff_artifact_write_failed",
+      stage: "diff_artifact"
+    });
+    return undefined;
+  }
 }
 
 function createDefaultRunDiffCheck(
@@ -1338,6 +1413,13 @@ function createDefaultRunDiffCheck(
       // Align with runReadOnlyDiffReview no_diff → not_applicable → passed.
       return { stage: "diff_check", outcome: "passed" };
     }
+    if (!shouldRunSemanticDiffReview(context, selfCheck)) {
+      return {
+        stage: "diff_check",
+        outcome: "passed",
+        reason: "deterministic_check_sufficient"
+      };
+    }
 
     const diffPath = await resolveDiffPathForReview(
       context,
@@ -1346,6 +1428,15 @@ function createDefaultRunDiffCheck(
       signal
     );
     if (!diffPath) {
+      if (context.reconciliationWarnings?.some(
+        (warning) => warning.code === "diff_artifact_write_failed"
+      )) {
+        return {
+          stage: "diff_check",
+          outcome: "passed",
+          reason: "semantic_review_unavailable"
+        };
+      }
       return {
         stage: "diff_check",
         outcome: "failed",
@@ -1375,6 +1466,60 @@ function createDefaultRunDiffCheck(
     }
     return review;
   };
+}
+
+function recordReconciliationWarning(
+  context: JobExecutionFinalizeContext,
+  warning: JobReconciliationWarning
+): void {
+  const current = context.reconciliationWarnings ?? [];
+  if (!current.some((candidate) =>
+    candidate.code === warning.code && candidate.stage === warning.stage
+  )) {
+    current.push(warning);
+  }
+  context.reconciliationWarnings = current;
+}
+
+function shouldRunSemanticDiffReview(
+  context: JobFinalizeContext<{ cwd: string }>,
+  selfCheck: Awaited<ReturnType<typeof runDiffAcceptanceSelfCheck>>
+): boolean {
+  if (context.changeDetection?.status !== undefined &&
+      context.changeDetection.status !== "complete") {
+    return true;
+  }
+  const workflow = typeof context.request === "object" && context.request !== null &&
+      "workflow" in context.request
+    ? String((context.request as Record<string, unknown>).workflow ?? "")
+    : "";
+  if (workflow === "fix-ci" || workflow === "merge") return true;
+
+  const files = selfCheck.summary?.samplePaths ?? context.diff?.changedFiles ?? [];
+  if ((selfCheck.summary?.changedFileCount ?? files.length) > 5) return true;
+  if (files.some(isSensitiveReviewPath)) return true;
+  return estimatedChangedLines(context.diff) > 200;
+}
+
+function isSensitiveReviewPath(file: string): boolean {
+  const normalized = file.replace(/\\/g, "/").toLowerCase();
+  return /(^|\/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|pom\.xml|build\.gradle(?:\.kts)?|cargo\.lock)$/.test(normalized) ||
+    /(^|\/)(auth|security|permissions?|migrations?)([._/-]|$)/.test(normalized) ||
+    /(^|\/)\.github\/workflows(\/|$)/.test(normalized);
+}
+
+function estimatedChangedLines(diff: GitDiffSnapshot | undefined): number {
+  if (!diff) return 0;
+  const statMatch = diff.diffStat.match(/(\d+)\s+insertion(?:s)?\(\+\)/);
+  const deletionMatch = diff.diffStat.match(/(\d+)\s+deletion(?:s)?\(-\)/);
+  if (statMatch || deletionMatch) {
+    return Number.parseInt(statMatch?.[1] ?? "0", 10) +
+      Number.parseInt(deletionMatch?.[1] ?? "0", 10);
+  }
+  return diff.diff.split(/\r?\n/).filter((line) =>
+    (line.startsWith("+") && !line.startsWith("+++")) ||
+    (line.startsWith("-") && !line.startsWith("---"))
+  ).length;
 }
 
 function readAllowedPathsFromRequest(request: unknown): string[] | undefined {

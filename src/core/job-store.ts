@@ -347,6 +347,7 @@ function isJobRecord(value: unknown, expectedJobId: string): value is JobRecord 
     Array.isArray(value.changedFiles) &&
     Array.isArray(value.verification) &&
     isOptionalExecutionCallback(value.executionCallback) &&
+    isOptionalReconciliation(value.reconciliation) &&
     typeof value.logFile === "string" &&
     typeof value.eventsFile === "string" &&
     typeof value.signalsFile === "string" &&
@@ -505,7 +506,10 @@ function transitionRecordPatch(
     ...(transition.reportPaths !== undefined ? { reportPaths: transition.reportPaths } : {}),
     ...(transition.error !== undefined ? { error: transition.error } : {}),
     ...(transition.errorCode !== undefined ? { errorCode: transition.errorCode } : {}),
-    ...(transition.failureCauses !== undefined ? { failureCauses: transition.failureCauses } : {})
+    ...(transition.failureCauses !== undefined ? { failureCauses: transition.failureCauses } : {}),
+    ...(transition.reconciliation !== undefined
+      ? { reconciliation: transition.reconciliation }
+      : {})
   };
 }
 
@@ -590,6 +594,7 @@ function isPendingJobTransition(
       !isOptionalVerificationArray(value.verification) ||
       !isOptionalAcceptance(value.acceptance) ||
       !isOptionalExecutionCallback(value.executionCallback) ||
+      !isOptionalReconciliation(value.reconciliation) ||
       !isOptionalReportPaths(value.reportPaths) ||
       !isOptionalString(value.error) ||
       !isOptionalString(value.errorCode)) {
@@ -616,6 +621,7 @@ function isOptionalVerificationArray(value: unknown): boolean {
     typeof entry.command === "string" &&
     (entry.exitCode === null || Number.isInteger(entry.exitCode)) &&
     typeof entry.passed === "boolean" &&
+    (entry.source === undefined || entry.source === "executed" || entry.source === "mimo_event") &&
     (entry.durationMs === undefined ||
       (typeof entry.durationMs === "number" && Number.isFinite(entry.durationMs) &&
         entry.durationMs >= 0))
@@ -683,7 +689,43 @@ function isOptionalReportPaths(value: unknown): boolean {
     isOptionalString(value.plan) &&
     isOptionalString(value.verification) &&
     isOptionalString(value.checkpoint) &&
-    isOptionalString(value.slices);
+    isOptionalString(value.slices) &&
+    isOptionalString(value.executionEvidence);
+}
+
+function isOptionalReconciliation(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value) ||
+      (value.status !== "complete" && value.status !== "degraded") ||
+      !isRecord(value.changeDetection)) {
+    return false;
+  }
+  const detection = value.changeDetection;
+  if (
+    detection.status !== "complete" &&
+    detection.status !== "partial" &&
+    detection.status !== "unavailable"
+  ) {
+    return false;
+  }
+  const validSources = new Set([
+    "git_fingerprint",
+    "git_diff",
+    "git_commit",
+    "scope_manifest"
+  ]);
+  if (!Array.isArray(detection.sources) ||
+      !detection.sources.every((source) => validSources.has(String(source))) ||
+      !isOptionalStringArray(detection.candidates) ||
+      !isOptionalString(detection.reason)) {
+    return false;
+  }
+  if (value.warnings === undefined) return true;
+  return Array.isArray(value.warnings) && value.warnings.every((warning) =>
+    isRecord(warning) &&
+    typeof warning.code === "string" &&
+    typeof warning.stage === "string"
+  );
 }
 
 function isOptionalStringArray(value: unknown): boolean {

@@ -19,7 +19,12 @@ import {
   type JobTransition,
   type JobTransitionResult
 } from "./job-transition.js";
-import { nowIso, type JobRecord, type JobStatus } from "./jobs.js";
+import {
+  nowIso,
+  type JobRecord,
+  type JobReconciliationWarning,
+  type JobStatus
+} from "./jobs.js";
 import {
   classifyEffectiveProgress,
   classifyStallReason,
@@ -56,8 +61,11 @@ import { startNotificationDispatch } from "../notify/dispatch-process.js";
 import { spawnNotificationWorker } from "./job-process.js";
 import type { NormalizedMimoEvent } from "../compose/events.js";
 import {
+  extractFinalText,
+  extractPassingCommandEvidence,
   extractSessionIdFromRawLine,
-  extractToolNameFromRawLine
+  extractToolNameFromRawLine,
+  extractToolUseWritePaths
 } from "../compose/events.js";
 import {
   ProcessLockUnavailableError,
@@ -67,6 +75,18 @@ import {
 import { resolveJobWorkerOwnershipKey } from "./worker-ownership.js";
 import { isRuntimeArtifactPath } from "./runtime-paths.js";
 import { persistJobCheckpoint } from "./job-checkpoint.js";
+import {
+  captureScopedWorkspaceManifest,
+  detectChangedFiles,
+  fingerprintWorkspaceFiles
+} from "./changed-files.js";
+import {
+  readExecutionEvidence,
+  readExecutionEvents,
+  updateExecutionEvidenceAttempts,
+  writeExecutionEvidence,
+  type JobExecutionEvidence
+} from "./job-execution-evidence.js";
 
 export interface JobWorkerDependencies {
   bindJobDefinition?: (job: JobRecord) => BoundJobDefinition;
@@ -148,6 +168,13 @@ async function runOwnedJobWorker(
   const transition = deps.transitionJob ?? transitionJob;
   if (initial.status === "running") {
     if (isChainOrchestratorRoot(initial)) {
+      return;
+    }
+    const executionEvidence = initial.pid === null
+      ? readExecutionEvidence(initial)
+      : undefined;
+    if (executionEvidence) {
+      await reconcilePersistedExecution(cwd, initial, executionEvidence, deps);
       return;
     }
     const recovered = await recoverOwnedProcess(cwd, jobId, deps);
@@ -257,6 +284,7 @@ async function runOwnedJobWorker(
     const mimoArgs = definition.buildMimoArgs(prompt);
     const expectedQueryHash = crypto.createHash("sha256").update(prompt.message, "utf8").digest("hex");
     const allowedPaths = readAllowedPathsFromJobRequest(initial.request);
+    const workspaceManifestBefore = captureScopedWorkspaceManifest(cwd, allowedPaths);
     const captureStatus = deps.captureStatus ?? captureGitStatus;
     const captureHead = deps.captureHead ?? captureGitHead;
     const gitStatusBefore = withoutRuntimeStatus(
@@ -504,6 +532,89 @@ async function runOwnedJobWorker(
     assertJobActive(cwd, jobId, executionGuard.signal);
     const diff = withoutRuntimeDiff(capturedDiff);
     const commitChanges = withoutRuntimeCommitChanges(capturedCommitChanges);
+    const workspaceManifestAfter = captureScopedWorkspaceManifest(cwd, allowedPaths);
+    const changeDetection = detectChangedFiles({
+      cwd,
+      gitStatusBefore,
+      gitStatusAfter,
+      diff,
+      commitChanges,
+      manifestBefore: workspaceManifestBefore,
+      manifestAfter: workspaceManifestAfter,
+      toolUsePaths: extractToolUseWritePaths(events)
+    });
+    const finalRepositoryFingerprint = fingerprintWorkspaceFiles(
+      cwd,
+      [...changeDetection.files, ...changeDetection.candidates]
+    );
+    const commandEvidence = extractPassingCommandEvidence(events, cwd).map((evidence) => ({
+      ...evidence,
+      ...(evidence.afterLastWrite ? { repositoryFingerprint: finalRepositoryFingerprint } : {})
+    }));
+    const reconciliationWarnings: JobReconciliationWarning[] = [];
+    let evidenceReportPaths: JobRecord["reportPaths"] = {};
+    try {
+      const saved = writeExecutionEvidence(
+        requireJob(cwd, jobId),
+        {
+          reconciliationAttempts: 0,
+          run: {
+            exitCode: run.exitCode,
+            ...(run.terminationReason ? { terminationReason: run.terminationReason } : {})
+          },
+          ...(runSessionId ? { runSessionId } : {}),
+          ...(eventSessionMismatch ? { eventSessionMismatch: true as const } : {}),
+          ...(callbackEvidence.failureCauses
+            ? { failureCauses: callbackEvidence.failureCauses }
+            : {}),
+          executionCallback: callbackEvidence.executionCallback,
+          gitStatusBefore,
+          gitStatusAfter,
+          gitHeadBefore,
+          gitHeadAfter,
+          diff,
+          commitChanges,
+          changeDetection,
+          commandEvidence,
+          finalRepositoryFingerprint
+        },
+        extractFinalText(events)
+      );
+      evidenceReportPaths = {
+        executionEvidence: saved.evidencePath,
+        ...(saved.resultPath ? { result: saved.resultPath } : {})
+      };
+    } catch {
+      reconciliationWarnings.push({
+        code: "artifact_write_failed",
+        stage: "artifacts"
+      });
+    }
+    await (deps.updateRunningJobObservation ?? updateRunningJobObservation)(cwd, jobId, {
+      phase: "finalizing",
+      ...(runSessionId ? { sessionId: runSessionId } : {}),
+      changedFiles: changeDetection.files,
+      executionCallback: callbackEvidence.executionCallback,
+      reportPaths: {
+        ...requireJob(cwd, jobId).reportPaths,
+        ...evidenceReportPaths
+      },
+      reconciliation: {
+        status: reconciliationWarnings.length > 0 || changeDetection.status !== "complete"
+          ? "degraded"
+          : "complete",
+        changeDetection: {
+          status: changeDetection.status,
+          sources: [...changeDetection.sources],
+          candidates: [...changeDetection.candidates],
+          ...(changeDetection.reason ? { reason: changeDetection.reason } : {})
+        },
+        ...(reconciliationWarnings.length > 0
+          ? { warnings: reconciliationWarnings }
+          : {})
+      }
+    });
+    assertJobActive(cwd, jobId, executionGuard.signal);
     const context: JobExecutionFinalizeContext = {
       mimoArgs,
       run,
@@ -518,15 +629,31 @@ async function runOwnedJobWorker(
       gitHeadAfter,
       diff,
       commitChanges,
+      changeDetection,
+      commandEvidence,
+      finalRepositoryFingerprint,
+      ...(reconciliationWarnings.length > 0
+        ? { reconciliationWarnings }
+        : {}),
       signal: executionGuard.signal
     };
-    const outcome = await awaitWithAbort(definition.finalize(context), executionGuard.signal);
+    const outcome = await finalizeWithRetry(
+      requireJob(cwd, jobId),
+      definition,
+      context,
+      executionGuard.signal
+    );
 
     assertJobActive(cwd, jobId, executionGuard.signal);
     executionGuard.stop();
     const { causes, ...transitionFields } = outcome;
+    const durableEvidence = requireJob(cwd, jobId);
     const result = await transition(cwd, jobId, {
       ...transitionFields,
+      reportPaths: {
+        ...durableEvidence.reportPaths,
+        ...transitionFields.reportPaths
+      },
       ...(causes ? { failureCauses: causes } : {})
     });
     await afterTerminalTransition(cwd, result, deps);
@@ -656,6 +783,99 @@ function assertJobActive(cwd: string, jobId: string, signal: AbortSignal): void 
   }
 }
 
+async function finalizeWithRetry(
+  job: JobRecord,
+  definition: BoundJobDefinition,
+  context: JobExecutionFinalizeContext,
+  signal: AbortSignal
+): Promise<Awaited<ReturnType<BoundJobDefinition["finalize"]>>> {
+  let evidence = readExecutionEvidence(job);
+  let attempts = evidence?.reconciliationAttempts ?? 0;
+  let lastError: unknown;
+  while (attempts < 2) {
+    attempts += 1;
+    if (evidence) {
+      try {
+        evidence = updateExecutionEvidenceAttempts(job, evidence, attempts);
+      } catch {
+        // The durable running job still retains changed files and callback evidence.
+      }
+    }
+    try {
+      return await awaitWithAbort(definition.finalize(context), signal);
+    } catch (error) {
+      signal.throwIfAborted();
+      lastError = error;
+    }
+  }
+  throw lastError ?? new Error("Reconciliation retry budget exhausted.");
+}
+
+async function reconcilePersistedExecution(
+  cwd: string,
+  job: JobRecord,
+  evidence: JobExecutionEvidence,
+  deps: JobWorkerDependencies
+): Promise<void> {
+  if (job.cancellationRequestedAt) {
+    const cancelled = await transitionRecoverably(cwd, job.id, {
+      status: "cancelled",
+      summary: `Cancelled ${job.id}.`,
+      errorCode: "cancelled"
+    }, deps);
+    await afterTerminalTransition(cwd, cancelled, deps);
+    return;
+  }
+
+  const controller = new AbortController();
+  const definition = (deps.bindJobDefinition ?? bindJobDefinition)(job);
+  const context: JobExecutionFinalizeContext = {
+    run: {
+      stdout: "",
+      stderr: "",
+      exitCode: evidence.run.exitCode,
+      pid: null,
+      ...(evidence.run.terminationReason
+        ? { terminationReason: evidence.run.terminationReason }
+        : {})
+    },
+    events: readExecutionEvents(job, evidence),
+    ...(evidence.runSessionId ? { runSessionId: evidence.runSessionId } : {}),
+    ...(evidence.eventSessionMismatch ? { eventSessionMismatch: true } : {}),
+    ...(evidence.failureCauses ? { failureCauses: evidence.failureCauses } : {}),
+    ...(evidence.executionCallback
+      ? { executionCallback: evidence.executionCallback }
+      : {}),
+    ...(evidence.gitStatusBefore ? { gitStatusBefore: evidence.gitStatusBefore } : {}),
+    ...(evidence.gitStatusAfter ? { gitStatusAfter: evidence.gitStatusAfter } : {}),
+    ...(evidence.gitHeadBefore ? { gitHeadBefore: evidence.gitHeadBefore } : {}),
+    ...(evidence.gitHeadAfter ? { gitHeadAfter: evidence.gitHeadAfter } : {}),
+    ...(evidence.diff ? { diff: evidence.diff } : {}),
+    ...(evidence.commitChanges ? { commitChanges: evidence.commitChanges } : {}),
+    changeDetection: evidence.changeDetection,
+    commandEvidence: evidence.commandEvidence,
+    finalRepositoryFingerprint: evidence.finalRepositoryFingerprint,
+    signal: controller.signal
+  };
+
+  try {
+    const outcome = await finalizeWithRetry(job, definition, context, controller.signal);
+    const { causes, ...transitionFields } = outcome;
+    const latest = requireJob(cwd, job.id);
+    const result = await transitionRecoverably(cwd, job.id, {
+      ...transitionFields,
+      reportPaths: {
+        ...latest.reportPaths,
+        ...transitionFields.reportPaths
+      },
+      ...(causes ? { failureCauses: causes } : {})
+    }, deps);
+    await afterTerminalTransition(cwd, result, deps);
+  } catch (error) {
+    await failWorker(cwd, job.id, "finalize", error, deps);
+  }
+}
+
 async function transitionRecoverably(
   cwd: string,
   jobId: string,
@@ -745,6 +965,44 @@ async function failWorker(
   }
 
   const message = errorMessage(error);
+  const executionEvidence = stage === "finalize"
+    ? readExecutionEvidence(existing)
+    : undefined;
+  const successfulExecutionEvidence = executionEvidence?.run.exitCode === 0 &&
+    executionEvidence.executionCallback?.outcome === "completed" &&
+    executionEvidence.eventSessionMismatch !== true &&
+    !executionEvidence.failureCauses?.length;
+  if (stage === "finalize" && successfulExecutionEvidence) {
+    const warnings = [
+      ...(existing.reconciliation?.warnings ?? []),
+      { code: "reconciliation_failed" as const, stage: "reconciliation" as const }
+    ];
+    const reconciled = await transitionRecoverably(cwd, jobId, {
+      status: "completed",
+      summary:
+        "MiMoCode execution completed, but result reconciliation requires attention.",
+      error: `Job reconciliation failed: ${message}`,
+      errorCode: "reconciliation_failed",
+      changedFiles: existing.changedFiles,
+      verification: existing.verification,
+      ...(existing.executionCallback
+        ? { executionCallback: existing.executionCallback }
+        : {}),
+      ...(existing.reportPaths ? { reportPaths: existing.reportPaths } : {}),
+      reconciliation: {
+        status: "degraded",
+        changeDetection: existing.reconciliation?.changeDetection ?? {
+          status: "unavailable",
+          sources: [],
+          candidates: [],
+          reason: "Reconciliation stopped before change detection completed."
+        },
+        warnings
+      }
+    }, deps);
+    await afterTerminalTransition(cwd, reconciled, deps);
+    return;
+  }
   const failure: JobTransition = {
     status: "failed",
     summary: `${stageLabel(stage)}: ${message}`,
@@ -1069,7 +1327,7 @@ function stageLabel(stage: WorkerStage): string {
     hook: "MiMoCode callback setup failed",
     run: "MiMoCode execution failed",
     callback: "MiMoCode callback wait failed",
-    finalize: "Job finalization failed"
+    finalize: "Job reconciliation failed"
   };
   return labels[stage];
 }
@@ -1081,7 +1339,7 @@ function stageErrorCode(stage: WorkerStage): string {
     hook: "callback_setup_failed",
     run: "mimo_run_failed",
     callback: "callback_wait_failed",
-    finalize: "finalize_failed"
+    finalize: "reconciliation_failed"
   };
   return codes[stage];
 }
@@ -1130,7 +1388,12 @@ function withoutRuntimeStatus(status: GitStatusSnapshot): GitStatusSnapshot {
     .split(/\r?\n/)
     .filter((line) => !isRuntimeArtifactPath(line.replace(/^[ MADRCU?!]{2}\s+/, "")))
     .join("\n");
-  return { short, dirty: Object.keys(fingerprints).length > 0, fingerprints };
+  return {
+    short,
+    dirty: Object.keys(fingerprints).length > 0,
+    fingerprints,
+    ...(status.repositoryAvailable === false ? { repositoryAvailable: false as const } : {})
+  };
 }
 
 function withoutRuntimeDiff(diff: GitDiffSnapshot): GitDiffSnapshot {

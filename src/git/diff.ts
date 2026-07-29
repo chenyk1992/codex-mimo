@@ -12,6 +12,8 @@ export interface GitStatusSnapshot {
   short: string;
   dirty: boolean;
   fingerprints: Record<string, GitFileFingerprint>;
+  /** Explicitly false when cwd is not backed by a usable Git repository. */
+  repositoryAvailable?: false;
 }
 
 export interface GitHeadSnapshot {
@@ -42,7 +44,12 @@ export async function captureGitStatus(
     const detail = result.stderr || result.stdout || `exit ${result.exitCode}`;
     // Empty `.git` placeholders / non-repo workspaces: treat as a clean snapshot so jobs can start.
     if (isMissingGitRepositoryError(detail)) {
-      return { short: "", dirty: false, fingerprints: {} };
+      return {
+        short: "",
+        dirty: false,
+        fingerprints: {},
+        repositoryAvailable: false
+      };
     }
     throw new Error(`Git status capture failed: ${detail}`);
   }
@@ -136,7 +143,7 @@ export async function captureGitDiff(
   );
   if (validated.exitCode !== 0) {
     const detail = validated.stderr || `exit ${validated.exitCode}`;
-    if (isMissingGitRepositoryError(detail)) {
+    if (isMissingGitRepositoryError(detail) || (base === "HEAD" && isUnbornHeadError(detail))) {
       return { changedFiles: [], diffStat: "", diff: "" };
     }
     throw new Error(`Git diff capture failed for base ${base}: ${detail}`);
@@ -197,18 +204,22 @@ export async function captureGitCommitChanges(
   after: GitHeadSnapshot | undefined,
   options: GitCaptureOptions = {}
 ): Promise<GitCommitChangeSnapshot> {
-  if (!before || !after || before.oid === after.oid) {
+  if (!before || !after || before.oid === after.oid || !after.oid) {
     return { commits: [], changedFiles: [] };
   }
+  const commitRange = before.oid ? `${before.oid}..${after.oid}` : after.oid;
+  const fileArgs = before.oid
+    ? ["diff", "--name-only", before.oid, after.oid]
+    : ["ls-tree", "-r", "--name-only", after.oid];
   const [commits, files] = await Promise.all([
     execa(
       "git",
-      gitArgs(cwd, ["log", "--oneline", "--reverse", `${before.oid}..${after.oid}`]),
+      gitArgs(cwd, ["log", "--oneline", "--reverse", commitRange]),
       gitCommandOptions(cwd, options)
     ),
     execa(
       "git",
-      gitArgs(cwd, ["diff", "--name-only", before.oid, after.oid]),
+      gitArgs(cwd, fileArgs),
       gitCommandOptions(cwd, options)
     )
   ]);

@@ -271,7 +271,11 @@ function normalizeCheckpointReportPaths(reportPaths?: JobReportPaths): JobReport
     ...(reportPaths.plan ? { plan: normalize(reportPaths.plan)! } : {}),
     ...(reportPaths.verification ? { verification: normalize(reportPaths.verification)! } : {}),
     ...(reportPaths.diff ? { diff: normalize(reportPaths.diff)! } : {}),
-    ...(reportPaths.checkpoint ? { checkpoint: normalize(reportPaths.checkpoint)! } : {})
+    ...(reportPaths.checkpoint ? { checkpoint: normalize(reportPaths.checkpoint)! } : {}),
+    ...(reportPaths.slices ? { slices: normalize(reportPaths.slices)! } : {}),
+    ...(reportPaths.executionEvidence
+      ? { executionEvidence: normalize(reportPaths.executionEvidence)! }
+      : {})
   };
 }
 

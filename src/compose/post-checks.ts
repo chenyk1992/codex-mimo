@@ -7,11 +7,7 @@ import type {
   GitStatusSnapshot
 } from "../git/diff.js";
 import { findOutOfScopePaths, isPathWithinAllowedScope } from "../core/path-scope.js";
-import { extractFinalText, parseMimoJsonLines } from "./events.js";
-import { detectUnacceptedTask } from "../core/job-outcome.js";
 import type { AcceptanceStageResult } from "./acceptance.js";
-
-export { isPathWithinAllowedScope } from "../core/path-scope.js";
 
 export interface DiffAcceptanceInput {
   cwd: string;
@@ -167,14 +163,6 @@ export async function runDeterministicDiffAcceptance(
   }
 
   return { stage: "diff_check", outcome: "passed" };
-}
-
-export function detectSemanticFailure(eventsStdout: string): string | undefined {
-  return detectUnacceptedTask(extractFinalText(parseMimoJsonLines(eventsStdout)));
-}
-
-export function detectDirectSemanticFailure(summary: string | undefined): string | null {
-  return detectUnacceptedTask(summary) ?? null;
 }
 
 export function detectReadOnlyViolationFiles(

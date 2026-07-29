@@ -81,6 +81,7 @@ export interface JobVerification {
   passed: boolean;
   durationMs?: number;
   failureKind?: VerificationFailureKind;
+  source?: "executed" | "mimo_event";
 }
 
 export interface JobReportPaths {
@@ -93,6 +94,30 @@ export interface JobReportPaths {
   verification?: string;
   checkpoint?: string;
   slices?: string;
+  executionEvidence?: string;
+}
+
+export interface JobChangeDetectionSummary {
+  status: "complete" | "partial" | "unavailable";
+  sources: Array<"git_fingerprint" | "git_diff" | "git_commit" | "scope_manifest">;
+  candidates: string[];
+  reason?: string;
+}
+
+export interface JobReconciliationWarning {
+  code:
+    | "checkpoint_write_failed"
+    | "artifact_write_failed"
+    | "compose_report_write_failed"
+    | "diff_artifact_write_failed"
+    | "reconciliation_failed";
+  stage: "checkpoint" | "artifacts" | "report" | "diff_artifact" | "reconciliation";
+}
+
+export interface JobReconciliationSummary {
+  status: "complete" | "degraded";
+  changeDetection: JobChangeDetectionSummary;
+  warnings?: JobReconciliationWarning[];
 }
 
 export interface CompactAcceptanceResult {
@@ -130,6 +155,7 @@ export interface CompactJobResult {
   reportPath: string | null;
   summary?: string;
   attention?: CompactAttention;
+  reconciliation?: JobReconciliationSummary;
 }
 
 export interface JobVerificationDetails extends JobVerification {
@@ -212,6 +238,7 @@ export interface JobTransitionFields {
   error?: string;
   errorCode?: string;
   failureCauses?: JobFailureCause[];
+  reconciliation?: JobReconciliationSummary;
 }
 
 export interface PendingJobTransition extends JobTransitionFields {
@@ -257,6 +284,7 @@ export interface JobRecord {
   error?: string;
   errorCode?: string;
   failureCauses?: JobFailureCause[];
+  reconciliation?: JobReconciliationSummary;
   lastEventAt?: string;
   lastActivityAt?: string;
   lastProgressAt?: string;

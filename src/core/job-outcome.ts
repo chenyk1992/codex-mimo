@@ -1,6 +1,7 @@
 import type {
   ExecutionCallbackSummary,
   JobAcceptanceSummary,
+  JobReconciliationSummary,
   JobReportPaths,
   JobStatus,
   JobVerification
@@ -42,6 +43,7 @@ export interface JobOutcome {
   error?: string;
   errorCode?: string;
   causes?: JobFailureCause[];
+  reconciliation?: JobReconciliationSummary;
 }
 
 const NEEDS_INPUT_PATTERNS = [

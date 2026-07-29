@@ -82,13 +82,6 @@ export function redactDiagnosticText(value: string): string {
     );
 }
 
-export function readVerificationArtifact(
-  file: string | undefined
-): JobVerificationDetails[] | undefined {
-  const raw = readTextArtifact(file);
-  return raw ? parseVerificationArtifact(raw) : undefined;
-}
-
 export function readKeyVerificationError(file: string | undefined): string | undefined {
   const read = readDiagnosticArtifact(file, "verification");
   if (!read.content) return undefined;

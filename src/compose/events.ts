@@ -13,6 +13,19 @@ export interface NormalizedMimoEvent {
   raw: unknown;
 }
 
+export interface MimoCommandEvidence {
+  command: string;
+  cwd: string;
+  exitCode: number;
+  eventIndex: number;
+  afterLastWrite: boolean;
+  commandHash?: string;
+  repositoryFingerprint?: string;
+  timestamp?: string;
+}
+
+const WRITE_TOOL_NAMES = new Set(["write", "edit", "apply_patch"]);
+
 interface EventSummary {
   messages: number;
   tools: number;
@@ -157,8 +170,81 @@ export function extractFinalText(events: NormalizedMimoEvent[]): string {
     ?.text?.trim() ?? "";
 }
 
+export function extractToolUseWritePaths(events: NormalizedMimoEvent[]): string[] {
+  const paths = new Set<string>();
+  for (const event of events) {
+    if (event.type !== "tool" || !WRITE_TOOL_NAMES.has(event.toolName?.toLowerCase() ?? "")) {
+      continue;
+    }
+    const input = toolInput(event.raw);
+    const filePath = input
+      ? stringValue(input.file_path ?? input.filepath ?? input.filePath ?? input.path)
+      : undefined;
+    if (filePath?.trim()) {
+      paths.add(filePath.trim().replace(/\\/g, "/").replace(/^\.\//, ""));
+    }
+  }
+  return [...paths].sort();
+}
+
+export function extractPassingCommandEvidence(
+  events: NormalizedMimoEvent[],
+  defaultCwd: string
+): MimoCommandEvidence[] {
+  const lastWriteIndex = events.reduce(
+    (latest, event, index) =>
+      event.type === "tool" && WRITE_TOOL_NAMES.has(event.toolName?.toLowerCase() ?? "")
+        ? index
+        : latest,
+    -1
+  );
+  const evidence: MimoCommandEvidence[] = [];
+
+  for (const [eventIndex, event] of events.entries()) {
+    if (event.type !== "tool" || event.toolName?.toLowerCase() !== "bash") continue;
+    const raw = isRecord(event.raw) ? event.raw : undefined;
+    const part = raw && isRecord(raw.part) ? raw.part : undefined;
+    const state = part && isRecord(part.state) ? part.state : undefined;
+    const input = state && isRecord(state.input) ? state.input : undefined;
+    const metadata = state && isRecord(state.metadata) ? state.metadata : undefined;
+    const command = input ? stringValue(input.command) : undefined;
+    const exitCode = metadata ? integerValue(metadata.exit ?? metadata.exitCode) : undefined;
+    if (!command?.trim() || exitCode !== 0) continue;
+    const cwd = input
+      ? stringValue(input.cwd ?? input.workdir ?? input.working_directory) ?? defaultCwd
+      : defaultCwd;
+    const timestamp = raw
+      ? stringValue(raw.timestamp ?? raw.createdAt ?? raw.created_at)
+      : undefined;
+    evidence.push({
+      command: command.trim(),
+      cwd,
+      exitCode,
+      eventIndex,
+      afterLastWrite: eventIndex > lastWriteIndex,
+      ...(timestamp ? { timestamp } : {})
+    });
+  }
+  return evidence;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function integerValue(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  if (typeof value === "string" && /^-?\d+$/.test(value.trim())) {
+    return Number.parseInt(value, 10);
+  }
+  return undefined;
+}
+
+function toolInput(raw: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(raw)) return undefined;
+  const part = isRecord(raw.part) ? raw.part : undefined;
+  const state = part && isRecord(part.state) ? part.state : undefined;
+  return state && isRecord(state.input) ? state.input : undefined;
 }
 
 function stringValue(value: unknown): string | undefined {

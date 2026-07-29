@@ -66,7 +66,7 @@ The work call returns a queued receipt. Codex then relies on the parent-task not
 
 ## Verification and development acceptance
 
-Prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck` for write workflows. Stages run fail-fast in order: build → test → diffCheck (deterministic self-check plus read-only MiMo review). `dev`, `execute-plan`, and `implement` cannot complete without acceptance.
+Prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck` for write workflows. Stages run fail-fast in order: build → test → diffCheck. Exact successful MiMo command evidence is reused only when command, working directory, exit code, last-write ordering, and final repository fingerprint match. The deterministic diff self-check always runs; secondary read-only MiMo review is reserved for higher-risk or incompletely detected changes. `dev`, `execute-plan`, and `implement` cannot complete without acceptance.
 
 | Field | Role |
 | --- | --- |
@@ -107,12 +107,13 @@ For Codex Desktop, omit `notify` and use an in-chat scheduled follow-up heartbea
 
 Compose finalization writes structural JSON/Markdown/event reports plus applicable semantic artifacts:
 
+- `.codex-mimo/reports/<jobId>.execution.json` before reconciliation
 - `.codex-mimo/reports/<jobId>.result.md`
 - `.codex-mimo/reports/<jobId>.plan.md` for planning workflows
 - `.codex-mimo/reports/<jobId>.verification.json` when host verification ran
 - `.codex-mimo/diffs/<jobId>.diff` when a diff exists
 
-Structural reports omit model output and verification stdout/stderr; they contain paths to the separate artifacts.
+The execution evidence artifact preserves callback/run state, Git and scoped-manifest change evidence, command evidence, and the final repository fingerprint so a crashed worker can resume reconciliation without rerunning MiMo. Structural reports omit model output and verification stdout/stderr; they contain paths to the separate artifacts.
 
 ## Read-Only Enforcement
 
