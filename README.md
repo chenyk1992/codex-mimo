@@ -52,6 +52,8 @@ Write entries (`implement` and write Compose workflows) accept `batchMode`: `aut
 
 `allowedPaths` patterns are repository-relative: exact file (`src/app.ts`), directory prefix (`src/components`), or trailing `/**` only (`src/components/**`). Rejected: bare `**`, absolute paths, `..`, UNC paths, and mid-path globs such as `src/*.ts`.
 
+Build or test commands that intentionally write inside the workspace may declare separate `acceptance.artifactPaths` with the same bounded syntax, for example `["out/**"]` for direct Java compilation. Artifact paths participate in post-run and diff auditing but never widen the hook-level `write`/`edit` source scope, and they must not overlap `allowedPaths`. Declared artifacts are not automatically deleted and may remain in the workspace; prefer a disposable output directory.
+
 The bridge saves the manifest at `.codex-mimo/reports/<rootJobId>.slices.json` and the durable chain at `.codex-mimo/jobs/<chainId>.chain.json`, then executes **one slice at a time**. Internal slice children omit notification targets; only the public root enqueues outbox deliveries. A failed slice finalizes the root with `slice_failed`. Standard `mimo_result` on a chain root includes `completedSlices` and `remainingSlices`.
 
 ## Progress and timeout budgets
@@ -251,14 +253,14 @@ CLI exit codes are: `0` success; `2` command, input, or schema error; and `1` ru
 
 Registered workflows are `brainstorm`, `plan`, `dev`, `fix`, `fix-ci`, `execute-plan`, `review`, `parallel`, `worktree`, `merge`, and `new-skill`. Compose uses the same worker and job lifecycle as every other kind; only its prompt, workflow rules, verification, and report finalization differ. See [Compose workflows](doc/compose-workflows.md).
 
-Prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck` for write acceptance. Stages run fail-fast: build → test → diffCheck. Exact successful MiMo commands may be reused only when command, working directory, zero exit code, last-write ordering, and final repository fingerprint all match; otherwise the host reruns them. Diff checking always performs the deterministic self-check, then invokes the read-only MiMo review only for partial change detection, sensitive files/workflows, more than five files, or more than 200 changed lines. Legacy `verification[]` remains accepted and maps to the **test stage only** — it does not satisfy build. Put scope or state prose in `task`. `dev`, `execute-plan`, and `implement` cannot complete without acceptance: missing build/test disposition at finalize pauses as `needs_input` with `acceptance_config_missing`; stage failures finish `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing`. Resume those codes (and checkpoint-backed stalls/timeouts) via Phase 2 `mimo_resume`. For Maven/Gradle projects, detected `mvn` / `gradle` commands resolve to repository wrappers before execution and preflight: on Windows prefer `mvnw.cmd` / `gradlew.bat`; on POSIX prefer `./mvnw` / `./gradlew`. Explicit path entries are not rewritten. Missing or non-executable commands fail before edits with `acceptance_command_unavailable`. The `plan` workflow is read-only; MiMoCode returns the plan in its final response and does not write project files. The bridge saves the complete plan to `.codex-mimo/reports/<jobId>.plan.md`; default `mimo_result` returns only a bounded summary and `reportPath`. Asking it to write a plan file ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
+Prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck` for write acceptance. When those commands create workspace-local outputs, declare bounded `acceptance.artifactPaths`; this permits command artifacts without permitting source edits there. Stages run fail-fast: build → test → diffCheck. Exact successful MiMo commands may be reused only when command, working directory, zero exit code, last-write ordering, and final repository fingerprint all match; otherwise the host reruns them. Diff checking always performs the deterministic self-check, then invokes the read-only MiMo review only for partial change detection, sensitive files/workflows, more than five files, or more than 200 changed lines. Legacy `verification[]` remains accepted and maps to the **test stage only** — it does not satisfy build. Put scope or state prose in `task`. `dev`, `execute-plan`, and `implement` cannot complete without acceptance: missing build/test disposition at finalize pauses as `needs_input` with `acceptance_config_missing`; stage failures finish `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing`. Resume those codes (and checkpoint-backed stalls/timeouts) via Phase 2 `mimo_resume`. For Maven/Gradle projects, detected `mvn` / `gradle` commands resolve to repository wrappers before execution and preflight: on Windows prefer `mvnw.cmd` / `gradlew.bat`; on POSIX prefer `./mvnw` / `./gradlew`. Explicit path entries are not rewritten. Missing or non-executable commands fail before edits with `acceptance_command_unavailable`. The `plan` workflow is read-only; MiMoCode returns the plan in its final response and does not write project files. The bridge saves the complete plan to `.codex-mimo/reports/<jobId>.plan.md`; default `mimo_result` returns only a bounded summary and `reportPath`. Asking it to write a plan file ends as `read_only_violation`. A planning run with no readable final result finishes `failed` with `errorCode: "result_missing"`.
 
 ```json
 { "workflow": "plan", "task": "Plan the feature; return the plan only" }
 ```
 
 ```json
-{ "workflow": "dev", "task": "Implement the feature", "acceptance": { "build": ["npm run build"], "test": ["npm test"], "diffCheck": true } }
+{ "workflow": "dev", "task": "Implement the feature", "acceptance": { "build": ["javac -d out src/main/java/App.java"], "test": ["java -cp out AppTest"], "diffCheck": true, "artifactPaths": ["out/**"] } }
 ```
 
 ## Runtime Files and Recovery
@@ -289,14 +291,14 @@ Before the first model step, an internal hook compares the MiMoCode user query h
 
 The JSONL primary session (first `sessionID` in stdout) binds completion. Child sessions are ignored: their `session.post` callbacks are dropped, and only the bound session can finish the job. Mismatch between JSONL and callback session yields `callback_session_mismatch`; mid-run JSONL session drift yields `event_session_mismatch`.
 
-Write jobs with `allowedPaths` enforce scope at the hook (`write`/`edit` tools) and in a mandatory post-run audit. Out-of-scope writes or changed files finish `failed` with `write_scope_violation` (`failedStage: diff_check`). `batchMode=single` requires bounded `allowedPaths` at launch.
+Write jobs with `allowedPaths` enforce source scope at the hook (`write`/`edit` tools) and in a mandatory post-run audit. `acceptance.artifactPaths` may separately admit bounded build/test outputs during the audit and final diff check; it never widens the hook. Out-of-scope writes or changed files finish `failed` with `write_scope_violation` (`failedStage: diff_check`). `batchMode=single` requires bounded `allowedPaths` at launch.
 
 | Error code | Recovery |
 | --- | --- |
 | `prompt_identity_mismatch` | MiMo received a different query than the job objective. Restart with the correct `task`; do not `mimo_resume`. |
 | `callback_session_mismatch` | Completion callback session differed from the JSONL run session. Inspect events/callback diagnostics; restart the job. |
 | `event_session_mismatch` | JSONL session identity changed during the run. Restart the job. |
-| `write_scope_violation` | A write or post-run audit found files outside `allowedPaths`. Tighten scope and relaunch with narrower `allowedPaths`. |
+| `write_scope_violation` | A write or post-run audit found files outside the source and artifact scopes. Tighten `allowedPaths`, or declare a bounded non-overlapping `acceptance.artifactPaths` entry for expected command output, then relaunch. |
 | `acceptance_command_unavailable` | Build/test command missing or not executable before edits. Supply explicit `acceptance` with a repo wrapper path, fix wrapper permissions, or install the tool on PATH. |
 
 ## Development

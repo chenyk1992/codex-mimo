@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  allowedPathPatternsOverlap,
   findOutOfScopePaths,
   isPathWithinAllowedScope,
+  mergeAllowedPathScopes,
   normalizeRepositoryPath,
   validateAllowedPathPattern
 } from "../../../src/core/path-scope.js";
@@ -30,5 +32,16 @@ describe("path-scope (baseline regressions)", () => {
 
   it("finds out-of-scope paths", () => {
     expect(findOutOfScopePaths(["src/a.ts", "docs/x.md"], ["src/**"])).toEqual(["docs/x.md"]);
+  });
+
+  it("detects overlapping source and artifact scopes", () => {
+    expect(allowedPathPatternsOverlap("src/**", "src/app.ts")).toBe(true);
+    expect(allowedPathPatternsOverlap("out/**", "src/app.ts")).toBe(false);
+  });
+
+  it("merges source and artifact scopes without duplicates", () => {
+    expect(mergeAllowedPathScopes(["src/app.ts"], ["out/**", "src/app.ts"]))
+      .toEqual(["src/app.ts", "out/**"]);
+    expect(mergeAllowedPathScopes(undefined, [])).toBeUndefined();
   });
 });

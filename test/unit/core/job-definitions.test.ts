@@ -16,7 +16,7 @@ import { createJobStore, listJobs, readJob } from "../../../src/core/job-store.j
 import { readJobChain } from "../../../src/core/job-chain.js";
 import type { SliceManifest } from "../../../src/compose/slices.js";
 import { isRuntimeArtifactPath } from "../../../src/core/runtime-paths.js";
-import { captureGitDiff } from "../../../src/git/diff.js";
+import { captureGitDiff, captureGitHead } from "../../../src/git/diff.js";
 
 const tempDirs: string[] = [];
 const ACTIVE_SIGNAL = new AbortController().signal;
@@ -485,6 +485,190 @@ describe("job finalization", () => {
     });
     expect(execute).toHaveBeenCalledTimes(2);
     expect(runDiffCheck).toHaveBeenCalledOnce();
+  });
+
+  it("allows declared acceptance artifacts without widening source edit scope", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["implement"] = {
+      cwd,
+      task: "build it",
+      allowWrite: true,
+      batchMode: "single",
+      allowedPaths: ["src/App.java"],
+      acceptance: {
+        build: ["javac -d out src/App.java"],
+        test: ["java -cp out AppTest"],
+        diffCheck: true,
+        artifactPaths: ["out/**"]
+      }
+    };
+    const runDevelopmentAcceptance = vi.fn(async () => passingAcceptanceResult());
+
+    const outcome = await getJobDefinition("implement").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("implement", request),
+      request,
+      run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      changeDetection: {
+        files: ["src/App.java", "out/App.class"],
+        candidates: [],
+        status: "complete",
+        sources: ["git_fingerprint", "scope_manifest"]
+      },
+      verification: [],
+      deps: { runDevelopmentAcceptance }
+    });
+
+    expect(outcome).toMatchObject({
+      status: "completed",
+      changedFiles: ["src/App.java", "out/App.class"]
+    });
+    expect(runDevelopmentAcceptance).toHaveBeenCalledOnce();
+  });
+
+  it("passes source and artifact scopes to the final diff check", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["implement"] = {
+      cwd,
+      task: "build it",
+      allowWrite: true,
+      batchMode: "single",
+      allowedPaths: ["src/App.java"],
+      acceptance: {
+        build: ["node -e process.exit(0)"],
+        test: ["node -e process.exit(0)"],
+        diffCheck: true,
+        artifactPaths: ["out/**"]
+      }
+    };
+    const runDiffAcceptanceSelfCheck = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const,
+      summary: {
+        changedFileCount: 2,
+        samplePaths: ["src/App.java", "out/App.class"]
+      }
+    }));
+
+    const outcome = await getJobDefinition("implement").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("implement", request),
+      request,
+      run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      changeDetection: {
+        files: ["src/App.java", "out/App.class"],
+        candidates: [],
+        status: "complete",
+        sources: ["git_fingerprint", "scope_manifest"]
+      },
+      verification: [],
+      deps: {
+        executeVerification: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+        runDiffAcceptanceSelfCheck
+      }
+    });
+
+    expect(outcome.status).toBe("completed");
+    expect(runDiffAcceptanceSelfCheck).toHaveBeenCalledWith(expect.objectContaining({
+      allowedPaths: ["src/App.java", "out/**"]
+    }));
+  });
+
+  it("completes when host acceptance creates a declared workspace artifact", async () => {
+    const cwd = initGitRepo();
+    fs.writeFileSync(
+      path.join(cwd, "build.mjs"),
+      "import fs from 'node:fs'; fs.mkdirSync('out', { recursive: true }); fs.writeFileSync('out/app.bin', 'ok');\n",
+      "utf8"
+    );
+    execFileSync("git", ["add", "build.mjs"], { cwd });
+    execFileSync("git", ["commit", "-m", "add build"], { cwd, stdio: "ignore" });
+    const gitHeadBefore = await captureGitHead(cwd);
+    fs.writeFileSync(path.join(cwd, "app.ts"), "export const value = 2;\n", "utf8");
+    const diff = await captureGitDiff(cwd);
+    const request: JobRequestByKind["implement"] = {
+      cwd,
+      task: "build it",
+      allowWrite: true,
+      batchMode: "single",
+      allowedPaths: ["app.ts"],
+      acceptance: {
+        build: ["node build.mjs"],
+        test: ["node -e process.exit(0)"],
+        diffCheck: true,
+        artifactPaths: ["out/**"]
+      }
+    };
+
+    const outcome = await getJobDefinition("implement").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("implement", request),
+      request,
+      run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      gitHeadBefore,
+      diff,
+      changeDetection: {
+        files: ["app.ts"],
+        candidates: [],
+        status: "complete",
+        sources: ["git_fingerprint", "git_diff"]
+      },
+      verification: []
+    });
+
+    expect(outcome.status).toBe("completed");
+    expect(fs.readFileSync(path.join(cwd, "out", "app.bin"), "utf8")).toBe("ok");
+    expect(outcome.acceptance?.stages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: "build", outcome: "passed" }),
+      expect.objectContaining({ stage: "test", outcome: "passed" }),
+      expect.objectContaining({ stage: "diff_check", outcome: "passed" })
+    ]));
+  });
+
+  it("still rejects undeclared command artifacts", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["implement"] = {
+      cwd,
+      task: "build it",
+      allowWrite: true,
+      batchMode: "single",
+      allowedPaths: ["src/App.java"],
+      acceptance: {
+        build: ["javac -d out src/App.java"],
+        test: ["java -cp out AppTest"],
+        diffCheck: true
+      }
+    };
+    const runDevelopmentAcceptance = vi.fn(async () => passingAcceptanceResult());
+
+    const outcome = await getJobDefinition("implement").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("implement", request),
+      request,
+      run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "done", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      changeDetection: {
+        files: ["src/App.java", "out/App.class"],
+        candidates: [],
+        status: "complete",
+        sources: ["git_fingerprint"]
+      },
+      verification: [],
+      deps: { runDevelopmentAcceptance }
+    });
+
+    expect(outcome).toMatchObject({
+      status: "failed",
+      errorCode: "write_scope_violation"
+    });
+    expect(runDevelopmentAcceptance).not.toHaveBeenCalled();
   });
 
   it("refreshes diff and invokes review when self-check finds changes without initial diffPath", async () => {

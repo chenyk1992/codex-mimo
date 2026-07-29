@@ -80,6 +80,24 @@ describe("validateSliceManifest", () => {
     });
   });
 
+  it("accepts non-overlapping artifact paths and rejects overlaps", () => {
+    const cwd = makeProject({
+      "package.json": JSON.stringify({ scripts: { build: "tsc", test: "vitest run" } })
+    });
+    const accepted = baseManifest();
+    accepted.slices[0].acceptance.artifactPaths = ["dist/**"];
+
+    expect(validateSliceManifest(accepted, { cwd }).ok).toBe(true);
+
+    const rejected = baseManifest();
+    rejected.slices[0].acceptance.artifactPaths = ["src/**"];
+    expect(validateSliceManifest(rejected, { cwd })).toMatchObject({
+      ok: false,
+      code: "slice_plan_invalid",
+      reason: expect.stringMatching(/must not overlap allowedPaths/)
+    });
+  });
+
   it("rejects cyclic dependencies", () => {
     const cwd = makeProject({
       "package.json": JSON.stringify({ scripts: { build: "tsc", test: "vitest run" } })
@@ -287,7 +305,7 @@ describe("materializeSingleSliceManifest", () => {
       chainId: "chain-root",
       objective: "Implement callback wiring",
       repositoryFingerprint: "fp-root",
-      acceptance: validAcceptance(),
+      acceptance: { ...validAcceptance(), artifactPaths: ["dist/**"] },
       allowedPaths: ["src/callback.ts"],
       contextFiles: ["src/callback.ts"]
     });
@@ -305,7 +323,7 @@ describe("materializeSingleSliceManifest", () => {
           dependsOn: [],
           contextFiles: ["src/callback.ts"],
           allowedPaths: ["src/callback.ts"],
-          acceptance: validAcceptance()
+          acceptance: { ...validAcceptance(), artifactPaths: ["dist/**"] }
         }
       ]
     });

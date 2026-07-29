@@ -59,6 +59,19 @@ function patternRoot(pattern: string): string {
   return normalized.replace(/\/+$/, "");
 }
 
+export function allowedPathPatternsOverlap(first: string, second: string): boolean {
+  const firstRoot = patternRoot(first);
+  const secondRoot = patternRoot(second);
+  return matchesAllowedPattern(firstRoot, second) || matchesAllowedPattern(secondRoot, first);
+}
+
+export function mergeAllowedPathScopes(
+  ...scopes: Array<string[] | undefined>
+): string[] | undefined {
+  const merged = [...new Set(scopes.flatMap((scope) => scope ?? []))];
+  return merged.length > 0 ? merged : undefined;
+}
+
 export function isPathWithinAllowedScope(filePath: string, allowedPaths: string[]): boolean {
   const normalizedFile = normalizeRepositoryPath(filePath);
   return allowedPaths.some((allowed) => matchesAllowedPattern(normalizedFile, allowed));

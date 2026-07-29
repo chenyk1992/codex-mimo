@@ -40,7 +40,8 @@ const acceptance = {
   properties: {
     build: { type: "array", items: string },
     test: { type: "array", items: string },
-    diffCheck: { type: "boolean" }
+    diffCheck: { type: "boolean" },
+    artifactPaths: { type: "array", items: string }
   },
   additionalProperties: false
 };

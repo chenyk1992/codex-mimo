@@ -85,7 +85,7 @@ export function createMcpServer(overrides: Partial<McpToolHandlers> = {}): McpSe
     description: "Create an implementation plan in a background job", inputSchema: PlanInput
   }, handle("mimo_plan", handlers.mimoPlan));
   server.registerTool("mimo_implement", {
-    description: "Implement code changes in a background job. Requires ordered development acceptance (acceptance.build/test/diffCheck); cannot complete without it. Optional batchMode auto|single|sliced runs a sequential slice chain with root-only notifications; slice_failed is resumable on the root, while slice_plan_invalid requires a new job after re-planning.",
+    description: "Implement code changes in a background job. Requires ordered development acceptance (acceptance.build/test/diffCheck); bounded acceptance.artifactPaths may admit expected command outputs without widening source edits. Optional batchMode auto|single|sliced runs a sequential slice chain with root-only notifications; slice_failed is resumable on the root, while slice_plan_invalid requires a new job after re-planning.",
     inputSchema: ImplementInputBase
   }, handle("mimo_implement", handlers.mimoImplement));
   server.registerTool("mimo_review", {
@@ -99,7 +99,7 @@ export function createMcpServer(overrides: Partial<McpToolHandlers> = {}): McpSe
     inputSchema: ResumeInput
   }, handle("mimo_resume", handlers.mimoResume));
   server.registerTool("mimo_compose", {
-    description: "Run a Compose workflow in a background job. Plan workflows are read-only; compact results return a summary and saved plan path. Prefer acceptance.build/test/diffCheck; legacy verification maps to the test stage only. Write workflows accept batchMode auto|single|sliced for sequential slices with root-only notifications. dev and execute-plan cannot complete without acceptance.",
+    description: "Run a Compose workflow in a background job. Plan workflows are read-only; compact results return a summary and saved plan path. Prefer acceptance.build/test/diffCheck and use bounded acceptance.artifactPaths for expected command outputs; legacy verification maps to the test stage only. Write workflows accept batchMode auto|single|sliced for sequential slices with root-only notifications. dev and execute-plan cannot complete without acceptance.",
     inputSchema: ComposeInput
   }, handle("mimo_compose", handlers.mimoCompose));
   server.registerTool("mimo_status", {

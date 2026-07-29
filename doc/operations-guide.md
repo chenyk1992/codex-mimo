@@ -30,7 +30,7 @@ The nine statuses are `queued`, `running`, `needs_input`, `blocked`, `stalled`, 
 
 ### Development acceptance
 
-`dev`, `execute-plan`, and `implement` cannot complete without ordered host acceptance. Prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck`. Stages run fail-fast: build → test → diffCheck. A MiMo build/test result is reused only when its exact command, resolved working directory, zero exit code, position after the last declared write, and repository fingerprint match the final state. The deterministic diff self-check always runs; the secondary read-only MiMo review is risk-triggered by incomplete change detection, sensitive files/workflows, more than five files, or more than 200 changed lines. Legacy `verification[]` maps to the test stage only. Missing build/test disposition at finalize pauses as `needs_input` with `acceptance_config_missing`. Stage failures finish `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing`. Compact `mimo_result` includes `failedStage`, failed command/tests, and a shortest-fix `suggestion`; resume those codes via Phase 2 `mimo_resume` and `.codex-mimo/reports/<jobId>.checkpoint.json`.
+`dev`, `execute-plan`, and `implement` cannot complete without ordered host acceptance. Prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck`. When those commands create workspace-local outputs, declare bounded non-overlapping `acceptance.artifactPaths` such as `["out/**"]`; these paths are audited but do not widen source `write`/`edit` permissions. Stages run fail-fast: build → test → diffCheck. A MiMo build/test result is reused only when its exact command, resolved working directory, zero exit code, position after the last declared write, and repository fingerprint match the final state. The deterministic diff self-check always runs; the secondary read-only MiMo review is risk-triggered by incomplete change detection, sensitive files/workflows, more than five files, or more than 200 changed lines. Legacy `verification[]` maps to the test stage only. Missing build/test disposition at finalize pauses as `needs_input` with `acceptance_config_missing`. Stage failures finish `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing`. Compact `mimo_result` includes `failedStage`, failed command/tests, and a shortest-fix `suggestion`; resume those codes via Phase 2 `mimo_resume` and `.codex-mimo/reports/<jobId>.checkpoint.json`.
 
 ### Slice chains (`batchMode`)
 
@@ -243,6 +243,10 @@ The first JSONL `sessionID` becomes the run session. The hook binds the first `s
 
 Write jobs may declare `allowedPaths`. Patterns must be repository-relative: exact file, directory prefix, or trailing `/**` only. Rejected: bare `**`, absolute paths, `..`, UNC paths, and unsupported globs. `batchMode=single` requires bounded `allowedPaths` at launch. Known `write`/`edit` tools are blocked at the hook when out of scope; a mandatory post-run audit can also finish `failed` with `write_scope_violation` (`failedStage: diff_check`).
 
+### Acceptance artifact scope (`acceptance.artifactPaths`)
+
+Build and test commands may declare bounded workspace-local artifact paths using the same pattern syntax. These paths are fingerprinted even when Git ignores them and are admitted by the post-run scope gate and final diff check. They are deliberately not sent to the hook, must not overlap `allowedPaths`, and are not automatically deleted. Use a disposable output directory rather than a source or configuration tree.
+
 ### Build wrapper resolution
 
 For detected `mvn` / `gradle` acceptance commands, the bridge resolves repository wrappers before preflight and execution: Windows prefers `mvnw.cmd` / `gradlew.bat`; POSIX prefers `./mvnw` / `./gradlew`. Explicit path entries are not rewritten. Write jobs preflight build/test commands before edits; missing or non-executable entries fail with `acceptance_command_unavailable`.
@@ -254,7 +258,7 @@ For detected `mvn` / `gradle` acceptance commands, the bridge resolves repositor
 | `prompt_identity_mismatch` | MiMo user query did not match the job prompt | Restart with the correct `task`; not resumable |
 | `callback_session_mismatch` | `session.post` session differed from the JSONL run session | Inspect events and callback diagnostics; restart |
 | `event_session_mismatch` | JSONL session identity changed during the run | Restart the job |
-| `write_scope_violation` | Out-of-scope write or changed file | Tighten `allowedPaths`; relaunch with narrower scope |
+| `write_scope_violation` | Out-of-scope write or changed file | Tighten `allowedPaths`, or add bounded `acceptance.artifactPaths` for expected build/test output; relaunch |
 | `acceptance_command_unavailable` | Build/test command missing or not executable before edits | Supply explicit `acceptance`, fix wrapper permissions, or install the tool |
 
 ### Multi-cause failures
@@ -282,7 +286,7 @@ When timeout, scope, callback, and acceptance failures coexist, structured resul
 | Job failed with `build_failed` / `tests_failed` / `diff_check_failed` / `delivery_contract_missing` | Read compact `failedStage`, failed command/tests, and `suggestion`; call `mimo_resume` with the parent `jobId` (Phase 2 checkpoint resume) |
 | Job failed with `prompt_identity_mismatch` | MiMo received the wrong query; restart with the correct objective — do not `mimo_resume` |
 | Job failed with `callback_session_mismatch` or `event_session_mismatch` | Session binding broke; inspect `jobs/<jobId>.events.jsonl` and callback diagnostics; restart |
-| Job failed with `write_scope_violation` | Out-of-scope write or audit failure; relaunch with tighter `allowedPaths` |
+| Job failed with `write_scope_violation` | Out-of-scope write or audit failure; tighten `allowedPaths`, or declare bounded `acceptance.artifactPaths` for expected command output, then relaunch |
 | Job failed with `acceptance_command_unavailable` | Command missing before edits; add explicit `acceptance` with repo wrapper path or install the tool |
 | Job paused with `acceptance_config_missing` | Supply `acceptance.build` / `acceptance.test` (or detectable project commands) via `mimo_resume` `task` / relaunch with explicit `acceptance` |
 | Job ended `timeout` / `idle_timeout` | On Desktop heartbeat: next beat calls `mimo_result` once and deletes the schedule; resume with `mimo_resume` when a checkpoint exists; for explicit App Server notify, wait for the compatibility callback (prefetched public result, no tools), or use `mimo_result` for explicit user diagnostics; re-run with a narrower task or larger idle budget if appropriate |

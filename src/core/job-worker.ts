@@ -80,6 +80,7 @@ import {
   detectChangedFiles,
   fingerprintWorkspaceFiles
 } from "./changed-files.js";
+import { mergeAllowedPathScopes } from "./path-scope.js";
 import {
   readExecutionEvidence,
   readExecutionEvents,
@@ -284,7 +285,9 @@ async function runOwnedJobWorker(
     const mimoArgs = definition.buildMimoArgs(prompt);
     const expectedQueryHash = crypto.createHash("sha256").update(prompt.message, "utf8").digest("hex");
     const allowedPaths = readAllowedPathsFromJobRequest(initial.request);
-    const workspaceManifestBefore = captureScopedWorkspaceManifest(cwd, allowedPaths);
+    const artifactPaths = readArtifactPathsFromJobRequest(initial.request);
+    const monitoredPaths = mergeAllowedPathScopes(allowedPaths, artifactPaths);
+    const workspaceManifestBefore = captureScopedWorkspaceManifest(cwd, monitoredPaths);
     const captureStatus = deps.captureStatus ?? captureGitStatus;
     const captureHead = deps.captureHead ?? captureGitHead;
     const gitStatusBefore = withoutRuntimeStatus(
@@ -532,7 +535,7 @@ async function runOwnedJobWorker(
     assertJobActive(cwd, jobId, executionGuard.signal);
     const diff = withoutRuntimeDiff(capturedDiff);
     const commitChanges = withoutRuntimeCommitChanges(capturedCommitChanges);
-    const workspaceManifestAfter = captureScopedWorkspaceManifest(cwd, allowedPaths);
+    const workspaceManifestAfter = captureScopedWorkspaceManifest(cwd, monitoredPaths);
     const changeDetection = detectChangedFiles({
       cwd,
       gitStatusBefore,
@@ -1374,6 +1377,21 @@ function readAllowedPathsFromJobRequest(request: unknown): string[] | undefined 
     return undefined;
   }
   const value = (request as { allowedPaths?: unknown }).allowedPaths;
+  if (!Array.isArray(value) || value.length === 0 || !value.every((entry) => typeof entry === "string")) {
+    return undefined;
+  }
+  return value;
+}
+
+function readArtifactPathsFromJobRequest(request: unknown): string[] | undefined {
+  if (typeof request !== "object" || request === null || !("acceptance" in request)) {
+    return undefined;
+  }
+  const acceptance = (request as { acceptance?: unknown }).acceptance;
+  if (typeof acceptance !== "object" || acceptance === null || !("artifactPaths" in acceptance)) {
+    return undefined;
+  }
+  const value = (acceptance as { artifactPaths?: unknown }).artifactPaths;
   if (!Array.isArray(value) || value.length === 0 || !value.every((entry) => typeof entry === "string")) {
     return undefined;
   }

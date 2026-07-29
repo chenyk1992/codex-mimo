@@ -139,6 +139,48 @@ describe("work tool schemas", () => {
     });
   });
 
+  it("accepts bounded artifact paths that do not widen source edits", () => {
+    const parsed = ImplementInput.parse({
+      cwd: "E:/project",
+      task: "Build",
+      allowWrite: true,
+      batchMode: "single",
+      allowedPaths: ["src/app.ts"],
+      acceptance: {
+        build: ["javac -d out src/app.java"],
+        test: ["java -cp out AppTest"],
+        artifactPaths: ["out/**"]
+      }
+    });
+
+    expect(parsed.acceptance?.artifactPaths).toEqual(["out/**"]);
+  });
+
+  it("rejects invalid or source-overlapping artifact paths", () => {
+    const base = {
+      cwd: "E:/project",
+      task: "Build",
+      allowWrite: true,
+      batchMode: "single" as const,
+      allowedPaths: ["src/app.ts"]
+    };
+
+    expect(() => ImplementInput.parse({
+      ...base,
+      acceptance: { artifactPaths: ["**"] }
+    })).toThrow(/artifactPaths/);
+    expect(() => ImplementInput.parse({
+      ...base,
+      acceptance: { artifactPaths: ["src/**"] }
+    })).toThrow(/must not overlap/);
+    expect(() => parseComposeInput({
+      cwd: "E:/project",
+      workflow: "plan",
+      task: "Plan",
+      acceptance: { artifactPaths: ["out/**"] }
+    })).toThrow(/does not use acceptance\.artifactPaths/);
+  });
+
   it("still accepts legacy verification[] for migration", () => {
     const parsed = ComposeInput.parse({
       cwd: "E:/project",

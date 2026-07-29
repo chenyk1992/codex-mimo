@@ -47,7 +47,11 @@ const ACCEPTANCE_SCHEMA = {
       type: "array",
       items: STRING_SCHEMA
     },
-    diffCheck: { type: "boolean" }
+    diffCheck: { type: "boolean" },
+    artifactPaths: {
+      type: "array",
+      items: STRING_SCHEMA
+    }
   },
   additionalProperties: false
 };

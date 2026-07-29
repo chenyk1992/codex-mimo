@@ -54,6 +54,8 @@ Write workflows enforce repository-relative scope when `allowedPaths` is present
 
 Rejected: bare `**`, absolute paths, `..`, UNC paths, and mid-path globs such as `src/*.ts`. Known `write`/`edit` tools are blocked at the internal hook when out of scope; a mandatory post-run audit can finish `failed` with `write_scope_violation` even when build or test stages fail first.
 
+Build/test outputs use a separate optional scope, `acceptance.artifactPaths`, with the same bounded pattern syntax. Artifact paths are admitted only by post-run and diff auditing, never by the `write`/`edit` hook, and must not overlap `allowedPaths`. Declared ignored artifacts are fingerprinted and are not automatically deleted.
+
 ## Execution and Status
 
 The common worker validates the stored request, runs write workflows with MiMoCode's `build` agent and read-only workflows with the bridge's read-only agent, captures Git evidence, creates the internal `session.post` controller, streams events, runs finalization, and transitions the job. The workflow's Compose skill chain remains the behavior source in both cases.
@@ -72,12 +74,13 @@ Prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck` for write
 | --- | --- |
 | `acceptance.build` | Build commands (or host-validated `not_applicable` for recognized non-compiled trees) |
 | `acceptance.test` | Targeted test commands |
+| `acceptance.artifactPaths` | Bounded workspace paths for expected build/test outputs |
 | `acceptance.diffCheck` | Diff self-check + read-only MiMo review (default true) |
 
 Legacy `verification[]` remains accepted during migration and maps to the **test stage only** — it does not satisfy build. Values are executable command strings run without a shell — not natural-language acceptance criteria. Put scope or state prose (for example `计划不修改业务源码`) in `task`, not in `verification`.
 
 ```json
-{ "workflow": "dev", "task": "Implement the feature", "acceptance": { "build": ["npm run build"], "test": ["npm test"], "diffCheck": true } }
+{ "workflow": "dev", "task": "Implement the feature", "acceptance": { "build": ["javac -d out src/main/java/App.java"], "test": ["java -cp out AppTest"], "diffCheck": true, "artifactPaths": ["out/**"] } }
 ```
 
 When neither explicit `acceptance.test` / `verification` nor workflow defaults exist, detection uses:

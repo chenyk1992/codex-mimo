@@ -3,10 +3,14 @@ import {
   COMPOSE_WORKFLOW_NAMES,
   getComposeWorkflow,
   normalizeComposeBatchMode,
-  validateComposeWorkflowInput
+  validateComposeWorkflowInput,
+  workflowRequiresDevelopmentAcceptance
 } from "../compose/workflow.js";
 import { SINGLE_MODE_ALLOWED_PATHS_REQUIRED_MESSAGE } from "../core/safety-contracts.js";
-import { validateAllowedPathPattern } from "../core/path-scope.js";
+import {
+  allowedPathPatternsOverlap,
+  validateAllowedPathPattern
+} from "../core/path-scope.js";
 
 const CodexNotifySchema = z.object({
   type: z.literal("codex"),
@@ -35,7 +39,8 @@ export const JobOptionsSchema = z.object({
 export const DevelopmentAcceptanceSchema = z.object({
   build: z.array(z.string().min(1)).optional(),
   test: z.array(z.string().min(1)).optional(),
-  diffCheck: z.boolean().optional()
+  diffCheck: z.boolean().optional(),
+  artifactPaths: z.array(z.string().min(1)).optional()
 }).strict();
 
 export const AllowedPathsSchema = z.array(z.string().min(1));
@@ -61,6 +66,28 @@ function collectAllowedPathsIssues(
   return issues;
 }
 
+function collectArtifactPathIssues(
+  allowedPaths: string[] | undefined,
+  artifactPaths: string[] | undefined
+): string[] {
+  if (!artifactPaths) return [];
+  const issues = artifactPaths.flatMap((pattern) => {
+    const error = validateAllowedPathPattern(pattern);
+    return error ? [`acceptance.artifactPaths: ${error}`] : [];
+  });
+  if (!allowedPaths) return issues;
+  for (const artifactPath of artifactPaths) {
+    for (const allowedPath of allowedPaths) {
+      if (allowedPathPatternsOverlap(artifactPath, allowedPath)) {
+        issues.push(
+          `acceptance.artifactPaths must not overlap allowedPaths (${artifactPath}, ${allowedPath}).`
+        );
+      }
+    }
+  }
+  return issues;
+}
+
 export const PlanInput = JobOptionsSchema.extend({
   task: z.string().min(1)
 }).strict();
@@ -77,6 +104,12 @@ export const ImplementInput = ImplementInputBase.superRefine((input, context) =>
   for (const message of collectAllowedPathsIssues(input.allowedPaths, {
     required: input.batchMode === "single"
   })) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message });
+  }
+  for (const message of collectArtifactPathIssues(
+    input.allowedPaths,
+    input.acceptance?.artifactPaths
+  )) {
     context.addIssue({ code: z.ZodIssueCode.custom, message });
   }
 });
@@ -135,9 +168,25 @@ const ComposeInputWithWorkflowRequirements = ComposeInput.superRefine((input, co
     });
     return;
   }
+  if (
+    !workflowRequiresDevelopmentAcceptance(input.workflow) &&
+    input.acceptance?.artifactPaths !== undefined
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Workflow ${input.workflow} does not use acceptance.artifactPaths.`
+    });
+    return;
+  }
 
   if (workflow.writesAllowed) {
     for (const message of collectAllowedPathsIssues(input.allowedPaths, { required: false })) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message });
+    }
+    for (const message of collectArtifactPathIssues(
+      input.allowedPaths,
+      input.acceptance?.artifactPaths
+    )) {
       context.addIssue({ code: z.ZodIssueCode.custom, message });
     }
   }

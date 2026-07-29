@@ -6,7 +6,10 @@ import {
   CODEX_MIMO_READONLY_AGENT,
   SINGLE_MODE_ALLOWED_PATHS_REQUIRED_MESSAGE
 } from "../core/safety-contracts.js";
-import { validateAllowedPathPattern } from "../core/path-scope.js";
+import {
+  allowedPathPatternsOverlap,
+  validateAllowedPathPattern
+} from "../core/path-scope.js";
 import { preparePromptTransport } from "../mimo/prompt-transport.js";
 import { buildMimoRunArgs } from "../mimo/run-json.js";
 import { buildBridgeRuntimeEnvironment } from "../mimo/runtime-config.js";
@@ -87,6 +90,12 @@ function normalizeAcceptanceInput(value: unknown): DevelopmentAcceptanceInput | 
       return null;
     }
     acceptance.diffCheck = value.diffCheck;
+  }
+  if (value.artifactPaths !== undefined) {
+    if (!isStringArray(value.artifactPaths)) {
+      return null;
+    }
+    acceptance.artifactPaths = value.artifactPaths;
   }
   return acceptance;
 }
@@ -256,6 +265,24 @@ export function validateSliceManifest(
       return invalid(allowedPathError);
     }
 
+    const artifactPathError = validateAllowedPathPatterns(
+      slice.acceptance.artifactPaths ?? [],
+      `Slice "${slice.id}" acceptance.artifactPaths`
+    );
+    if (artifactPathError) {
+      return invalid(artifactPathError);
+    }
+    for (const artifactPath of slice.acceptance.artifactPaths ?? []) {
+      const overlap = slice.allowedPaths.find((allowedPath) =>
+        allowedPathPatternsOverlap(artifactPath, allowedPath)
+      );
+      if (overlap) {
+        return invalid(
+          `Slice "${slice.id}" acceptance.artifactPaths must not overlap allowedPaths (${artifactPath}, ${overlap}).`
+        );
+      }
+    }
+
     const contextPathError = validateRepositoryRelativePaths(
       slice.contextFiles,
       `Slice "${slice.id}" contextFiles`
@@ -351,6 +378,9 @@ function resolveSingleSliceAcceptance(input: {
   }
   if (input.acceptance?.diffCheck !== undefined) {
     acceptance.diffCheck = input.acceptance.diffCheck;
+  }
+  if (input.acceptance?.artifactPaths !== undefined) {
+    acceptance.artifactPaths = input.acceptance.artifactPaths;
   }
   return acceptance;
 }

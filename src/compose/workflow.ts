@@ -44,6 +44,7 @@ export interface DevelopmentAcceptanceInput {
   build?: string[];
   test?: string[];
   diffCheck?: boolean;
+  artifactPaths?: string[];
 }
 
 export function workflowRequiresDevelopmentAcceptance(

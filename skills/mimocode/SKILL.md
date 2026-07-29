@@ -89,7 +89,7 @@ Work tools:
 - `mimo_resume`: create a child job from a `needs_input`, `blocked`, `stalled`, eligible `timeout`, or resumable-failure parent (`build_failed`, `tests_failed`, `diff_check_failed`, `delivery_contract_missing`, `slice_failed`). Required: `cwd`, parent `jobId`. `task` is required for `needs_input`/`blocked` and optional for checkpoint-backed `stalled`/`timeout`/resumable failures. For slice-chain roots, resume continues the current attention slice and skips completed slices. `slice_plan_invalid` is not resumable — re-launch with a corrected objective/`batchMode`.
 - `mimo_compose`: run a registered workflow. Required for every request: `cwd`, `workflow`. `brainstorm`, `plan`, `dev`, `fix`, `parallel`, `worktree`, `merge`, and `new-skill` also require `task`; `fix-ci` and `execute-plan` require `file`; `review` requires neither. `fix-ci` may additionally include `task`. Optional fields where valid are `since`, `acceptance`, `verification`, `reportDir`, write-workflow `batchMode`, and write-workflow `allowedPaths` (required when `batchMode=single`).
 
-`acceptance` is the preferred write-acceptance contract: `acceptance.build` (build commands), `acceptance.test` (targeted tests), and `acceptance.diffCheck` (deterministic diff self-check plus risk-triggered read-only MiMo review; default true). Exact successful MiMo command evidence is reused only when command, working directory, zero exit code, last-write ordering, and final repository fingerprint match. Legacy `verification[]` remains accepted and maps to the **test stage only** — it does not satisfy build. Put acceptance prose in `task`, not in `verification` or `acceptance` command arrays.
+`acceptance` is the preferred write-acceptance contract: `acceptance.build` (build commands), `acceptance.test` (targeted tests), `acceptance.diffCheck` (deterministic diff self-check plus risk-triggered read-only MiMo review; default true), and optional bounded `acceptance.artifactPaths` for workspace-local build/test outputs. Artifact paths do not widen hook-level source edits, must not overlap `allowedPaths`, and are not automatically deleted. Exact successful MiMo command evidence is reused only when command, working directory, zero exit code, last-write ordering, and final repository fingerprint match. Legacy `verification[]` remains accepted and maps to the **test stage only** — it does not satisfy build. Put acceptance prose in `task`, not in `verification` or `acceptance` command arrays.
 
 `dev`, `execute-plan`, and `implement` cannot complete without host development acceptance. Stages run fail-fast: build → test → diffCheck. Missing build disposition or targeted tests at finalize pause as `needs_input` with `acceptance_config_missing`. Stage failures finish `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing`. Compact `mimo_result` exposes stage outcomes plus failure fields (`failedStage`, failed command/tests, `suggestion`); resume those codes via Phase 2 `mimo_resume` and the parent checkpoint. For Maven/Gradle projects, detected `mvn` / `gradle` commands resolve to repository wrappers (`mvnw.cmd` / `./mvnw`, `gradlew.bat` / `./gradlew`) before preflight and execution; missing commands fail before edits with `acceptance_command_unavailable`.
 
@@ -102,7 +102,7 @@ The `plan` workflow is read-only: MiMoCode must return the plan in its final res
 ```
 
 ```json
-{ "workflow": "dev", "task": "Implement the feature", "acceptance": { "build": ["npm run build"], "test": ["npm test"], "diffCheck": true } }
+{ "workflow": "dev", "task": "Implement the feature", "acceptance": { "build": ["javac -d out src/main/java/App.java"], "test": ["java -cp out AppTest"], "diffCheck": true, "artifactPaths": ["out/**"] } }
 ```
 
 All work tools accept optional `timeoutMs`, `idleTimeoutMs`, `progressWarningMs`, `progressTimeoutMs`, and one notification target. Model and provider selection are intentionally not exposed: every run inherits MiMoCode's own configuration and credentials.
@@ -179,21 +179,21 @@ Before the first model step, an internal hook verifies the MiMo user query match
 
 The JSONL primary session (first `sessionID` in stdout) binds job completion. Child-session `session.post` callbacks are ignored. Session mismatch errors: `callback_session_mismatch` (callback vs JSONL), `event_session_mismatch` (JSONL drift mid-run).
 
-Write jobs with `allowedPaths` block out-of-scope `write`/`edit` at the hook and in a mandatory post-run audit (`write_scope_violation`). Tighten scope and relaunch rather than resuming.
+Write jobs with `allowedPaths` block out-of-scope `write`/`edit` at the hook and in a mandatory post-run audit (`write_scope_violation`). Expected command outputs may use bounded, non-overlapping `acceptance.artifactPaths`; these paths participate only in post-run and diff auditing. Tighten source scope or declare the expected artifact scope, then relaunch rather than resuming.
 
 | Error code | Action |
 | --- | --- |
 | `prompt_identity_mismatch` | Restart with correct `task`; do not `mimo_resume` |
 | `callback_session_mismatch` | Inspect events/callback diagnostics; restart |
 | `event_session_mismatch` | Restart the job |
-| `write_scope_violation` | Relaunch with narrower `allowedPaths` |
+| `write_scope_violation` | Relaunch with narrower `allowedPaths`, or add bounded `acceptance.artifactPaths` for expected build/test output |
 | `acceptance_command_unavailable` | Supply explicit `acceptance` with repo wrapper path or install the tool |
 
 When multiple failures coexist, compact `mimo_result` keeps at most three `failure.causes`; use `level: "standard"` or `level: "full"` for the complete list.
 
 ## Acceptance and Context Budget
 
-- Keep delegated slices small and prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck` (executable strings, not natural-language acceptance criteria). Legacy `verification[]` maps to the test stage only.
+- Keep delegated slices small and prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck` (executable strings, not natural-language acceptance criteria). Declare bounded `acceptance.artifactPaths` when commands intentionally write workspace-local outputs. Legacy `verification[]` maps to the test stage only.
 - `dev`, `execute-plan`, and `implement` cannot complete without acceptance; treat `acceptance_config_missing` as `needs_input` and resumable stage codes (`build_failed`, `tests_failed`, `diff_check_failed`, `delivery_contract_missing`) via `mimo_resume`.
 - Put state or scope prose such as `计划不修改业务源码` in `task`, not in `verification`.
 - Read `mimo_result` at the default compact level first; use `reportPath` and linked artifacts only when needed. Reports stay structural and omit model output. Compact acceptance failures include `failedStage`, failed command/tests, and a shortest-fix `suggestion`.

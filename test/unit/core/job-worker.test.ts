@@ -154,6 +154,59 @@ function workerDeps(overrides: Partial<JobWorkerDependencies> = {}): JobWorkerDe
 }
 
 describe("runJobWorker", () => {
+  it("fingerprints declared ignored artifacts without widening the write hook", async () => {
+    const cwd = gitWorkspace();
+    fs.writeFileSync(path.join(cwd, ".gitignore"), "out/\n", "utf8");
+    execFileSync("git", ["add", ".gitignore"], { cwd });
+    execFileSync("git", ["commit", "-m", "ignore artifacts"], { cwd, stdio: "ignore" });
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "Build it",
+      request: {
+        cwd,
+        task: "Build it",
+        allowWrite: true,
+        batchMode: "single",
+        allowedPaths: ["tracked.txt"],
+        acceptance: {
+          build: ["node -e process.exit(0)"],
+          test: ["node -e process.exit(0)"],
+          diffCheck: false,
+          artifactPaths: ["out/**"]
+        }
+      }
+    });
+    const bound = definition();
+    const controller = hook();
+    const createHook = vi.fn(async () => controller);
+    const deps = workerDeps({
+      bindJobDefinition: vi.fn(() => bound),
+      createHookCallbackController: createHook,
+      runMimoStreaming: vi.fn(async (_cwd, _args, options) => {
+        await options.onStart?.(321);
+        fs.mkdirSync(path.join(cwd, "out"), { recursive: true });
+        fs.writeFileSync(path.join(cwd, "out", "App.class"), "bytecode", "utf8");
+        await options.onLine?.(
+          '{"type":"text","text":"Implemented and verified.","sessionID":"ses_worker"}'
+        );
+        return completedRun;
+      })
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    const finalizeContext = vi.mocked(bound.finalize).mock.calls[0][0];
+    expect(finalizeContext.changeDetection).toMatchObject({
+      files: ["out/App.class"],
+      status: "complete",
+      sources: ["git_fingerprint", "scope_manifest"]
+    });
+    expect(createHook).toHaveBeenCalledWith(expect.objectContaining({
+      allowedPaths: ["tracked.txt"]
+    }));
+    expect(createHook.mock.calls[0][0]).not.toHaveProperty("artifactPaths");
+  });
+
   it.each(["CODEX_MIMO_COMMAND", "MIMO_COMMAND"])(
     "does not select a current work job's protected %s value as the MiMo executable",
     async (secretEnv) => {

@@ -63,7 +63,12 @@ import {
 import { buildMimoRunArgs } from "../mimo/run-json.js";
 import type { StreamingRunResult } from "../mimo/streaming-runner.js";
 import { preflightVerificationCommand } from "../compose/verify.js";
-import { runScopeCheck } from "./path-scope.js";
+import {
+  allowedPathPatternsOverlap,
+  mergeAllowedPathScopes,
+  runScopeCheck,
+  validateAllowedPathPattern
+} from "./path-scope.js";
 import { isRuntimeArtifactPath } from "./runtime-paths.js";
 import { CODEX_MIMO_READONLY_AGENT, SCOPE_CHECK_GATE } from "./safety-contracts.js";
 import type { JobFailureCause } from "./jobs.js";
@@ -145,7 +150,8 @@ const CommonRequestSchema = z.object({
 const DevelopmentAcceptanceRequestSchema = z.object({
   build: z.array(z.string().min(1)).optional(),
   test: z.array(z.string().min(1)).optional(),
-  diffCheck: z.boolean().optional()
+  diffCheck: z.boolean().optional(),
+  artifactPaths: z.array(z.string().min(1)).optional()
 }).strict();
 
 const PlanRequestSchema = CommonRequestSchema.extend({
@@ -158,6 +164,8 @@ const ImplementRequestSchema = CommonRequestSchema.extend({
   acceptance: DevelopmentAcceptanceRequestSchema.optional(),
   allowedPaths: z.array(z.string().min(1)).optional(),
   batchMode: BatchModeSchema.default("auto")
+}).superRefine((request, context) => {
+  addArtifactScopeIssues(request.allowedPaths, request.acceptance?.artifactPaths, context);
 });
 
 const ReviewRequestSchema = CommonRequestSchema.extend({
@@ -222,7 +230,45 @@ const ComposeRequestSchema = CommonRequestSchema.extend({
   for (const message of validateComposeWorkflowInput(request)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message });
   }
+  const workflow = getComposeWorkflow(request.workflow);
+  if (
+    !workflowRequiresDevelopmentAcceptance(request.workflow) &&
+    request.acceptance?.artifactPaths !== undefined
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Workflow ${request.workflow} does not use acceptance.artifactPaths.`
+    });
+    return;
+  }
+  addArtifactScopeIssues(request.allowedPaths, request.acceptance?.artifactPaths, context);
 }).transform(normalizeComposeBatchMode);
+
+function addArtifactScopeIssues(
+  allowedPaths: string[] | undefined,
+  artifactPaths: string[] | undefined,
+  context: z.RefinementCtx
+): void {
+  if (!artifactPaths) return;
+  for (const artifactPath of artifactPaths) {
+    const error = validateAllowedPathPattern(artifactPath);
+    if (error) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `acceptance.artifactPaths: ${error}`
+      });
+    }
+    for (const allowedPath of allowedPaths ?? []) {
+      if (allowedPathPatternsOverlap(artifactPath, allowedPath)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            `acceptance.artifactPaths must not overlap allowedPaths (${artifactPath}, ${allowedPath}).`
+        });
+      }
+    }
+  }
+}
 
 export type PlanJobRequest = z.input<typeof PlanRequestSchema>;
 export type ImplementJobRequest = z.input<typeof ImplementRequestSchema>;
@@ -1251,10 +1297,11 @@ async function runAcceptanceForFinalize<Request extends { cwd: string }>(
 
   const acceptancePlan = plan as DevelopmentAcceptancePlan;
   const allowedPaths = readAllowedPathsFromRequest(context.request);
+  const scopePaths = mergeAllowedPathScopes(allowedPaths, input.acceptance?.artifactPaths);
   if (input.writesAllowed && allowedPaths && allowedPaths.length > 0) {
     const scope = runScopeCheck({
       changedFiles: input.changedFiles,
-      allowedPaths
+      allowedPaths: scopePaths ?? allowedPaths
     });
     if (!scope.passed) {
       const reason = scope.reason ?? "Write scope check failed.";
@@ -1395,12 +1442,14 @@ function createDefaultRunDiffCheck(
     const captureDiff = context.deps?.captureDiff ?? captureGitDiff;
 
     const allowedPaths = readAllowedPathsFromRequest(context.request);
+    const artifactPaths = readAcceptanceFromRequest(context.request)?.artifactPaths;
+    const scopePaths = mergeAllowedPathScopes(allowedPaths, artifactPaths);
     const selfCheck = await runSelfCheck({
       cwd,
       expectedWritesAllowed: writesAllowed,
       gitHeadBefore: context.gitHeadBefore,
       signal,
-      ...(allowedPaths ? { allowedPaths } : {})
+      ...(scopePaths ? { allowedPaths: scopePaths } : {})
     });
     if (selfCheck.outcome === "failed") {
       return selfCheck;
