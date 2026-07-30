@@ -133,6 +133,7 @@ export function renderCompactJobResult(
     ? summarizeJobOutput(options.output)
     : undefined;
   const attention = buildCompactAttention(job, publicSummary);
+  const reportJobId = chainReportJobId(job);
   const result: CompactJobResult = {
     status: job.status,
     changedFiles: job.changedFiles.map(compactFilePath),
@@ -141,6 +142,7 @@ export function renderCompactJobResult(
     reportPath: compactReportPath(job, semantic
       ? (job.reportPaths?.plan ?? job.reportPaths?.result ?? job.reportPaths?.markdown)
       : (job.reportPaths?.markdown ?? job.reportPaths?.result)),
+    ...(reportJobId ? { reportJobId } : {}),
     ...(semantic ? { summary: semantic } : {}),
     ...(attention ? { attention } : {}),
     ...(job.reconciliation
@@ -161,6 +163,18 @@ export function renderCompactJobResult(
     settleCompactResultBytes(compact);
   }
   return compact;
+}
+
+function chainReportJobId(job: JobRecord): string | undefined {
+  if (!isChainOrchestratorRoot(job)) return undefined;
+  const report = job.reportPaths?.markdown ??
+    job.reportPaths?.json ??
+    job.reportPaths?.result;
+  if (!report) return undefined;
+  const name = path.basename(report)
+    .replace(/\.result\.md$/i, "")
+    .replace(/\.(?:md|json)$/i, "");
+  return name && name !== job.id ? name : undefined;
 }
 
 function publicReconciliation(

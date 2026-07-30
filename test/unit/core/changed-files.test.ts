@@ -96,6 +96,64 @@ describe("multi-source changed file detection", () => {
     });
   });
 
+  it("does not attribute a pre-existing tracked HEAD diff to the active job", () => {
+    expect(detectChangedFiles({
+      cwd: "E:/repo",
+      gitStatusBefore: {
+        short: " M existing.md",
+        dirty: true,
+        fingerprints: {
+          "existing.md": { status: " M", contentHash: "same-content" }
+        }
+      },
+      gitStatusAfter: {
+        short: " M existing.md\n?? src/new.ts",
+        dirty: true,
+        fingerprints: {
+          "existing.md": { status: " M", contentHash: "same-content" },
+          "src/new.ts": { status: "??", contentHash: "new-content" }
+        }
+      },
+      diff: {
+        changedFiles: ["existing.md", "src/new.ts"],
+        diffStat: " existing.md | 1 +",
+        diff: "diff --git a/existing.md b/existing.md"
+      }
+    })).toEqual({
+      files: ["src/new.ts"],
+      candidates: [],
+      status: "complete",
+      sources: ["git_fingerprint", "git_diff"]
+    });
+  });
+
+  it("falls back to the HEAD diff when Git status baselines are unavailable", () => {
+    expect(detectChangedFiles({
+      cwd: "E:/repo",
+      gitStatusBefore: {
+        short: "",
+        dirty: false,
+        fingerprints: {},
+        repositoryAvailable: false
+      },
+      gitStatusAfter: {
+        short: "",
+        dirty: false,
+        fingerprints: {},
+        repositoryAvailable: false
+      },
+      diff: {
+        changedFiles: ["src/fallback.ts"],
+        diffStat: "",
+        diff: ""
+      }
+    })).toMatchObject({
+      files: ["src/fallback.ts"],
+      sources: ["git_diff"],
+      status: "partial"
+    });
+  });
+
   it("fingerprints current workspace file content deterministically", () => {
     const cwd = workspace();
     fs.writeFileSync(path.join(cwd, "a.txt"), "one\n");

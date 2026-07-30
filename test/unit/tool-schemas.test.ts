@@ -276,6 +276,16 @@ describe("work tool schemas", () => {
     });
     expect(parsed).not.toHaveProperty("batchMode");
   });
+
+  it.each(["fix-ci", "parallel", "worktree", "merge", "new-skill"] as const)(
+    "leaves topology-owning workflow %s out of bridge slice orchestration",
+    (workflow) => {
+      const input = workflow === "fix-ci"
+        ? { cwd: "E:/project", workflow, file: "ci.log", batchMode: "sliced" as const }
+        : { cwd: "E:/project", workflow, task: "run workflow", batchMode: "sliced" as const };
+      expect(parseComposeInput(input)).not.toHaveProperty("batchMode");
+    }
+  );
 });
 
 describe("control tool schemas", () => {

@@ -50,7 +50,18 @@ export interface DevelopmentAcceptanceInput {
 export function workflowRequiresDevelopmentAcceptance(
   workflow: ComposeWorkflowName
 ): boolean {
-  return workflow === "dev" || workflow === "execute-plan";
+  return workflow === "dev" ||
+    workflow === "fix" ||
+    workflow === "fix-ci" ||
+    workflow === "execute-plan";
+}
+
+export function workflowSupportsBridgeSlicing(
+  workflow: ComposeWorkflowName
+): boolean {
+  return workflow === "dev" ||
+    workflow === "fix" ||
+    workflow === "execute-plan";
 }
 
 const workflows: Record<ComposeWorkflowName, ComposeWorkflow> = {
@@ -182,7 +193,7 @@ export function normalizeComposeBatchMode<
   Request extends ComposeWorkflowInput & { batchMode?: BatchMode }
 >(request: Request): Request {
   const workflow = getComposeWorkflow(request.workflow);
-  if (workflow.writesAllowed) {
+  if (workflow.writesAllowed && workflowSupportsBridgeSlicing(workflow.name)) {
     return { ...request, batchMode: request.batchMode ?? "auto" };
   }
   if (request.batchMode === undefined) {

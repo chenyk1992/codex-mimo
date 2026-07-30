@@ -38,7 +38,17 @@ Instructions require focused changes, action/verification/risk reporting, and Po
 
 ## Slice chains (`batchMode`)
 
-Write Compose workflows (`dev`, `fix`, `fix-ci`, `execute-plan`, `parallel`, `worktree`, `merge`, `new-skill`) accept optional `batchMode`: `auto` (default), `single`, or `sliced`. Read-only workflows strip `batchMode`. When enabled, the bridge plans `.codex-mimo/reports/<rootJobId>.slices.json`, records `.codex-mimo/jobs/<chainId>.chain.json`, and runs one slice at a time under the public root job. Slice children never notify; only the root delivers. Planning failure uses `slice_plan_invalid` (re-launch after re-planning; not resumable); a failed slice uses `slice_failed` (resumable). Resume the root to continue the attention slice while skipping completed slices.
+Compose `dev`, `fix`, and `execute-plan` accept optional `batchMode`: `auto`
+(default), `single`, or `sliced`. `fix-ci`, `parallel`, `worktree`, `merge`, and
+`new-skill` execute their own Compose topology directly, so the bridge strips
+`batchMode` rather than creating a conflicting outer slice chain. Read-only
+workflows also strip `batchMode`. When slicing is enabled, the bridge plans
+`.codex-mimo/reports/<rootJobId>.slices.json`, records
+`.codex-mimo/jobs/<chainId>.chain.json`, and runs one slice at a time under the
+public root job. Slice children never notify; only the root delivers. Planning
+failure uses `slice_plan_invalid` (re-launch after re-planning; not resumable);
+a failed slice uses `slice_failed` (resumable). Resume the root to continue the
+attention slice while skipping completed slices.
 
 `batchMode=single` requires bounded `allowedPaths`; bare repository-wide `**` is rejected at launch. Each slice declares its own `allowedPaths` in the manifest.
 

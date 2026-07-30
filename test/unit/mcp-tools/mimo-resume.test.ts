@@ -503,6 +503,34 @@ describe("mimo_resume", () => {
     expect(stalledChild.id).not.toBe(continuation.id);
   });
 
+  it("inherits the root acceptance contract when a legacy chain child omitted it", async () => {
+    const cwd = tempWorkspace();
+    const { root, stalledChild, checkpointFingerprint } = await midChainStalledRoot(cwd);
+    updateJob(cwd, stalledChild.id, {
+      request: {
+        cwd,
+        task: stalledChild.task,
+        allowWrite: true,
+        batchMode: "single"
+      }
+    });
+
+    const receipt = await mimoResume({ cwd, jobId: root.id }, {
+      env: {},
+      spawnJobSupervisor: vi.fn().mockReturnValue(123),
+      verifyProcess: () => ({ status: "not_running" as const, evidence: "gone" }),
+      captureFingerprint: async () => checkpointFingerprint
+    });
+
+    expect(readJob(cwd, receipt.jobId)?.request).toMatchObject({
+      requireAcceptance: true,
+      acceptance: {
+        build: ["npm run build"],
+        test: ["npm test -- focused.test.ts"]
+      }
+    });
+  });
+
   it("keeps resume_conflict when mid-chain fingerprint drifts", async () => {
     const cwd = tempWorkspace();
     const { root } = await midChainStalledRoot(cwd);

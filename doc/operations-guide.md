@@ -32,11 +32,43 @@ The nine statuses are `queued`, `running`, `needs_input`, `blocked`, `stalled`, 
 
 `mimo_resume` continues resumable `build_failed`, `tests_failed`, `diff_check_failed`, and `delivery_contract_missing` results from their durable context.
 
-`dev`, `execute-plan`, `implement`, and native `mimo_fix_ci` cannot complete without ordered host acceptance. Prefer `acceptance.build` / `acceptance.test` / `acceptance.diffCheck`. When those commands create workspace-local outputs, declare bounded non-overlapping `acceptance.artifactPaths` such as `["out/**"]`; these paths are audited but do not widen source `write`/`edit` permissions. Stages run fail-fast: build → test → diffCheck. A MiMo build/test result is reused only when its exact command, resolved working directory, zero exit code, position after the last declared write, and repository fingerprint match the final state. The deterministic diff self-check always runs; the secondary read-only MiMo review is risk-triggered by incomplete change detection, sensitive files/workflows, more than five files, or more than 200 changed lines. Legacy `verification[]` maps to the test stage only. Missing build/test disposition pauses before MiMo edits as `needs_input` with `acceptance_config_missing`. Stage failures finish `failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or `delivery_contract_missing`. Compact `mimo_result` includes `failedStage`, failed command/tests, and a shortest-fix `suggestion`; resume those codes via Phase 2 `mimo_resume` and `.codex-mimo/reports/<jobId>.checkpoint.json`.
+`dev`, `fix`, `fix-ci`, `execute-plan`, `implement`, and native `mimo_fix_ci`
+cannot complete without ordered host acceptance. Prefer `acceptance.build` /
+`acceptance.test` / `acceptance.diffCheck`. When those commands create
+workspace-local outputs, declare bounded non-overlapping
+`acceptance.artifactPaths` such as `["out/**"]`; these paths are audited but do
+not widen source `write`/`edit` permissions. Stages run fail-fast: build → test
+→ diffCheck. A MiMo build/test result is reused only when its exact command,
+resolved working directory, zero exit code, position after the last declared
+write, and repository fingerprint match the final state. The deterministic
+diff self-check always runs; the secondary read-only MiMo review is
+risk-triggered by incomplete change detection, sensitive files/workflows, more
+than five files, or more than 200 changed lines. Legacy `verification[]` maps
+to the test stage only. Missing build/test disposition pauses before MiMo edits
+as `needs_input` with `acceptance_config_missing`. Stage failures finish
+`failed` with `build_failed`, `tests_failed`, `diff_check_failed`, or
+`delivery_contract_missing`. Compact `mimo_result` includes `failedStage`,
+failed command/tests, and a shortest-fix `suggestion`; resume those codes via
+Phase 2 `mimo_resume` and
+`.codex-mimo/reports/<jobId>.checkpoint.json`.
 
 ### Slice chains (`batchMode`)
 
-Write roots may set `batchMode` to `auto` (default), `single`, or `sliced`. The orchestrator plans a slice manifest (`.codex-mimo/reports/<rootJobId>.slices.json`), persists `.codex-mimo/jobs/<chainId>.chain.json`, and runs slices sequentially — one at a time. Slice children are created without `notificationTarget`; only the root enqueues notification deliveries (including stall/failure attention and final completion). Invalid planning finalizes the root as `failed` with `slice_plan_invalid` (not resumable — re-launch after fixing the plan); a terminal failed slice finalizes the root as `failed` with `slice_failed` (resumable via `mimo_resume`). Crash recovery and `mimo_resume` on the root continue the current attention slice and skip completed slices. Standard `mimo_result` reports `completedSlices` / `remainingSlices` for chain roots.
+`implement` and Compose `dev`, `fix`, and `execute-plan` roots may set
+`batchMode` to `auto` (default), `single`, or `sliced`. Compose `fix-ci`,
+`parallel`, `worktree`, `merge`, and `new-skill` already own their execution
+topology and run directly; the bridge strips `batchMode` for those workflows.
+For sliceable roots, the orchestrator plans a slice manifest
+(`.codex-mimo/reports/<rootJobId>.slices.json`), persists
+`.codex-mimo/jobs/<chainId>.chain.json`, and runs slices sequentially — one at
+a time. Slice children are created without `notificationTarget`; only the root
+enqueues notification deliveries (including stall/failure attention and final
+completion). Invalid planning finalizes the root as `failed` with
+`slice_plan_invalid` (not resumable — re-launch after fixing the plan); a
+terminal failed slice finalizes the root as `failed` with `slice_failed`
+(resumable via `mimo_resume`). Crash recovery and `mimo_resume` on the root
+continue the current attention slice and skip completed slices. Standard
+`mimo_result` reports `completedSlices` / `remainingSlices` for chain roots.
 
 `batchMode=single` requires bounded `allowedPaths`; bare repository-wide `**` is rejected at launch. Supported patterns are repository-relative: exact file (`src/app.ts`), directory prefix (`src/components`), or trailing `/**` only (`src/components/**`).
 

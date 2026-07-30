@@ -25,6 +25,8 @@ import { createJobStore, listJobs, readJob, updateJobAuthoritative } from "../..
 import { transitionJob } from "../../../src/core/job-transition.js";
 import { readDeliveries } from "../../../src/notify/outbox.js";
 import { recoverUnfinishedJobChains } from "../../../src/core/job-recovery.js";
+import { captureScopedWorkspaceManifest } from "../../../src/core/changed-files.js";
+import { readJobCheckpoint, writeJobCheckpoint } from "../../../src/core/job-checkpoint.js";
 
 const tempDirs: string[] = [];
 
@@ -763,6 +765,15 @@ describe("chain crash recovery", () => {
       pid: 4242,
       processIdentity: "start-4242"
     });
+    const secondBeforeWrite = readJob(cwd, secondId)!;
+    const checkpointPaths = await writeJobCheckpoint({
+      job: secondBeforeWrite,
+      objective: secondBeforeWrite.task,
+      workspaceManifestBefore: captureScopedWorkspaceManifest(cwd, ["src/**"])
+    });
+    await updateJobAuthoritative(cwd, secondId, { reportPaths: checkpointPaths });
+    fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, "src", "b.ts"), "broken partial write\n", "utf8");
 
     const beforeJobs = listJobs(cwd).map((job) => job.id).sort();
     await recoverUnfinishedJobChains(cwd, {
@@ -775,9 +786,20 @@ describe("chain crash recovery", () => {
     const second = readJob(cwd, secondId)!;
     expect(second.status).toBe("stalled");
     expect(second.errorCode).toBe("worker_lost");
+    expect(second.changedFiles).toEqual(["src/b.ts"]);
+    expect(second.reconciliation).toMatchObject({
+      status: "complete",
+      changeDetection: {
+        status: "complete",
+        sources: ["scope_manifest"]
+      }
+    });
+    expect(readJobCheckpoint(second.reportPaths?.checkpoint ?? "")?.changedFiles)
+      .toEqual(["src/b.ts"]);
     expect(readJob(cwd, boot.root.id)).toMatchObject({
       status: "stalled",
-      errorCode: "worker_lost"
+      errorCode: "worker_lost",
+      changedFiles: ["src/a.ts", "src/b.ts"]
     });
     const chain = readJobChain(cwd, boot.chainId)!;
     expect(chain.sliceStates["slice-1"]).toBe("completed");

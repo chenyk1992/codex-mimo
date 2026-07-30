@@ -32,20 +32,32 @@ export function summarizeJobOutput(
 
   const explicitSummary = lines.findIndex((line) =>
     /^#{1,6}\s+(?:summary|result|摘要|总结)\s*$/i.test(line));
+  const preferredConclusion = lines.find((line) =>
+    /^(?:#{1,6}\s+)?(?:\*{1,2})?(?:verdict|judgment|conclusion|结论|判定)(?:\*{1,2})?\s*[:：]/i
+      .test(line)
+  );
   const substantive = (explicitSummary >= 0
-    ? lines.slice(explicitSummary + 1).find((line) => !/^#{1,6}\s+/.test(line))
+    ? lines.slice(explicitSummary + 1).find(isSubstantiveSummaryLine)
     : undefined) ??
-    lines.find((line) => !/^#{1,6}\s+/.test(line)) ??
+    preferredConclusion ??
+    lines.find(isSubstantiveSummaryLine) ??
     lines[0];
   const sentence = substantive.match(/^.*?[.!?。！？](?:\s|$)/)?.[0] ?? substantive;
   const singleLine = sentence
+    .replace(/^#{1,6}\s+/, "")
     .replace(/^[-*+]\s+/, "")
+    .replace(/^\*{1,2}|\*{1,2}$/g, "")
     .replace(/[\u0000-\u001f\u007f]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   return singleLine
     ? redactDiagnosticText(singleLine).slice(0, maxChars)
     : undefined;
+}
+
+function isSubstantiveSummaryLine(line: string): boolean {
+  return !/^#{1,6}\s+/.test(line) &&
+    !/^(?:---+|\*\*\*+|___+)$/.test(line);
 }
 
 export function readTextArtifact(file: string | undefined): string | undefined {

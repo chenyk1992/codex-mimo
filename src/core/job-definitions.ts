@@ -39,6 +39,7 @@ import {
   getComposeWorkflow,
   normalizeComposeBatchMode,
   validateComposeWorkflowInput,
+  workflowSupportsBridgeSlicing,
   workflowRequiresDevelopmentAcceptance,
   type ComposeWorkflowName,
   type DevelopmentAcceptanceInput
@@ -51,6 +52,7 @@ import {
 } from "../compose/events.js";
 import {
   captureGitDiff,
+  captureGitReviewDiff,
   type GitCommitChangeSnapshot,
   type GitDiffSnapshot,
   type GitHeadSnapshot,
@@ -396,7 +398,7 @@ const reviewDefinition: JobDefinition<"review", ReviewJobRequest> = {
   executionPolicy: () => ({ agent: CODEX_MIMO_READONLY_AGENT, writesAllowed: false }),
   async buildPrompt(request, signal) {
     const base = request.base ?? "HEAD";
-    const diff = await captureGitDiff(request.cwd, base, { signal });
+    const diff = await captureGitReviewDiff(request.cwd, base, { signal });
     const diffFile = diff.diff
       ? writePromptAttachment(diff.diff, { cwd: request.cwd, label: `review-${base}`, extension: ".diff" })
       : undefined;
@@ -1707,7 +1709,9 @@ export function shouldBootstrapWriteJobChain(job: JobRecord): boolean {
     const parsed = ComposeRequestSchema.safeParse(job.request);
     if (!parsed.success) return false;
     const workflow = getComposeWorkflow(parsed.data.workflow);
-    if (!workflow.writesAllowed) return false;
+    if (!workflow.writesAllowed || !workflowSupportsBridgeSlicing(workflow.name)) {
+      return false;
+    }
     return isBootstrapBatchMode(parsed.data.batchMode);
   }
   return false;

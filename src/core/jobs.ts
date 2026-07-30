@@ -173,6 +173,8 @@ export interface CompactJobResult {
   tests: CompactAcceptanceResult[];
   failure: CompactFailure | null;
   reportPath: string | null;
+  /** Child job that owns reportPath when this result is a chain root aggregate. */
+  reportJobId?: string;
   summary?: string;
   /** Compose-specific deliverable assessment; independent from execution status. */
   assessment?: ArtifactAssessment;

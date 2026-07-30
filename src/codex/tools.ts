@@ -334,20 +334,28 @@ export async function mimoResume(input: unknown, deps: MimoResumeDependencies = 
     resumeSource.task ||
     parent.task;
   const executionPolicy = bindJobDefinition(parent).executionPolicy;
-  const inheritedContract = inheritedResumeContract(resumeSource);
+  const rootContract = inheritedResumeContract(parent);
+  const sourceContract = resumeSource.id === parent.id
+    ? rootContract
+    : inheritedResumeContract(resumeSource);
   const {
     notify,
     acceptance: parsedAcceptanceOverride,
     allowedPaths: allowedPathsOverride,
     ...options
   } = parsed;
-  const acceptance = inheritedContract.acceptance || parsedAcceptanceOverride
+  const acceptance = rootContract.acceptance ||
+      sourceContract.acceptance ||
+      parsedAcceptanceOverride
     ? {
-        ...inheritedContract.acceptance,
+        ...rootContract.acceptance,
+        ...sourceContract.acceptance,
         ...parsedAcceptanceOverride
       }
     : undefined;
-  const allowedPaths = allowedPathsOverride ?? inheritedContract.allowedPaths;
+  const allowedPaths = allowedPathsOverride ??
+    sourceContract.allowedPaths ??
+    rootContract.allowedPaths;
   parseResumeInput({
     ...parsed,
     ...(acceptance ? { acceptance } : {}),
@@ -358,7 +366,8 @@ export async function mimoResume(input: unknown, deps: MimoResumeDependencies = 
     jobId: parent.id,
     task,
     executionPolicy,
-    requireAcceptance: inheritedContract.requireAcceptance ||
+    requireAcceptance: rootContract.requireAcceptance ||
+      sourceContract.requireAcceptance ||
       hasConfiguredAcceptance(acceptance),
     ...(acceptance ? { acceptance } : {}),
     ...(allowedPaths ? { allowedPaths } : {}),

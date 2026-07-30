@@ -381,6 +381,17 @@ describe("compact job rendering", () => {
       }));
       expect(standard.completedSlices).toBe(1);
       expect(standard.remainingSlices).toBe(1);
+      expect(renderCompactJobResult(job({
+        cwd,
+        status: "failed",
+        errorCode: "slice_failed",
+        chainId,
+        parentJobId: null,
+        sliceId: null,
+        reportPaths: {
+          markdown: path.join(cwd, ".codex-mimo", "reports", "implement-child-2.md")
+        }
+      })).reportJobId).toBe("implement-child-2");
     } finally {
       fs.rmSync(cwd, { recursive: true, force: true });
     }

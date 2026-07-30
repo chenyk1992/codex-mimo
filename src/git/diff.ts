@@ -31,6 +31,8 @@ export interface GitCaptureOptions {
   signal?: AbortSignal;
 }
 
+const MAX_UNTRACKED_REVIEW_BYTES = 1_000_000;
+
 export async function captureGitStatus(
   cwd: string,
   options: GitCaptureOptions = {}
@@ -164,6 +166,82 @@ export async function captureGitDiff(
       `Git diff capture failed for base ${base}: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error }
     );
+  }
+}
+
+/**
+ * Review input must include untracked source files as well as the tracked HEAD
+ * diff. Git does not emit patches for untracked files, so represent them as
+ * synthetic new-file patches for the read-only reviewer.
+ */
+export async function captureGitReviewDiff(
+  cwd: string,
+  base = "HEAD",
+  options: GitCaptureOptions = {}
+): Promise<GitDiffSnapshot> {
+  const tracked = await captureGitDiff(cwd, base, options);
+  const status = await captureGitStatus(cwd, options);
+  const untracked = Object.entries(status.fingerprints)
+    .filter(([, fingerprint]) => fingerprint.status === "??")
+    .map(([file]) => file)
+    .sort();
+  if (untracked.length === 0) return tracked;
+
+  const patches = untracked.map((file) => untrackedFilePatch(cwd, file));
+  const stats = untracked.map((file, index) => {
+    const additions = patches[index]
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+      .length;
+    return ` ${file} | ${additions} +`;
+  });
+  return {
+    changedFiles: [...new Set([...tracked.changedFiles, ...untracked])].sort(),
+    diffStat: [tracked.diffStat.trim(), ...stats].filter(Boolean).join("\n"),
+    diff: [tracked.diff.trim(), ...patches].filter(Boolean).join("\n")
+  };
+}
+
+function untrackedFilePatch(cwd: string, file: string): string {
+  const root = path.resolve(cwd);
+  const absolute = path.resolve(root, file);
+  const relative = path.relative(root, absolute);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return "";
+  try {
+    const bytes = fs.statSync(absolute).size;
+    if (bytes > MAX_UNTRACKED_REVIEW_BYTES) {
+      return [
+        `diff --git a/${file} b/${file}`,
+        "new file mode 100644",
+        `Untracked file omitted from inline review patch (${bytes} bytes).`
+      ].join("\n");
+    }
+    const content = fs.readFileSync(absolute);
+    if (content.includes(0)) {
+      return [
+        `diff --git a/${file} b/${file}`,
+        "new file mode 100644",
+        `Binary files /dev/null and b/${file} differ`
+      ].join("\n");
+    }
+    const lines = content.toString("utf8").split(/\r?\n/);
+    if (lines.at(-1) === "") lines.pop();
+    return [
+      `diff --git a/${file} b/${file}`,
+      "new file mode 100644",
+      "--- /dev/null",
+      `+++ b/${file}`,
+      `@@ -0,0 +1,${lines.length} @@`,
+      ...lines.map((line) => `+${line}`)
+    ].join("\n");
+  } catch {
+    return [
+      `diff --git a/${file} b/${file}`,
+      "new file mode 100644",
+      "--- /dev/null",
+      `+++ b/${file}`,
+      "@@ unreadable @@"
+    ].join("\n");
   }
 }
 

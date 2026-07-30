@@ -77,9 +77,21 @@ export function detectChangedFiles(input: {
     verified.push(changedFingerprintFiles(input.gitStatusBefore!, input.gitStatusAfter!));
     sources.push("git_fingerprint");
   }
+  // `git diff HEAD` includes tracked changes that may pre-date this job.
+  // A file already dirty in the before snapshot is therefore accepted only
+  // through the fingerprint delta above. Diff-only files that were clean at
+  // the baseline remain useful supplemental evidence (and support degraded
+  // status providers that omit a later fingerprint).
   if (input.diff?.changedFiles.length) {
-    verified.push(input.diff.changedFiles);
-    sources.push("git_diff");
+    const diffFiles = gitAvailable
+      ? input.diff.changedFiles.filter(
+          (file) => !(file in input.gitStatusBefore!.fingerprints)
+        )
+      : input.diff.changedFiles;
+    if (diffFiles.length > 0) {
+      verified.push(diffFiles);
+      sources.push("git_diff");
+    }
   }
   if (input.commitChanges?.changedFiles.length) {
     verified.push(input.commitChanges.changedFiles);

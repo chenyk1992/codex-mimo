@@ -235,7 +235,12 @@ async function runOwnedJobWorker(
         status: "failed",
         summary: bootstrap.reason,
         error: bootstrap.reason,
-        errorCode: bootstrap.errorCode
+        errorCode: bootstrap.errorCode,
+        failureCauses: [{
+          code: bootstrap.errorCode,
+          stage: "prompt",
+          suggestion: bootstrap.reason
+        }]
       }, deps);
       await afterTerminalTransition(cwd, failed, deps);
       return;
@@ -327,6 +332,21 @@ async function runOwnedJobWorker(
       executionGuard.signal
     );
     assertJobActive(cwd, jobId, executionGuard.signal);
+    if (workspaceManifestBefore) {
+      try {
+        await persistJobCheckpoint(cwd, requireJob(cwd, jobId), {
+          workspaceManifestBefore,
+          captureHead: async () => gitHeadBefore,
+          captureStatus: async () => gitStatusBefore
+        });
+      } catch (error) {
+        bestEffortJobLog(
+          cwd,
+          jobId,
+          `Failed to persist the pre-run workspace manifest: ${errorMessage(error)}`
+        );
+      }
+    }
 
     stage = "hook";
     hook = await awaitWithAbort(

@@ -48,7 +48,11 @@ Compose jobs additionally persist an `assessment` (`passed`, `needs_review`, or 
 
 ### Slice chains (`batchMode`)
 
-Write entries (`implement` and write Compose workflows) accept `batchMode`: `auto` (default), `single`, or `sliced`.
+`implement` and the bridge-sliceable Compose workflows (`dev`, `fix`, and
+`execute-plan`) accept `batchMode`: `auto` (default), `single`, or `sliced`.
+`fix-ci`, `parallel`, `worktree`, `merge`, and `new-skill` execute their own
+Compose topology directly; the bridge strips `batchMode` instead of planning a
+conflicting outer slice chain.
 
 - `auto` — bounded read-only planning returns one or more slices.
 - `single` — caller asserts one narrow deliverable (materialized as a one-slice chain). Requires bounded `allowedPaths`; bare repository-wide `**` is rejected at launch.

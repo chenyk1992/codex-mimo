@@ -22,13 +22,22 @@ The `plan` workflow must return its plan in the final response and must not writ
 
 ## Acceptance
 
-Write workflows use `acceptance.build`, `acceptance.test`, `acceptance.diffCheck`, and optional bounded `acceptance.artifactPaths`. `dev`, `execute-plan`, and `implement` cannot complete without acceptance. Legacy `verification[]` maps to the test stage only.
+Write workflows use `acceptance.build`, `acceptance.test`,
+`acceptance.diffCheck`, and optional bounded `acceptance.artifactPaths`.
+`dev`, `fix`, `fix-ci`, `execute-plan`, and `implement` cannot complete without
+acceptance. Legacy `verification[]` maps to the test stage only.
 
 ## Batch and Slice Chains
+
+Bridge slice chains apply to `implement` and Compose `dev`, `fix`, and
+`execute-plan`:
 
 - `auto`: default bounded planning.
 - `single`: one narrow deliverable; requires bounded `allowedPaths`.
 - `sliced`: requires at least two slices.
+
+Compose `fix-ci`, `parallel`, `worktree`, `merge`, and `new-skill` execute their
+own topology directly; any supplied `batchMode` is stripped.
 
 The bridge persists `.codex-mimo/reports/<rootJobId>.slices.json` and `.codex-mimo/jobs/<chainId>.chain.json`, then runs one slice at a time. Slice children omit notification targets; only the root job notifies and summarizes.
 

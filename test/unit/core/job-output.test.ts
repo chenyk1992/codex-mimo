@@ -89,6 +89,21 @@ describe("job output helpers", () => {
     expect(summarizeJobOutput(output)).toBe("Use the compact delivery path.");
   });
 
+  it("skips Markdown separators and prefers an inline verdict", () => {
+    const output = [
+      "---",
+      "",
+      "## Review of diff against base HEAD",
+      "",
+      "**File changed:** `report.md`",
+      "",
+      "### Verdict: Clean, with two minor observations."
+    ].join("\n");
+
+    expect(summarizeJobOutput(output))
+      .toBe("Verdict: Clean, with two minor observations.");
+  });
+
   it("redacts credentials before returning a semantic summary", () => {
     expect(summarizeJobOutput("# Plan\n\nUse token=private for the request."))
       .toBe("Use token=[REDACTED] for the request.");

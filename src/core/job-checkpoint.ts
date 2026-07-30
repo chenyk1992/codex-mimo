@@ -8,6 +8,7 @@ import {
   type GitHeadSnapshot,
   type GitStatusSnapshot
 } from "../git/diff.js";
+import type { WorkspaceManifest } from "./changed-files.js";
 import { renameWithWindowsRetry } from "./atomic-file.js";
 import { updateJobAuthoritative } from "./job-store.js";
 import type {
@@ -34,6 +35,7 @@ export interface JobCheckpoint {
   completedChecklist: string[];
   remainingChecklist: string[];
   acceptance: AcceptanceSnapshot;
+  workspaceManifestBefore?: WorkspaceManifest;
   lastProgressAt?: string;
   lastProgressKind?: string;
   lastCommand?: string;
@@ -49,6 +51,7 @@ export interface WriteJobCheckpointInput {
   existingReportPaths?: JobReportPaths;
   reportDir?: string;
   acceptance?: AcceptanceSnapshot;
+  workspaceManifestBefore?: WorkspaceManifest;
   captureHead?: typeof captureGitHead;
   captureStatus?: typeof captureGitStatus;
 }
@@ -113,6 +116,9 @@ export async function writeJobCheckpoint(
   );
   const workflow = readWorkflow(input.job.request);
   const checkpointPath = path.join(reportDir, `${input.job.id}.checkpoint.json`);
+  const existingCheckpoint = readJobCheckpoint(checkpointPath);
+  const workspaceManifestBefore =
+    input.workspaceManifestBefore ?? existingCheckpoint?.workspaceManifestBefore;
   const existingPaths = normalizeCheckpointReportPaths(input.existingReportPaths ?? input.job.reportPaths);
   const artifactPaths: JobReportPaths = {
     ...existingPaths,
@@ -133,6 +139,7 @@ export async function writeJobCheckpoint(
     completedChecklist: [],
     remainingChecklist: [...REMAINING_CHECKLIST_FALLBACK],
     acceptance: input.acceptance ?? input.job.acceptance ?? { stages: [] },
+    ...(workspaceManifestBefore ? { workspaceManifestBefore } : {}),
     ...(input.job.lastProgressAt ? { lastProgressAt: input.job.lastProgressAt } : {}),
     ...(input.job.lastProgressKind ? { lastProgressKind: input.job.lastProgressKind } : {}),
     ...(input.job.lastCommand ? { lastCommand: input.job.lastCommand } : {}),
@@ -225,6 +232,9 @@ export async function persistJobCheckpoint(
     objective?: string;
     contextFiles?: string[];
     changedFiles?: string[];
+    workspaceManifestBefore?: WorkspaceManifest;
+    captureHead?: typeof captureGitHead;
+    captureStatus?: typeof captureGitStatus;
   } = {}
 ): Promise<JobReportPaths> {
   const reportPaths = await writeJobCheckpoint({
@@ -232,6 +242,11 @@ export async function persistJobCheckpoint(
     objective: options.objective ?? job.task,
     ...(options.contextFiles ? { contextFiles: options.contextFiles } : {}),
     ...(options.changedFiles ? { changedFiles: options.changedFiles } : {}),
+    ...(options.workspaceManifestBefore
+      ? { workspaceManifestBefore: options.workspaceManifestBefore }
+      : {}),
+    ...(options.captureHead ? { captureHead: options.captureHead } : {}),
+    ...(options.captureStatus ? { captureStatus: options.captureStatus } : {}),
     existingReportPaths: job.reportPaths
   });
   await updateJobAuthoritative(cwd, job.id, {

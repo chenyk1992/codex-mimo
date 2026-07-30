@@ -216,6 +216,26 @@ describe("job definition registry", () => {
     expect(args).toEqual(expect.arrayContaining(["--agent", "codex-mimo-readonly"]));
   });
 
+  it("includes untracked production files in native review input", async () => {
+    const cwd = initGitRepo();
+    fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+    fs.writeFileSync(
+      path.join(cwd, "src", "untracked.ts"),
+      "export const untracked = true;\n",
+      "utf8"
+    );
+
+    const prompt = await getJobDefinition("review").buildPrompt(
+      { cwd, base: "HEAD" },
+      ACTIVE_SIGNAL
+    );
+    const diffFile = prompt.files.find((file) => path.extname(file) === ".diff")!;
+    const diff = fs.readFileSync(diffFile, "utf8");
+
+    expect(diff).toContain("diff --git a/src/untracked.ts b/src/untracked.ts");
+    expect(diff).toContain("+export const untracked = true;");
+  });
+
   it("freezes a large non-ASCII review diff as the exact prompt attachment", async () => {
     const cwd = initGitRepo();
     fs.writeFileSync(path.join(cwd, "app.ts"), `// 中文差异\n${"变更内容".repeat(3_000)}\n`, "utf-8");
@@ -1567,7 +1587,7 @@ describe("write chain bootstrap (Task 5)", () => {
     expect(persistedChild?.sliceId).toBe("slice-1");
   });
 
-  it("bootstraps non-acceptance Compose writes without build or test commands", async () => {
+  it("requires host acceptance before bootstrapping a Compose fix", async () => {
     const cwd = tempDir();
     const root = createJobStore(cwd).create({
       kind: "compose",
@@ -1586,12 +1606,9 @@ describe("write chain bootstrap (Task 5)", () => {
       captureRepositoryFingerprint: async () => "fp-test"
     });
 
-    expect(result.status).toBe("bootstrapped");
-    if (result.status !== "bootstrapped") return;
-    expect(result.child.request).toMatchObject({
-      workflow: "fix",
-      acceptance: {},
-      allowedPaths: ["src/app.ts"]
+    expect(result).toMatchObject({
+      status: "needs_input",
+      errorCode: "acceptance_config_missing"
     });
   });
 

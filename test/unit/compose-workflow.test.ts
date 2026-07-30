@@ -3,7 +3,8 @@ import {
   buildComposePrompt,
   getComposeWorkflow,
   listComposeWorkflows,
-  workflowRequiresDevelopmentAcceptance
+  workflowRequiresDevelopmentAcceptance,
+  workflowSupportsBridgeSlicing
 } from "../../src/compose/workflow.js";
 
 describe("compose workflows", () => {
@@ -11,7 +12,8 @@ describe("compose workflows", () => {
     ["dev", true],
     ["execute-plan", true],
     ["plan", false],
-    ["fix", false],
+    ["fix", true],
+    ["fix-ci", true],
     ["review", false]
   ] as const)("workflowRequiresDevelopmentAcceptance(%s) is %s", (workflow, expected) => {
     expect(workflowRequiresDevelopmentAcceptance(workflow)).toBe(expected);
@@ -129,6 +131,19 @@ describe("compose prompt semantics", () => {
     expect(prompt).toContain("Assumptions and Unknowns");
     expect(prompt).toContain("Options and Tradeoffs");
     expect(prompt).toMatch(/idempotent.*repository evidence/i);
+  });
+
+  it.each([
+    ["dev", true],
+    ["fix", true],
+    ["execute-plan", true],
+    ["fix-ci", false],
+    ["parallel", false],
+    ["worktree", false],
+    ["merge", false],
+    ["new-skill", false]
+  ] as const)("workflowSupportsBridgeSlicing(%s) is %s", (workflow, expected) => {
+    expect(workflowSupportsBridgeSlicing(workflow)).toBe(expected);
   });
 
   it("includes read-only constraint when writes are not allowed", () => {

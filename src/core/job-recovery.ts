@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { listJobs, readJob } from "./job-store.js";
 import {
   transitionJob,
@@ -22,6 +23,13 @@ import {
 import type { JobRecord, JobStatus } from "./jobs.js";
 import { isProcessLockHeld } from "./process-lock.js";
 import { resolveJobWorkerOwnershipKey } from "./worker-ownership.js";
+import {
+  captureScopedWorkspaceManifest,
+  detectChangedFiles
+} from "./changed-files.js";
+import { extractToolUseWritePaths, parseMimoJsonLines } from "../compose/events.js";
+import { readJobCheckpoint, writeJobCheckpoint } from "./job-checkpoint.js";
+import { mergeAllowedPathScopes } from "./path-scope.js";
 
 const DEFAULT_STALE_THRESHOLD_MS = 300_000;
 
@@ -166,13 +174,19 @@ export async function recoverUnfinishedJobChains(
 
       const summary =
         "Slice worker process is gone after a crash; no live MiMoCode process remains.";
+      const reconciled = await reconcileWorkerLostChild(cwd, child);
       let terminalChild: JobRecord;
       try {
         const result = await transition(cwd, child.id, {
           status: "stalled",
           summary,
           error: summary,
-          errorCode: "worker_lost"
+          errorCode: "worker_lost",
+          changedFiles: reconciled.changedFiles,
+          ...(reconciled.reconciliation
+            ? { reconciliation: reconciled.reconciliation }
+            : {}),
+          ...(reconciled.reportPaths ? { reportPaths: reconciled.reportPaths } : {})
         });
         terminalChild = result.job;
         if (result.deliveryCreated) {
@@ -227,6 +241,85 @@ export async function recoverUnfinishedJobChains(
   }
 
   return { recoveredChildIds };
+}
+
+async function reconcileWorkerLostChild(
+  cwd: string,
+  child: JobRecord
+): Promise<JobRecord> {
+  try {
+    const checkpointPath = child.reportPaths?.checkpoint;
+    const checkpoint = checkpointPath ? readJobCheckpoint(checkpointPath) : null;
+    const manifestBefore = checkpoint?.workspaceManifestBefore;
+    const monitoredPaths = readMonitoredPaths(child.request);
+    const manifestAfter = captureScopedWorkspaceManifest(cwd, monitoredPaths);
+    const toolUsePaths = fs.existsSync(child.eventsFile)
+      ? extractToolUseWritePaths(
+          parseMimoJsonLines(fs.readFileSync(child.eventsFile, "utf8"))
+        )
+      : [];
+    const changeDetection = detectChangedFiles({
+      cwd,
+      manifestBefore,
+      manifestAfter,
+      toolUsePaths
+    });
+    const changedFiles = [...new Set([
+      ...child.changedFiles,
+      ...changeDetection.files
+    ])].sort();
+    let reportPaths = child.reportPaths;
+    if (checkpointPath) {
+      reportPaths = {
+        ...reportPaths,
+        ...await writeJobCheckpoint({
+          job: { ...child, changedFiles },
+          objective: child.task,
+          changedFiles,
+          existingReportPaths: child.reportPaths
+        })
+      };
+    }
+    return {
+      ...child,
+      changedFiles,
+      ...(reportPaths ? { reportPaths } : {}),
+      reconciliation: {
+        status: changeDetection.status === "complete" ? "complete" : "degraded",
+        changeDetection: {
+          status: changeDetection.status,
+          sources: [...changeDetection.sources],
+          candidates: [...changeDetection.candidates],
+          ...(changeDetection.reason ? { reason: changeDetection.reason } : {})
+        }
+      }
+    };
+  } catch {
+    return child;
+  }
+}
+
+function readMonitoredPaths(request: unknown): string[] | undefined {
+  if (typeof request !== "object" || request === null || Array.isArray(request)) {
+    return undefined;
+  }
+  const record = request as Record<string, unknown>;
+  const allowedPaths = stringArray(record.allowedPaths);
+  const acceptance = typeof record.acceptance === "object" &&
+      record.acceptance !== null &&
+      !Array.isArray(record.acceptance)
+    ? record.acceptance as Record<string, unknown>
+    : undefined;
+  return mergeAllowedPathScopes(
+    allowedPaths,
+    stringArray(acceptance?.artifactPaths)
+  );
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string")
+    ? value
+    : undefined;
 }
 
 function runningSliceIds(chain: JobChainRecord): string[] {
