@@ -6,6 +6,7 @@ import {
 import type {
   CompactJobResult,
   CompactJobStatus,
+  ContextOverheadMetrics,
   FullJobResult,
   JobNotificationStatus,
   JobRecord,
@@ -29,7 +30,13 @@ const MAX_COMPACT_TESTS = 12;
 function elapsedMs(job: JobRecord, nowMs = Date.now()): number | null {
   const start = Date.parse(job.startedAt ?? job.createdAt);
   if (!Number.isFinite(start)) return null;
-  return Math.max(0, nowMs - start);
+  const completed = job.status !== "queued" &&
+      job.status !== "running" &&
+      job.completedAt
+    ? Date.parse(job.completedAt)
+    : Number.NaN;
+  const end = Number.isFinite(completed) ? completed : nowMs;
+  return Math.max(0, end - start);
 }
 
 function idleMsFor(job: JobRecord, nowMs: number): number | null {
@@ -92,12 +99,15 @@ export function renderCompactJobStatus(job: JobRecord): CompactJobStatus {
   const resultAvailable = job.status !== "queued" && job.status !== "running";
   return {
     status: job.status,
-    ...(resultAvailable ? { resultAvailable: true as const } : {})
+    ...(resultAvailable ? { resultAvailable: true as const } : {}),
+    ...(job.assessment !== undefined ? { assessment: job.assessment } : {})
   };
 }
 
 export interface RenderCompactJobResultOptions {
   output?: string;
+  contextOverhead?: ContextOverheadMetrics;
+  measureCompactBytes?: boolean;
 }
 
 export function renderCompactJobResult(
@@ -135,9 +145,22 @@ export function renderCompactJobResult(
     ...(attention ? { attention } : {}),
     ...(job.reconciliation
       ? { reconciliation: publicReconciliation(job.reconciliation) }
+      : {}),
+    ...(job.assessment !== undefined ? { assessment: job.assessment } : {}),
+    ...(options.contextOverhead
+      ? {
+          contextOverhead: {
+            ...options.contextOverhead,
+            ...(options.measureCompactBytes ? { compactResultBytes: 999_999 } : {})
+          }
+        }
       : {})
   };
-  return fitCompactResult(result);
+  const compact = fitCompactResult(result);
+  if (options.measureCompactBytes && compact.contextOverhead) {
+    settleCompactResultBytes(compact);
+  }
+  return compact;
 }
 
 function publicReconciliation(
@@ -174,6 +197,7 @@ export interface RenderJobResultOptions {
   notification?: JobNotificationStatus;
   output?: string;
   keyError?: string;
+  contextOverhead?: ContextOverheadMetrics;
 }
 
 export function renderJobResult(
@@ -185,7 +209,10 @@ export function renderJobResult(
     job.status === "stalled" ||
     job.status === "timeout" ||
     isResumableFailure(job);
-  const compact = renderCompactJobResult(job, { output: options.output });
+  const compact = renderCompactJobResult(job, {
+    output: options.output,
+    contextOverhead: options.contextOverhead
+  });
   const keyError = options.keyError ?? compact.failure?.failedCommand;
   const sliceCounts = renderSliceCounts(job);
   return {
@@ -342,6 +369,18 @@ function firstResultPerStage(
 
 function compactBytes(result: CompactJobResult): number {
   return Buffer.byteLength(JSON.stringify(result), "utf8");
+}
+
+function settleCompactResultBytes(result: CompactJobResult): void {
+  if (!result.contextOverhead) return;
+  let bytes = compactBytes(result);
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    result.contextOverhead.compactResultBytes = bytes;
+    const next = compactBytes(result);
+    if (next === bytes) return;
+    bytes = next;
+  }
+  result.contextOverhead.compactResultBytes = bytes;
 }
 
 function publicExecutionCallback(job: JobRecord): NonNullable<JobRecord["executionCallback"]> {

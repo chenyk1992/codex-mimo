@@ -122,11 +122,19 @@ const CANONICAL_WORK_TOOL_SCHEMAS = {
   ),
   mimo_review: canonicalWorkSchema({ base: { ...STRING_SCHEMA, default: "HEAD" } }, ["cwd"]),
   mimo_fix_ci: canonicalWorkSchema(
-    { file: STRING_SCHEMA, task: STRING_SCHEMA },
+    { file: STRING_SCHEMA, task: STRING_SCHEMA, acceptance: ACCEPTANCE_SCHEMA },
     ["cwd", "file"]
   ),
   mimo_resume: canonicalWorkSchema(
-    { jobId: STRING_SCHEMA, task: STRING_SCHEMA },
+    {
+      jobId: STRING_SCHEMA,
+      task: STRING_SCHEMA,
+      acceptance: ACCEPTANCE_SCHEMA,
+      allowedPaths: {
+        type: "array",
+        items: STRING_SCHEMA
+      }
+    },
     ["cwd", "jobId"]
   ),
   mimo_compose: canonicalWorkSchema({
@@ -417,14 +425,32 @@ function validateSkill(root, skillDir, errors) {
   if (!parsed.body) {
     errors.push(`${relativeSkillFile} must include skill instructions after frontmatter`);
   }
-  if (/\b(?:loop|poll|frequent(?:ly)?|repeat(?:ed|edly)?)\b[^\n.]{0,100}\bmimo_wait\b|\bmimo_wait\b[^\n.]{0,100}\b(?:loop|poll|frequent(?:ly)?|repeat(?:ed|edly)?)\b/i.test(parsed.body)) {
+
+  const referenceLinks = [...parsed.body.matchAll(/\]\((references\/[^)#]+\.md)(?:#[^)]+)?\)/g)]
+    .map((match) => match[1]);
+  const referenceBodies = [];
+  for (const relativeReference of referenceLinks) {
+    const referenceFile = path.resolve(skillDir, relativeReference);
+    const referencesRoot = path.resolve(skillDir, "references");
+    if (!referenceFile.startsWith(`${referencesRoot}${path.sep}`) || !existsSync(referenceFile) || !statSync(referenceFile).isFile()) {
+      errors.push(`${relativeSkillFile} references missing file ${relativeReference}`);
+      continue;
+    }
+    referenceBodies.push(readFileSync(referenceFile, "utf8"));
+  }
+  const contractBody = [parsed.body, ...referenceBodies].join("\n\n");
+
+  if (/\b(?:loop|poll|frequent(?:ly)?|repeat(?:ed|edly)?)\b[^\n.]{0,100}\bmimo_wait\b|\bmimo_wait\b[^\n.]{0,100}\b(?:loop|poll|frequent(?:ly)?|repeat(?:ed|edly)?)\b/i.test(contractBody)) {
     errors.push(`${relativeSkillFile} must not instruct Codex to poll or loop on mimo_wait`);
   }
   if (skillName === "mimocode") {
-    if (!/companion/i.test(parsed.body) || !/mimo_result/i.test(parsed.body)) {
+    if (Buffer.byteLength(content, "utf8") > 8_192) {
+      errors.push(`${relativeSkillFile} must stay within the 8192-byte entry-skill budget`);
+    }
+    if (!/companion/i.test(contractBody) || !/mimo_result/i.test(contractBody)) {
       errors.push(`${relativeSkillFile} must document companion wake path using mimo_result`);
     }
-    if (!/without companion|no companion|without the companion/i.test(parsed.body)) {
+    if (!/without companion|no companion|without the companion/i.test(contractBody)) {
       errors.push(`${relativeSkillFile} must document the no-companion demotion path`);
     }
     if (!/heartbeat|scheduled follow-up|in-chat scheduled/i.test(parsed.body)) {

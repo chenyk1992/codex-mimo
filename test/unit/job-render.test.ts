@@ -48,6 +48,16 @@ describe("compact job rendering", () => {
       status: "completed",
       phase: undefined
     }))).toEqual({ status: "completed", resultAvailable: true });
+    expect(renderCompactJobStatus(job({
+      kind: "compose",
+      status: "completed",
+      phase: undefined,
+      assessment: "needs_review"
+    }))).toEqual({
+      status: "completed",
+      resultAvailable: true,
+      assessment: "needs_review"
+    });
   });
 
   it("maps acceptance stages and failure details into compact results", () => {
@@ -79,6 +89,39 @@ describe("compact job rendering", () => {
       failedStage: "build",
       failedCommand: "npm run build",
       suggestion: "Fix the first TypeScript error at src/a.ts:42, then rerun npm run build."
+    });
+  });
+
+  it("keeps slice_failed compatible while exposing the actionable leaf cause", () => {
+    const result = renderCompactJobResult(job({
+      status: "failed",
+      phase: undefined,
+      errorCode: "slice_failed",
+      acceptance: {
+        stages: [{ stage: "test", outcome: "failed", command: "npm test -- focused" }],
+        failedStage: "test",
+        failedCommand: "npm test -- focused",
+        failedTests: ["focused"],
+        suggestion: "Fix the failing focused test."
+      },
+      failureCauses: [{
+        code: "tests_failed",
+        stage: "test",
+        command: "npm test -- focused",
+        suggestion: "Fix the failing focused test."
+      }]
+    }));
+
+    expect(result.failure).toMatchObject({
+      code: "slice_failed",
+      failedStage: "test",
+      failedCommand: "npm test -- focused",
+      failedTests: ["focused"],
+      suggestion: "Fix the failing focused test.",
+      causes: [{
+        code: "tests_failed",
+        stage: "test"
+      }]
     });
   });
 
@@ -297,6 +340,21 @@ describe("compact job rendering", () => {
     expect(standard).not.toHaveProperty("output");
   });
 
+  it("freezes elapsed time at completedAt for terminal jobs", () => {
+    const terminal = job({
+      status: "failed",
+      phase: undefined,
+      completedAt: "2026-07-16T00:00:05.000Z"
+    });
+
+    expect(renderJobStatus(terminal, {
+      nowMs: Date.parse("2026-07-16T00:01:00.000Z")
+    }).elapsedMs).toBe(4_000);
+    expect(renderJobStatus(terminal, {
+      nowMs: Date.parse("2026-07-16T01:00:00.000Z")
+    }).elapsedMs).toBe(4_000);
+  });
+
   it("fills completedSlices and remainingSlices for chain orchestrator roots", () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-render-chain-"));
     try {
@@ -360,6 +418,48 @@ describe("compact job rendering", () => {
       path: "large.diff",
       bytes: 1_000_001
     }]);
+  });
+
+  it("omits assessment for non-compose jobs", () => {
+    const result = renderCompactJobResult(job({
+      status: "completed",
+      phase: undefined,
+      reportPaths: { markdown: "report.md" }
+    }));
+    expect(result).not.toHaveProperty("assessment");
+  });
+
+  it("renders assessment for compose jobs with passed assessment", () => {
+    const result = renderCompactJobResult(job({
+      status: "completed",
+      phase: undefined,
+      kind: "compose",
+      assessment: "passed",
+      reportPaths: { markdown: "report.md" }
+    }));
+    expect(result.assessment).toBe("passed");
+  });
+
+  it("renders assessment for compose jobs with needs_review assessment", () => {
+    const result = renderCompactJobResult(job({
+      status: "completed",
+      phase: undefined,
+      kind: "compose",
+      assessment: "needs_review",
+      reportPaths: { markdown: "report.md" }
+    }));
+    expect(result.assessment).toBe("needs_review");
+  });
+
+  it("renders assessment for compose jobs with failed assessment", () => {
+    const result = renderCompactJobResult(job({
+      status: "completed",
+      phase: undefined,
+      kind: "compose",
+      assessment: "failed",
+      reportPaths: { markdown: "report.md" }
+    }));
+    expect(result.assessment).toBe("failed");
   });
 });
 

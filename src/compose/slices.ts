@@ -208,11 +208,17 @@ function validateSliceAcceptance(
 
 export function validateSliceManifest(
   input: unknown,
-  options?: { minSlices?: number; maxSlices?: number; cwd?: string }
+  options?: {
+    minSlices?: number;
+    maxSlices?: number;
+    cwd?: string;
+    requireAcceptance?: boolean;
+  }
 ): SliceManifestValidation {
   const minSlices = options?.minSlices ?? 1;
   const maxSlices = options?.maxSlices ?? 8;
   const cwd = options?.cwd ?? process.cwd();
+  const requireAcceptance = options?.requireAcceptance ?? true;
 
   if (!isRecord(input)) {
     return invalid("Slice manifest must be a JSON object.");
@@ -297,9 +303,11 @@ export function validateSliceManifest(
       }
     }
 
-    const acceptanceError = validateSliceAcceptance(slice, cwd);
-    if (acceptanceError) {
-      return invalid(acceptanceError);
+    if (requireAcceptance) {
+      const acceptanceError = validateSliceAcceptance(slice, cwd);
+      if (acceptanceError) {
+        return invalid(acceptanceError);
+      }
     }
   }
 
@@ -356,12 +364,17 @@ function resolveSingleSliceAcceptance(input: {
   cwd: string;
   acceptance?: DevelopmentAcceptanceInput;
   legacyVerification?: string[];
+  requireAcceptance?: boolean;
 }): DevelopmentAcceptanceInput | { ok: false; reason: string } {
+  const requireAcceptance = input.requireAcceptance ?? true;
+  if (!requireAcceptance && input.acceptance === undefined) {
+    return {};
+  }
   const plan = normalizeDevelopmentAcceptancePlan({
     cwd: input.cwd,
     acceptance: input.acceptance,
     legacyVerification: input.legacyVerification,
-    requireAcceptance: true
+    requireAcceptance
   });
   if ("missing" in plan) {
     return { ok: false, reason: plan.reason };
@@ -394,6 +407,7 @@ export async function planSliceManifest(input: {
   legacyVerification?: string[];
   repositoryFingerprint: string;
   allowedPaths?: string[];
+  requireAcceptance?: boolean;
   signal?: AbortSignal;
   runMimo?: typeof runMimoCliStreaming;
 }): Promise<SliceManifestValidation> {
@@ -410,7 +424,8 @@ export async function planSliceManifest(input: {
         repositoryFingerprint: input.repositoryFingerprint,
         acceptance,
         allowedPaths: input.allowedPaths,
-        cwd: input.cwd
+        cwd: input.cwd,
+        requireAcceptance: input.requireAcceptance
       });
       return { ok: true, manifest };
     } catch (error) {
@@ -460,7 +475,11 @@ export async function planSliceManifest(input: {
       repositoryFingerprint: input.repositoryFingerprint,
       acceptance
     }),
-    { cwd: input.cwd, minSlices }
+    {
+      cwd: input.cwd,
+      minSlices,
+      requireAcceptance: input.requireAcceptance
+    }
   );
 }
 
@@ -500,6 +519,7 @@ export function materializeSingleSliceManifest(input: {
   allowedPaths?: string[];
   contextFiles?: string[];
   cwd?: string;
+  requireAcceptance?: boolean;
 }): SliceManifest {
   if (!input.allowedPaths || input.allowedPaths.length === 0) {
     throw new Error(SINGLE_MODE_ALLOWED_PATHS_REQUIRED_MESSAGE);
@@ -523,7 +543,10 @@ export function materializeSingleSliceManifest(input: {
     ]
   };
 
-  const validation = validateSliceManifest(manifest, { cwd: input.cwd ?? process.cwd() });
+  const validation = validateSliceManifest(manifest, {
+    cwd: input.cwd ?? process.cwd(),
+    requireAcceptance: input.requireAcceptance
+  });
   if (!validation.ok) {
     throw new Error(validation.reason);
   }

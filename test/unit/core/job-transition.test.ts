@@ -119,6 +119,20 @@ describe("job transitions", () => {
     })).rejects.toThrow(/Illegal job transition/);
   });
 
+  it("persists a Compose deliverable assessment independently from execution status", async () => {
+    const { cwd, job } = await seedRunningJob();
+    await transitionJob(cwd, job.id, {
+      status: "completed",
+      summary: "Execution completed; review is still required.",
+      assessment: "needs_review"
+    });
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "completed",
+      assessment: "needs_review"
+    });
+  });
+
   it("rejects terminal to running", async () => {
     const { cwd, jobId } = seedJob("completed");
 

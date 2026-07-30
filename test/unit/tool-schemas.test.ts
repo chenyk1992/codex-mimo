@@ -14,6 +14,8 @@ import {
   NotifySchema,
   PlanInput,
   parseComposeInput,
+  parseFixCiInput,
+  parseResumeInput,
   ResumeInput,
   JobWaitInput,
   ReviewInput
@@ -87,8 +89,8 @@ describe("work tool schemas", () => {
     expect(Object.keys(PlanInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
     expect(Object.keys(ImplementInputBase.shape).sort()).toEqual(["acceptance", "allowWrite", "allowedPaths", "batchMode", "cwd", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
     expect(Object.keys(ReviewInput.shape).sort()).toEqual(["base", "cwd", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "timeoutMs"]);
-    expect(Object.keys(FixCiInput.shape).sort()).toEqual(["cwd", "file", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
-    expect(Object.keys(ResumeInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "jobId", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
+    expect(Object.keys(FixCiInput.shape).sort()).toEqual(["acceptance", "cwd", "file", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
+    expect(Object.keys(ResumeInput.shape).sort()).toEqual(["acceptance", "allowedPaths", "cwd", "idleTimeoutMs", "jobId", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
     expect(Object.keys(ComposeInputShape).sort()).toEqual([
       "acceptance", "allowedPaths", "batchMode", "cwd", "file", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "reportDir", "since", "task", "timeoutMs", "verification", "workflow"
     ]);
@@ -154,6 +156,34 @@ describe("work tool schemas", () => {
     });
 
     expect(parsed.acceptance?.artifactPaths).toEqual(["out/**"]);
+    const compose = parseComposeInput({
+      cwd: "E:/project",
+      workflow: "fix",
+      task: "Fix",
+      batchMode: "single",
+      allowedPaths: ["src/app.ts"],
+      acceptance: {
+        build: ["npm run build"],
+        test: ["npm test"],
+        artifactPaths: ["out/**"]
+      }
+    });
+    expect(compose.acceptance?.artifactPaths).toEqual(["out/**"]);
+    expect(parseFixCiInput({
+      cwd: "E:/project",
+      file: "ci.log",
+      acceptance: {
+        build: ["npm run build"],
+        test: ["npm test"],
+        artifactPaths: ["out/**"]
+      }
+    }).acceptance?.artifactPaths).toEqual(["out/**"]);
+    expect(parseResumeInput({
+      cwd: "E:/project",
+      jobId: "parent-1",
+      allowedPaths: ["src/app.ts"],
+      acceptance: { artifactPaths: ["out/**"] }
+    }).allowedPaths).toEqual(["src/app.ts"]);
   });
 
   it("rejects invalid or source-overlapping artifact paths", () => {
@@ -179,6 +209,17 @@ describe("work tool schemas", () => {
       task: "Plan",
       acceptance: { artifactPaths: ["out/**"] }
     })).toThrow(/does not use acceptance\.artifactPaths/);
+    expect(() => parseFixCiInput({
+      cwd: "E:/project",
+      file: "ci.log",
+      acceptance: { artifactPaths: ["**"] }
+    })).toThrow(/artifactPaths/);
+    expect(() => parseResumeInput({
+      cwd: "E:/project",
+      jobId: "parent-1",
+      allowedPaths: ["src/**"],
+      acceptance: { artifactPaths: ["src/generated/**"] }
+    })).toThrow(/must not overlap/);
   });
 
   it("still accepts legacy verification[] for migration", () => {

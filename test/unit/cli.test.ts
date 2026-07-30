@@ -111,6 +111,58 @@ describe("unified CLI work commands", () => {
     });
   });
 
+  it("passes structured acceptance to fix-ci and resume", async () => {
+    const fixCi = await invoke([
+      "fix-ci",
+      "--file", "ci.log",
+      "--build", "npm run build",
+      "--test", "npm test -- ci.test.ts",
+      "--diff-check",
+      "--artifact-path", "coverage/**",
+      "Fix CI"
+    ]);
+    expect(fixCi.deps.mimoFixCi).toHaveBeenCalledWith({
+      cwd,
+      file: "ci.log",
+      task: "Fix CI",
+      acceptance: {
+        build: ["npm run build"],
+        test: ["npm test -- ci.test.ts"],
+        diffCheck: true,
+        artifactPaths: ["coverage/**"]
+      }
+    });
+
+    const resume = await invoke([
+      "resume",
+      "--job-id", "parent-1",
+      "--test", "npm test -- focused",
+      "--no-diff-check",
+      "--allowed-path", "src/**"
+    ]);
+    expect(resume.deps.mimoResume).toHaveBeenCalledWith({
+      cwd,
+      jobId: "parent-1",
+      acceptance: {
+        test: ["npm test -- focused"],
+        diffCheck: false
+      },
+      allowedPaths: ["src/**"]
+    });
+  });
+
+  it("rejects conflicting diff-check flags", async () => {
+    const result = await invoke([
+      "fix-ci",
+      "--file", "ci.log",
+      "--diff-check",
+      "--no-diff-check"
+    ]);
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toMatch(/mutually exclusive/i);
+  });
+
   it("rejects Codex notification without --thread-id", async () => {
     const result = await invoke(["plan", "Task", "--notify", "codex"]);
     expect(result.exitCode).toBe(2);

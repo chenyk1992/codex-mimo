@@ -8,6 +8,7 @@ import {
 } from "../compose/report.js";
 import {
   buildReadOnlyReportDiff,
+  detectReadOnlyViolationFiles,
   gitHeadChanged,
   mergeChangedFiles,
   readOnlyViolationError
@@ -174,7 +175,10 @@ const ReviewRequestSchema = CommonRequestSchema.extend({
 
 const FixCiRequestSchema = CommonRequestSchema.extend({
   file: z.string().min(1),
-  task: z.string().min(1).optional()
+  task: z.string().min(1).optional(),
+  acceptance: DevelopmentAcceptanceRequestSchema.optional()
+}).superRefine((request, context) => {
+  addArtifactScopeIssues(undefined, request.acceptance?.artifactPaths, context);
 });
 
 const JobExecutionPolicySchema = z.object({
@@ -213,7 +217,12 @@ const ResumeRequestSchema = CommonRequestSchema.extend({
   task: z.string().min(1).optional(),
   sessionId: z.string().min(1).optional(),
   executionPolicy: JobExecutionPolicySchema,
-  checkpoint: JobCheckpointSchema.optional()
+  checkpoint: JobCheckpointSchema.optional(),
+  requireAcceptance: z.boolean().default(false),
+  acceptance: DevelopmentAcceptanceRequestSchema.optional(),
+  allowedPaths: z.array(z.string().min(1)).optional()
+}).superRefine((request, context) => {
+  addArtifactScopeIssues(request.allowedPaths, request.acceptance?.artifactPaths, context);
 });
 
 const ComposeRequestSchema = CommonRequestSchema.extend({
@@ -232,7 +241,7 @@ const ComposeRequestSchema = CommonRequestSchema.extend({
   }
   const workflow = getComposeWorkflow(request.workflow);
   if (
-    !workflowRequiresDevelopmentAcceptance(request.workflow) &&
+    !workflow.writesAllowed &&
     request.acceptance?.artifactPaths !== undefined
   ) {
     context.addIssue({
@@ -417,6 +426,7 @@ const fixCiDefinition: JobDefinition<"fix-ci", FixCiJobRequest> = directDefiniti
   kind: "fix-ci",
   agent: "build",
   writesAllowed: true,
+  requireAcceptance: true,
   prompt: (request) => implementPrompt(request.task ?? "Fix the CI failures shown in the attached log."),
   files: (request) => [request.file],
   title: "codex-mimo fix-ci"
@@ -451,7 +461,12 @@ const resumeDefinition: JobDefinition<"resume", ResumeJobRequest> = {
     });
   },
   async finalize(context) {
-    return finalizeDirect(context, context.request.executionPolicy.writesAllowed);
+    return finalizeDirect(
+      context,
+      context.request.executionPolicy.writesAllowed,
+      false,
+      context.request.requireAcceptance
+    );
   }
 };
 
@@ -544,6 +559,7 @@ interface DirectDefinitionInput<
   agent: typeof CODEX_MIMO_READONLY_AGENT | "build";
   writesAllowed: boolean;
   requireFinalText?: boolean;
+  requireAcceptance?: boolean;
   prompt: (request: Request) => string;
   files?: (request: Request) => string[];
   title: string;
@@ -571,7 +587,12 @@ function directDefinition<
       });
     },
     async finalize(context) {
-      return finalizeDirect(context, input.writesAllowed, input.requireFinalText === true);
+      return finalizeDirect(
+        context,
+        input.writesAllowed,
+        input.requireFinalText === true,
+        input.requireAcceptance
+      );
     }
   };
 }
@@ -579,15 +600,15 @@ function directDefinition<
 async function finalizeDirect<Request extends { cwd: string; acceptance?: DevelopmentAcceptanceInput }>(
   context: JobFinalizeContext<Request>,
   writesAllowed: boolean,
-  requireFinalText = false
+  requireFinalText = false,
+  requireAcceptance = context.job.kind === "implement"
 ): Promise<JobOutcome> {
-  const requiresAcceptance = context.job.kind === "implement";
   const changedFiles = collectChangedFiles(context);
   const initialOutcome = classifyRunOutcome(runEvidenceFromContext(context, {
     verification: [],
     ...(requireFinalText ? { requireFinalText: true } : {})
   }));
-  const acceptanceRun = requiresAcceptance && shouldRunAcceptance(initialOutcome)
+  const acceptanceRun = requireAcceptance && shouldRunAcceptance(initialOutcome)
     ? await runAcceptanceForFinalize(context, {
         writesAllowed,
         acceptance: context.request.acceptance,
@@ -630,10 +651,16 @@ async function finalizeDirect<Request extends { cwd: string; acceptance?: Develo
   }));
   outcome = applyAcceptanceFailure(outcome, acceptanceRun?.result, compact, acceptanceSummary);
 
-  if (!writesAllowed && hasReadOnlyViolation(context, changedFiles)) {
+  const readOnlyViolationFiles = detectReadOnlyViolationFiles(
+    writesAllowed,
+    changedFiles,
+    context.gitStatusBefore,
+    context.gitStatusAfter
+  );
+  if (!writesAllowed && hasReadOnlyViolation(context, readOnlyViolationFiles)) {
     const error = readOnlyViolationError(
       context.job.kind,
-      changedFiles,
+      readOnlyViolationFiles,
       context.gitHeadBefore,
       context.gitHeadAfter
     );
@@ -642,7 +669,7 @@ async function finalizeDirect<Request extends { cwd: string; acceptance?: Develo
         ...outcome,
         status: "failed",
         summary: error,
-        changedFiles,
+        changedFiles: readOnlyViolationFiles,
         error,
         errorCode: "read_only_violation"
       };
@@ -651,7 +678,7 @@ async function finalizeDirect<Request extends { cwd: string; acceptance?: Develo
 
   return finalizeWithArtifacts(context, {
     ...outcome,
-    changedFiles,
+    changedFiles: writesAllowed ? changedFiles : readOnlyViolationFiles,
     verification: compact,
     ...(acceptanceSummary ? { acceptance: acceptanceSummary } : {})
   }, verificationDetails, writesAllowed);
@@ -660,8 +687,19 @@ async function finalizeDirect<Request extends { cwd: string; acceptance?: Develo
 async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): Promise<JobOutcome> {
   const workflow = getComposeWorkflow(context.request.workflow);
   const requiresAcceptance = workflowRequiresDevelopmentAcceptance(workflow.name);
+  const usesAcceptance = requiresAcceptance ||
+    hasConfiguredDevelopmentAcceptance(context.request.acceptance);
   const changeDetection = collectChangeDetection(context);
-  const changedFiles = changeDetection.files;
+  const detectedChangedFiles = changeDetection.files;
+  const readOnlyViolationFiles = detectReadOnlyViolationFiles(
+    workflow.writesAllowed,
+    detectedChangedFiles,
+    context.gitStatusBefore,
+    context.gitStatusAfter
+  );
+  const changedFiles = workflow.writesAllowed
+    ? detectedChangedFiles
+    : readOnlyViolationFiles;
   let reportDiff = context.diff ?? emptyDiff();
   if (!workflow.writesAllowed) {
     reportDiff = buildReadOnlyReportDiff(reportDiff, changedFiles);
@@ -678,7 +716,7 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     ...(workflow.name === "plan" ? { requireFinalText: true } : {})
   }));
 
-  if (requiresAcceptance) {
+  if (usesAcceptance) {
     if (shouldRunAcceptance(initialOutcome)) {
       const acceptanceRun = await runAcceptanceForFinalize(context, {
         writesAllowed: workflow.writesAllowed,
@@ -726,10 +764,11 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
       }));
   outcome = applyAcceptanceFailure(outcome, acceptanceResult, compact, acceptanceSummary);
 
-  const readOnlyError = !workflow.writesAllowed && hasReadOnlyViolation(context, changedFiles)
+  const readOnlyError = !workflow.writesAllowed &&
+      hasReadOnlyViolation(context, readOnlyViolationFiles)
     ? readOnlyViolationError(
       workflow.name,
-      changedFiles,
+      readOnlyViolationFiles,
       context.gitHeadBefore,
       context.gitHeadAfter
     )
@@ -747,13 +786,21 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     };
   }
 
+  const composeStatus = composeReportStatus(
+    outcome,
+    toVerificationResults(verificationDetails),
+    changedFiles,
+    usesAcceptance
+  );
+  const assessment = composeStatus === "timeout" ? "failed" : composeStatus;
+
   const report = createComposeReport({
     id: context.job.id,
     createdAt: context.job.createdAt,
     workflow: workflow.name,
     cwd: context.request.cwd,
     requestedSkills: workflow.skillChain,
-    status: composeReportStatus(outcome, toVerificationResults(verificationDetails), changedFiles, requiresAcceptance),
+    status: composeStatus,
     events: context.events,
     diff: reportDiff,
     terminationReason: context.run.terminationReason,
@@ -845,6 +892,7 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
       ? { acceptance: acceptanceSummary ?? outcome.acceptance }
       : {}),
     ...(outcome.causes && outcome.causes.length > 0 ? { failureCauses: outcome.causes } : {}),
+    assessment,
     reportPaths,
     reconciliation: reconciliationSummary(
       changeDetection,
@@ -960,15 +1008,23 @@ export async function preflightWriteJobAcceptance(input: {
   | { ok: true }
   | {
       ok: false;
+      code: "acceptance_config_missing" | "acceptance_command_unavailable";
       message: string;
       suggestion?: string;
-      stage: "build" | "test";
+      stage?: "build" | "test";
     }
 > {
   input.signal?.throwIfAborted();
   const acceptance = readAcceptanceFromRequest(input.request);
   const legacyVerification = readLegacyVerificationFromRequest(input.request);
   const requiresAcceptance = input.kind === "implement" ||
+    input.kind === "fix-ci" ||
+    (
+      input.kind === "resume" &&
+      typeof input.request === "object" &&
+      input.request !== null &&
+      (input.request as { requireAcceptance?: unknown }).requireAcceptance === true
+    ) ||
     (
       input.kind === "compose" &&
       typeof input.request === "object" &&
@@ -987,7 +1043,14 @@ export async function preflightWriteJobAcceptance(input: {
     requireAcceptance: true
   });
   if ("missing" in plan && plan.missing) {
-    return { ok: true };
+    if (input.kind !== "fix-ci" && input.kind !== "resume") {
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      code: plan.code,
+      message: plan.reason
+    };
   }
   const acceptancePlan = plan as DevelopmentAcceptancePlan;
 
@@ -1004,6 +1067,7 @@ export async function preflightWriteJobAcceptance(input: {
       if (!result.ok) {
         return {
           ok: false,
+          code: "acceptance_command_unavailable",
           message: result.message,
           ...(result.suggestion ? { suggestion: result.suggestion } : {}),
           stage: stage.stage
@@ -1023,6 +1087,17 @@ function readAcceptanceFromRequest(request: unknown): DevelopmentAcceptanceInput
   return value && typeof value === "object"
     ? value as DevelopmentAcceptanceInput
     : undefined;
+}
+
+function hasConfiguredDevelopmentAcceptance(
+  acceptance: DevelopmentAcceptanceInput | undefined
+): boolean {
+  return acceptance !== undefined && (
+    acceptance.build !== undefined ||
+    acceptance.test !== undefined ||
+    acceptance.diffCheck !== undefined ||
+    acceptance.artifactPaths !== undefined
+  );
 }
 
 function readLegacyVerificationFromRequest(request: unknown): string[] | undefined {
@@ -1592,6 +1667,7 @@ function readAllowedPathsFromRequest(request: unknown): string[] | undefined {
 export type WriteChainBootstrapResult =
   | { status: "skipped" }
   | { status: "failed"; errorCode: "slice_plan_invalid"; reason: string }
+  | { status: "needs_input"; errorCode: "acceptance_config_missing"; reason: string }
   | {
       status: "bootstrapped";
       chainId: string;
@@ -1654,6 +1730,27 @@ export async function bootstrapWriteJobChain(
   if (!plan) {
     return { status: "skipped" };
   }
+  const requireAcceptance = job.kind === "implement" ||
+    (
+      plan.workflow !== undefined &&
+      workflowRequiresDevelopmentAcceptance(plan.workflow)
+    ) ||
+    hasConfiguredDevelopmentAcceptance(plan.acceptance);
+  if (requireAcceptance) {
+    const acceptancePlan = normalizeDevelopmentAcceptancePlan({
+      cwd: job.cwd,
+      acceptance: plan.acceptance,
+      legacyVerification: plan.legacyVerification,
+      requireAcceptance: true
+    });
+    if ("missing" in acceptancePlan) {
+      return {
+        status: "needs_input",
+        errorCode: acceptancePlan.code,
+        reason: acceptancePlan.reason
+      };
+    }
+  }
 
   const chainId = `chain-${job.id}`;
   const captureFingerprint = deps.captureRepositoryFingerprint ?? captureRepositoryFingerprint;
@@ -1670,6 +1767,7 @@ export async function bootstrapWriteJobChain(
     legacyVerification: plan.legacyVerification,
     repositoryFingerprint,
     ...(plan.allowedPaths ? { allowedPaths: plan.allowedPaths } : {}),
+    requireAcceptance,
     signal
   });
   signal?.throwIfAborted();
@@ -2139,6 +2237,7 @@ function buildRootAttentionTransition(input: {
   };
 
   if (input.sliceState === "failed") {
+    const failureCauses = childFailureCauses(input.child);
     if (!isResumableSliceFailure(input.child)) {
       return {
         ...base,
@@ -2147,7 +2246,7 @@ function buildRootAttentionTransition(input: {
         error: input.child.error ?? input.child.summary ?? `Slice ${sliceLabel} failed.`,
         ...(input.child.errorCode ? { errorCode: input.child.errorCode } : {}),
         ...(input.child.sessionId !== undefined ? { sessionId: input.child.sessionId } : {}),
-        ...(input.child.failureCauses !== undefined ? { failureCauses: input.child.failureCauses } : {})
+        ...(failureCauses ? { failureCauses } : {})
       };
     }
     return {
@@ -2155,7 +2254,8 @@ function buildRootAttentionTransition(input: {
       status: "failed",
       summary: `Slice ${sliceLabel} failed.`,
       error: input.child.error ?? `Slice ${sliceLabel} failed.`,
-      errorCode: "slice_failed"
+      errorCode: "slice_failed",
+      ...(failureCauses ? { failureCauses } : {})
     };
   }
 
@@ -2205,6 +2305,51 @@ function buildRootAttentionTransition(input: {
     summary: input.child.summary ?? `Slice ${sliceLabel} was cancelled.`,
     ...(input.child.errorCode ? { errorCode: input.child.errorCode } : { errorCode: "cancelled" })
   };
+}
+
+function childFailureCauses(child: JobRecord): JobFailureCause[] | undefined {
+  const causes: JobFailureCause[] = [];
+  if (child.errorCode) {
+    const matchingCause = child.failureCauses?.find(
+      (cause) => cause.code === child.errorCode
+    );
+    causes.push({
+      code: child.errorCode,
+      stage: matchingCause?.stage ??
+        child.acceptance?.failedStage ??
+        childFailureStage(child.errorCode),
+      ...(child.acceptance?.failedCommand
+        ? { command: child.acceptance.failedCommand }
+        : {}),
+      ...(child.acceptance?.suggestion
+        ? { suggestion: child.acceptance.suggestion }
+        : {})
+    });
+  }
+  for (const cause of child.failureCauses ?? []) {
+    if (!causes.some((candidate) =>
+      candidate.code === cause.code &&
+      candidate.stage === cause.stage &&
+      candidate.command === cause.command
+    )) {
+      causes.push(cause);
+    }
+  }
+  return causes.length > 0 ? causes : undefined;
+}
+
+function childFailureStage(errorCode: string): JobFailureCause["stage"] {
+  if (errorCode === "build_failed" || errorCode === "acceptance_command_unavailable") {
+    return "build";
+  }
+  if (errorCode === "tests_failed") return "test";
+  if (errorCode === "write_scope_violation") return "scope_check";
+  if (errorCode === "diff_check_failed" || errorCode === "delivery_contract_missing") {
+    return "diff_check";
+  }
+  if (errorCode === "prompt_identity_mismatch") return "prompt";
+  if (errorCode.startsWith("callback_")) return "callback";
+  return "execution";
 }
 
 function isResumableSliceFailure(child: JobRecord): boolean {
@@ -2268,7 +2413,11 @@ function resolveChainRootPlanInputFallback(job: JobRecord): {
   batchMode: BatchMode;
   acceptance?: DevelopmentAcceptanceInput;
   legacyVerification?: string[];
+  allowedPaths?: string[];
   workflow?: ComposeWorkflowName;
+  file?: string;
+  since?: string;
+  reportDir?: string;
   timeoutMs?: number;
   idleTimeoutMs?: number;
   progressWarningMs?: number;
@@ -2290,6 +2439,17 @@ function resolveChainRootPlanInputFallback(job: JobRecord): {
     ...(typeof request.workflow === "string"
       ? { workflow: request.workflow as ComposeWorkflowName }
       : {}),
+    ...(typeof request.file === "string" ? { file: request.file } : {}),
+    ...(typeof request.since === "string" ? { since: request.since } : {}),
+    ...(typeof request.reportDir === "string" ? { reportDir: request.reportDir } : {}),
+    ...(Array.isArray(request.verification) &&
+        request.verification.every((entry) => typeof entry === "string")
+      ? { legacyVerification: request.verification as string[] }
+      : {}),
+    ...(Array.isArray(request.allowedPaths) &&
+        request.allowedPaths.every((entry) => typeof entry === "string")
+      ? { allowedPaths: request.allowedPaths as string[] }
+      : {}),
     ...(request.acceptance && typeof request.acceptance === "object"
       ? { acceptance: request.acceptance as DevelopmentAcceptanceInput }
       : {})
@@ -2303,6 +2463,9 @@ function resolveChainRootPlanInput(job: JobRecord): {
   legacyVerification?: string[];
   allowedPaths?: string[];
   workflow?: ComposeWorkflowName;
+  file?: string;
+  since?: string;
+  reportDir?: string;
   timeoutMs?: number;
   idleTimeoutMs?: number;
   progressWarningMs?: number;
@@ -2334,6 +2497,9 @@ function resolveChainRootPlanInput(job: JobRecord): {
       legacyVerification: parsed.data.verification,
       ...(parsed.data.allowedPaths ? { allowedPaths: parsed.data.allowedPaths } : {}),
       workflow: parsed.data.workflow,
+      ...(parsed.data.file ? { file: parsed.data.file } : {}),
+      ...(parsed.data.since ? { since: parsed.data.since } : {}),
+      ...(parsed.data.reportDir ? { reportDir: parsed.data.reportDir } : {}),
       timeoutMs: parsed.data.timeoutMs,
       idleTimeoutMs: parsed.data.idleTimeoutMs,
       progressWarningMs: parsed.data.progressWarningMs,
@@ -2356,6 +2522,10 @@ function buildSliceChildRequest(
     ...(plan.progressTimeoutMs !== undefined ? { progressTimeoutMs: plan.progressTimeoutMs } : {}),
     acceptance: slice.acceptance,
     allowedPaths: slice.allowedPaths,
+    ...(plan.legacyVerification ? { verification: plan.legacyVerification } : {}),
+    ...(plan.file ? { file: plan.file } : {}),
+    ...(plan.since ? { since: plan.since } : {}),
+    ...(plan.reportDir ? { reportDir: plan.reportDir } : {}),
     // Prevent nested chain bootstrap on children.
     batchMode: "single" as const
   };

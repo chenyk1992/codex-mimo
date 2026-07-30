@@ -126,6 +126,9 @@ describe("compose prompt semantics", () => {
     });
 
     expect(prompt).toContain("Use compose:brainstorm to clarify the Objective.");
+    expect(prompt).toContain("Assumptions and Unknowns");
+    expect(prompt).toContain("Options and Tradeoffs");
+    expect(prompt).toMatch(/idempotent.*repository evidence/i);
   });
 
   it("includes read-only constraint when writes are not allowed", () => {

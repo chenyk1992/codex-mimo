@@ -68,11 +68,36 @@ describe("MCP work schema registration", () => {
     const description = compose?.[1]?.description ?? "";
     expect(description.toLowerCase()).toMatch(/plan/);
     expect(description.toLowerCase()).toMatch(/read-only|read only/);
-    expect(description.toLowerCase()).toMatch(/summary/);
-    expect(description.toLowerCase()).toMatch(/saved plan path/);
     const result = mocks.registerTool.mock.calls.find((call) => call[0] === "mimo_result");
     const resultDescription = result?.[1]?.description ?? "";
     expect(resultDescription.toLowerCase()).toMatch(/compact/);
     expect(resultDescription.toLowerCase()).toMatch(/full/);
+  });
+
+  it("keeps all tool descriptions ≤120 characters and preserves key constraints", async () => {
+    const { createMcpServer } = await import("../../src/codex/mcp-server.js");
+    mocks.registerTool.mockClear();
+    createMcpServer();
+    interface ToolInfo { name: string; description: string }
+    const tools: ToolInfo[] = mocks.registerTool.mock.calls.map((call: unknown[]) => ({
+      name: call[0] as string,
+      description: ((call[1] as Record<string, unknown>)?.description ?? "") as string
+    }));
+
+    const violations: string[] = [];
+    for (const { name, description } of tools) {
+      if (description.length > 120) {
+        violations.push(`${name}: ${description.length} chars`);
+      }
+    }
+    expect(violations, `Descriptions exceeding 120 chars: ${violations.join("; ")}`).toEqual([]);
+
+    const desc = (n: string) => tools.find((t) => t.name === n)?.description ?? "";
+    expect(desc("mimo_cancel").toLowerCase()).toMatch(/cancel/);
+    expect(desc("mimo_status").toLowerCase()).toMatch(/compact/);
+    expect(desc("mimo_status").toLowerCase()).toMatch(/default/);
+    expect(desc("mimo_result").toLowerCase()).toMatch(/compact/);
+    expect(desc("mimo_result").toLowerCase()).toMatch(/default/);
+    expect(desc("mimo_jobs").toLowerCase()).toMatch(/compact/);
   });
 });

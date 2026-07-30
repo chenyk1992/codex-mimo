@@ -80,7 +80,13 @@ function seedJob(cwd: string, kind: JobKind, notify = false): JobRecord {
   return createJobStore(cwd).create({
     kind,
     task: `Run ${kind}`,
-    request: { cwd },
+    request: kind === "fix-ci"
+      ? {
+          cwd,
+          file: "ci.log",
+          acceptance: PASSING_ACCEPTANCE
+        }
+      : { cwd },
     ...(notify ? { notificationTarget: { type: "codex" as const, threadId: "thread-worker" } } : {})
   });
 }
@@ -1916,6 +1922,60 @@ describe("runJobWorker", () => {
       expect(readJob(cwd, job.id)).toMatchObject({
         status: "stalled",
         errorCode: expect.stringMatching(/no_effective_progress|agent_silent/)
+      });
+    });
+
+    it("reconciles changed files before writing a stalled checkpoint", async () => {
+      const cwd = tempWorkspace();
+      const job = createJobStore(cwd).create({
+        kind: "implement",
+        task: "Stall after writing",
+        request: {
+          cwd,
+          progressTimeoutMs: 5_000,
+          progressWarningMs: 1_000,
+          idleTimeoutMs: 0
+        }
+      });
+      let statusCapture = 0;
+      const writeCheckpoint = vi.fn();
+      const harness = progressMonitorHarness({
+        captureStatus: vi.fn(async () => {
+          statusCapture += 1;
+          return statusCapture === 1
+            ? { short: "", dirty: false, fingerprints: {} }
+            : {
+                short: " M src/app.ts",
+                dirty: true,
+                fingerprints: {
+                  "src/app.ts": { status: " M", contentHash: "after-write" }
+                }
+              };
+        }),
+        writeCheckpoint,
+        terminateOwnedProcess: vi.fn(() => ({ status: "not_running" as const, evidence: "gone" }))
+      });
+
+      const worker = runJobWorker(cwd, job.id, harness.deps);
+      const { emitLines } = await harness.whenReady;
+      await emitLines(['{"type":"text","text":"waiting"}']);
+      await harness.advance(6_000);
+      await worker;
+
+      expect(writeCheckpoint).toHaveBeenCalledWith(
+        cwd,
+        job.id,
+        expect.objectContaining({ changedFiles: ["src/app.ts"] })
+      );
+      expect(readJob(cwd, job.id)).toMatchObject({
+        status: "stalled",
+        changedFiles: ["src/app.ts"],
+        reconciliation: {
+          changeDetection: {
+            status: "complete",
+            sources: ["git_fingerprint"]
+          }
+        }
       });
     });
 

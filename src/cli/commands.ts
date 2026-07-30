@@ -64,11 +64,18 @@ const INTERNAL_COMMANDS = new Set(["job-supervisor", "job-worker", "notify-worke
 const REMOVED_FLAGS = new Set([
   "--background", "--wait", "--session", "--attach", "--fork", "--continue", "--dry-run", "--model"
 ]);
-const BOOLEAN_FLAGS = new Set(["--allow-write", "--all", "--json"]);
+const BOOLEAN_FLAGS = new Set([
+  "--allow-write",
+  "--all",
+  "--json",
+  "--diff-check",
+  "--no-diff-check"
+]);
 const VALUE_FLAGS = new Set([
   "--cwd", "--timeout-ms", "--idle-timeout-ms", "--notify", "--thread-id", "--url", "--secret-env",
   "--base", "--file", "--job-id", "--workflow", "--since", "--verify", "--report-dir",
-  "--since-cursor", "--limit", "--min-level", "--level"
+  "--since-cursor", "--limit", "--min-level", "--level", "--build", "--test",
+  "--artifact-path", "--allowed-path"
 ]);
 
 export async function runCli(args: readonly string[], dependencies: CliDependencies = {}): Promise<number> {
@@ -155,15 +162,29 @@ async function runWork(
   }
   if (command === "fix-ci") {
     const file = parsed.takeRequiredValue("--file");
+    const acceptance = parseAcceptanceOptions(parsed);
     const task = parsed.takeOptionalTask();
     parsed.assertConsumed();
-    return (dependencies.mimoFixCi ?? defaultMimoFixCi)({ ...common, file, ...(task ? { task } : {}) });
+    return (dependencies.mimoFixCi ?? defaultMimoFixCi)({
+      ...common,
+      file,
+      ...(task ? { task } : {}),
+      ...(acceptance ? { acceptance } : {})
+    });
   }
   if (command === "resume") {
     const jobId = parsed.takeRequiredValue("--job-id");
-    const task = parsed.takeTask("Usage: codex-mimo resume --job-id <job-id> <task>");
+    const acceptance = parseAcceptanceOptions(parsed);
+    const allowedPaths = parsed.takeValues("--allowed-path");
+    const task = parsed.takeOptionalTask();
     parsed.assertConsumed();
-    return (dependencies.mimoResume ?? defaultMimoResume)({ ...common, jobId, task });
+    return (dependencies.mimoResume ?? defaultMimoResume)({
+      ...common,
+      jobId,
+      ...(task ? { task } : {}),
+      ...(acceptance ? { acceptance } : {}),
+      ...(allowedPaths.length > 0 ? { allowedPaths } : {})
+    });
   }
 
   const workflow = parsed.takeRequiredValue("--workflow");
@@ -312,6 +333,38 @@ function parseNotification(parsed: ParsedArguments): NotificationInput | undefin
     return { type: "webhook", url, secretEnv };
   }
   throw new CliInputError("--notify must be codex or webhook.");
+}
+
+function parseAcceptanceOptions(parsed: ParsedArguments): {
+  build?: string[];
+  test?: string[];
+  diffCheck?: boolean;
+  artifactPaths?: string[];
+} | undefined {
+  const build = parsed.takeValues("--build");
+  const test = parsed.takeValues("--test");
+  const artifactPaths = parsed.takeValues("--artifact-path");
+  const diffCheck = parsed.takeBoolean("--diff-check");
+  const noDiffCheck = parsed.takeBoolean("--no-diff-check");
+  if (diffCheck && noDiffCheck) {
+    throw new CliInputError("--diff-check and --no-diff-check are mutually exclusive.");
+  }
+  if (
+    build.length === 0 &&
+    test.length === 0 &&
+    artifactPaths.length === 0 &&
+    !diffCheck &&
+    !noDiffCheck
+  ) {
+    return undefined;
+  }
+  return {
+    ...(build.length > 0 ? { build } : {}),
+    ...(test.length > 0 ? { test } : {}),
+    ...(diffCheck ? { diffCheck: true } : {}),
+    ...(noDiffCheck ? { diffCheck: false } : {}),
+    ...(artifactPaths.length > 0 ? { artifactPaths } : {})
+  };
 }
 
 class ParsedArguments {

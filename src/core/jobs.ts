@@ -147,6 +147,26 @@ export interface CompactAttention {
   };
 }
 
+export interface ContextOverheadMetrics {
+  tracking: "complete" | "partial" | "unavailable";
+  /** Includes heartbeat and manual status calls; the caller source is not observable. */
+  statusCalls: number | null;
+  resultCalls: number | null;
+  /** The MCP request does not identify heartbeat-originated status calls. */
+  heartbeatCalls: null;
+  /** UTF-8 bytes of the most recently observed compact result payload. */
+  compactResultBytes: number | null;
+  /** Codex App Server notification delivery attempts for this logical job family. */
+  callbackAttempts: number;
+  requestedStandardOrFull: boolean | null;
+  needsInput: boolean;
+  resumeCount: number;
+  /** Independent launches cannot be associated reliably without a caller correlation id. */
+  relaunchCount: null;
+}
+
+export type ArtifactAssessment = "needs_review" | "passed" | "failed";
+
 export interface CompactJobResult {
   status: JobStatus;
   changedFiles: string[];
@@ -154,8 +174,11 @@ export interface CompactJobResult {
   failure: CompactFailure | null;
   reportPath: string | null;
   summary?: string;
+  /** Compose-specific deliverable assessment; independent from execution status. */
+  assessment?: ArtifactAssessment;
   attention?: CompactAttention;
   reconciliation?: JobReconciliationSummary;
+  contextOverhead?: ContextOverheadMetrics;
 }
 
 export interface JobVerificationDetails extends JobVerification {
@@ -208,6 +231,7 @@ export interface FullJobResult extends StandardJobResult {
 export interface CompactJobStatus {
   status: JobStatus;
   resultAvailable?: true;
+  assessment?: ArtifactAssessment;
 }
 
 export type RenderedJobResult = CompactJobResult | StandardJobResult | FullJobResult;
@@ -238,6 +262,8 @@ export interface JobTransitionFields {
   error?: string;
   errorCode?: string;
   failureCauses?: JobFailureCause[];
+  /** Compose-specific deliverable assessment derived from the report status. */
+  assessment?: ArtifactAssessment;
   reconciliation?: JobReconciliationSummary;
 }
 
@@ -284,6 +310,8 @@ export interface JobRecord {
   error?: string;
   errorCode?: string;
   failureCauses?: JobFailureCause[];
+  /** Compose-specific deliverable assessment derived from the report status. */
+  assessment?: ArtifactAssessment;
   reconciliation?: JobReconciliationSummary;
   lastEventAt?: string;
   lastActivityAt?: string;

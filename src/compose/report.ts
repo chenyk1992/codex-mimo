@@ -9,6 +9,8 @@ import type { TerminationReason } from "../mimo/streaming-runner.js";
 import { publicProgressSummary } from "../core/public-summary.js";
 import { redactDiagnosticText } from "../core/job-output.js";
 
+export type ComposeReportStatus = "passed" | "failed" | "needs_review" | "timeout";
+
 export interface ComposeReportPaths extends JobReportPaths {
   json: string;
   markdown: string;
@@ -21,7 +23,7 @@ export interface ComposeReport {
   workflow: ComposeWorkflowName;
   cwd: string;
   requestedSkills: string[];
-  status: "passed" | "failed" | "needs_review" | "timeout";
+  status: ComposeReportStatus;
   events: ComposeReportEvent[];
   changedFiles: string[];
   diffStat: string;

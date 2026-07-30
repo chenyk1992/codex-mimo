@@ -12,7 +12,10 @@ export function planPrompt(task: string): string {
     "Rules:",
     "- Do not edit files.",
     "- Inspect only the code needed for this task.",
-    "- Produce a concise implementation plan with touched files, risks, and verification commands.",
+    "- Produce a concise implementation plan using these sections: Conclusions, Evidence, Assumptions and Unknowns, Ordered Implementation Steps, Executable Acceptance.",
+    "- Tie conclusions to repository files, interfaces, tests, or command output inspected during this run.",
+    "- Do not claim behavior is existing, safe, or idempotent without repository evidence; label unsupported inferences as assumptions.",
+    "- Include touched files, risks, and directly executable verification commands.",
     "- Prefer the smallest change that satisfies the request.",
     "- If the task is ambiguous, state assumptions instead of broadening scope."
   ].join("\n");

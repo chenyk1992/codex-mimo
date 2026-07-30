@@ -2,7 +2,29 @@ import fs from "node:fs";
 import { describe, expect, it } from "vitest";
 
 describe("packaged MiMoCode skill", () => {
-  const skill = fs.readFileSync("skills/mimocode/SKILL.md", "utf8");
+  const entry = fs.readFileSync("skills/mimocode/SKILL.md", "utf8");
+  const references = [
+    "desktop-delivery.md",
+    "cursor-delivery.md",
+    "app-server-notify.md",
+    "recovery-and-errors.md",
+    "compose-workflows.md",
+    "diagnostics.md"
+  ];
+  const skill = [
+    entry,
+    ...references.map((file) => fs.readFileSync(`skills/mimocode/references/${file}`, "utf8"))
+  ].join("\n\n");
+
+  it("keeps the always-loaded entry compact and routes optional detail", () => {
+    expect(Buffer.byteLength(entry, "utf8")).toBeLessThanOrEqual(8_192);
+    for (const reference of references) {
+      expect(entry).toContain(`references/${reference}`);
+    }
+    expect(entry).toMatch(/complete work-tool call/i);
+    expect(entry).toMatch(/compact `mimo_status`/i);
+    expect(entry).toMatch(/narrowest meaningful independent check/i);
+  });
 
   it("teaches Desktop native heartbeat as the primary wait path", () => {
     expect(skill).toContain("Expected MCP Tools (13)");

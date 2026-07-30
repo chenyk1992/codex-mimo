@@ -12,6 +12,11 @@ describe("prompt builders", () => {
     const prompt = planPrompt("Add auth middleware");
     expect(prompt).toContain("Do not edit files");
     expect(prompt).toContain("concise implementation plan");
+    expect(prompt).toContain("Conclusions");
+    expect(prompt).toContain("Evidence");
+    expect(prompt).toContain("Assumptions and Unknowns");
+    expect(prompt).toContain("Executable Acceptance");
+    expect(prompt).toMatch(/idempotent.*repository evidence/i);
   });
 
   it("5.14: implementPrompt includes Do not ask", () => {

@@ -8,6 +8,7 @@ import {
   bindJobDefinition,
   bootstrapWriteJobChain,
   getJobDefinition,
+  preflightWriteJobAcceptance,
   shouldBootstrapWriteJobChain,
   type JobRequestByKind
 } from "../../../src/core/job-definitions.js";
@@ -485,6 +486,59 @@ describe("job finalization", () => {
     });
     expect(execute).toHaveBeenCalledTimes(2);
     expect(runDiffCheck).toHaveBeenCalledOnce();
+  });
+
+  it("pauses native fix-ci before execution when host acceptance is missing", async () => {
+    const cwd = tempDir();
+    const result = await preflightWriteJobAcceptance({
+      cwd,
+      kind: "fix-ci",
+      request: { cwd, file: "ci.log" }
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: "acceptance_config_missing"
+    });
+  });
+
+  it("runs native fix-ci host acceptance before reporting completion", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["fix-ci"] = {
+      cwd,
+      file: "ci.log",
+      acceptance: {
+        build: ["npm run build"],
+        test: ["npm test -- ci.test.ts"],
+        diffCheck: true
+      }
+    };
+    const runDevelopmentAcceptance = vi.fn(async () => passingAcceptanceResult({
+      verificationCommand: "npm test -- ci.test.ts"
+    }));
+
+    const outcome = await getJobDefinition("fix-ci").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("fix-ci", request),
+      request,
+      run: { stdout: '{"type":"message","text":"fixed"}\n', stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "fixed", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      verification: [],
+      deps: { runDevelopmentAcceptance }
+    });
+
+    expect(runDevelopmentAcceptance).toHaveBeenCalledOnce();
+    expect(outcome).toMatchObject({
+      status: "completed",
+      acceptance: {
+        stages: expect.arrayContaining([
+          expect.objectContaining({ stage: "build", outcome: "passed" }),
+          expect.objectContaining({ stage: "test", outcome: "passed" }),
+          expect.objectContaining({ stage: "diff_check", outcome: "passed" })
+        ])
+      }
+    });
   });
 
   it("allows declared acceptance artifacts without widening source edit scope", async () => {
@@ -1053,6 +1107,117 @@ describe("job finalization", () => {
     expect(outcome).toMatchObject({ status: "completed", changedFiles: [] });
   });
 
+  it("does not treat a pre-existing review diff as a read-only write", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = { cwd, workflow: "review", since: "HEAD" };
+    const baseline = {
+      short: " M src/app.ts",
+      dirty: true,
+      fingerprints: {
+        "src/app.ts": { status: " M", contentHash: "pre-existing" }
+      }
+    };
+
+    const outcome = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("compose", request),
+      request,
+      run: { stdout: '{"type":"message","text":"review complete"}\n', stderr: "", exitCode: 0, pid: 10 },
+      events: [{ type: "message", text: "review complete", raw: {} }],
+      executionCallback: { invocationId: "inv-1", outcome: "completed", sessionId: "ses-1" },
+      gitStatusBefore: baseline,
+      gitStatusAfter: baseline,
+      diff: { changedFiles: ["src/app.ts"], diffStat: "1 file changed", diff: "diff" },
+      commitChanges: { commits: [], changedFiles: [] },
+      verification: [],
+      deps: { runVerification: async () => [], writeComposeReport: () => undefined }
+    });
+
+    expect(outcome).toMatchObject({ status: "completed", changedFiles: [] });
+    expect(outcome.errorCode).toBeUndefined();
+  });
+
+  it("does not treat a pre-existing diff as a direct plan write", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["plan"] = { cwd, task: "Plan the change" };
+    const baseline = {
+      short: " M src/app.ts",
+      dirty: true,
+      fingerprints: {
+        "src/app.ts": { status: " M", contentHash: "pre-existing" }
+      }
+    };
+
+    const outcome = await getJobDefinition("plan").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("plan", request),
+      request,
+      run: { stdout: '{"type":"message","text":"plan complete"}\n', stderr: "", exitCode: 0, pid: 10 },
+      events: [{ type: "message", text: "plan complete", raw: {} }],
+      executionCallback: { invocationId: "inv-1", outcome: "completed", sessionId: "ses-1" },
+      gitStatusBefore: baseline,
+      gitStatusAfter: baseline,
+      diff: { changedFiles: ["src/app.ts"], diffStat: "1 file changed", diff: "diff" },
+      commitChanges: { commits: [], changedFiles: [] },
+      verification: []
+    });
+
+    expect(outcome).toMatchObject({ status: "completed", changedFiles: [] });
+    expect(outcome.errorCode).toBeUndefined();
+  });
+
+  it("runs explicitly supplied acceptance for a Compose fix", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "fix",
+      task: "Fix the bug",
+      acceptance: {
+        build: ["npm run build"],
+        test: ["npm test"],
+        diffCheck: true,
+        artifactPaths: ["out/**"]
+      },
+      allowedPaths: ["src/app.ts"]
+    };
+    const runDevelopmentAcceptance = vi.fn(async () => passingAcceptanceResult());
+
+    const outcome = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("compose", request),
+      request,
+      run: { stdout: '{"type":"message","text":"fixed"}\n', stderr: "", exitCode: 0, pid: 10 },
+      events: [{ type: "message", text: "fixed", raw: {} }],
+      executionCallback: { invocationId: "inv-1", outcome: "completed", sessionId: "ses-1" },
+      gitStatusBefore: { short: "", dirty: false, fingerprints: {} },
+      gitStatusAfter: {
+        short: " M src/app.ts",
+        dirty: true,
+        fingerprints: {
+          "src/app.ts": { status: " M", contentHash: "after" }
+        }
+      },
+      diff: { changedFiles: ["src/app.ts"], diffStat: "1 file changed", diff: "diff" },
+      commitChanges: { commits: [], changedFiles: [] },
+      verification: [],
+      deps: {
+        runDevelopmentAcceptance,
+        writeComposeReport: () => undefined
+      }
+    });
+
+    expect(runDevelopmentAcceptance).toHaveBeenCalledOnce();
+    expect(outcome).toMatchObject({
+      status: "completed",
+      acceptance: {
+        stages: expect.arrayContaining([
+          expect.objectContaining({ stage: "build", outcome: "passed" }),
+          expect.objectContaining({ stage: "test", outcome: "passed" })
+        ])
+      }
+    });
+  });
+
   it("reports only business files for writable Compose after worker filters the cron lock", async () => {
     const cwd = tempDir();
     const request: JobRequestByKind["compose"] = {
@@ -1168,7 +1333,12 @@ describe("job finalization", () => {
           acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
         },
         review: { cwd, base: "HEAD" },
-        "fix-ci": { cwd, file: "ci.log", task: "fix" },
+        "fix-ci": {
+          cwd,
+          file: "ci.log",
+          task: "fix",
+          acceptance: { build: ["npm run build"], test: ["npm test"], diffCheck: false }
+        },
         resume: {
           cwd,
           jobId: "parent",
@@ -1395,6 +1565,89 @@ describe("write chain bootstrap (Task 5)", () => {
     expect(persistedChild?.notificationTarget).toBeUndefined();
     expect(persistedChild?.parentJobId).toBe(root.id);
     expect(persistedChild?.sliceId).toBe("slice-1");
+  });
+
+  it("bootstraps non-acceptance Compose writes without build or test commands", async () => {
+    const cwd = tempDir();
+    const root = createJobStore(cwd).create({
+      kind: "compose",
+      task: "Fix one file",
+      request: {
+        cwd,
+        workflow: "fix",
+        task: "Fix one file",
+        batchMode: "single",
+        allowedPaths: ["src/app.ts"]
+      }
+    });
+
+    const result = await bootstrapWriteJobChain(root, {
+      spawnJobSupervisor: () => 1,
+      captureRepositoryFingerprint: async () => "fp-test"
+    });
+
+    expect(result.status).toBe("bootstrapped");
+    if (result.status !== "bootstrapped") return;
+    expect(result.child.request).toMatchObject({
+      workflow: "fix",
+      acceptance: {},
+      allowedPaths: ["src/app.ts"]
+    });
+  });
+
+  it("preserves execute-plan file in the slice child request", async () => {
+    const cwd = tempDir();
+    const root = createJobStore(cwd).create({
+      kind: "compose",
+      task: "Run execute-plan workflow.",
+      request: {
+        cwd,
+        workflow: "execute-plan",
+        file: "plans/approved.md",
+        acceptance,
+        batchMode: "single",
+        allowedPaths: ["src/app.ts"]
+      }
+    });
+
+    const result = await bootstrapWriteJobChain(root, {
+      spawnJobSupervisor: () => 1,
+      captureRepositoryFingerprint: async () => "fp-test"
+    });
+
+    expect(result.status).toBe("bootstrapped");
+    if (result.status !== "bootstrapped") return;
+    expect(result.child.request).toMatchObject({
+      workflow: "execute-plan",
+      file: "plans/approved.md"
+    });
+  });
+
+  it("returns acceptance_config_missing before planning an implement without acceptance", async () => {
+    const cwd = tempDir();
+    const root = createJobStore(cwd).create({
+      kind: "implement",
+      task: "Implement feature",
+      request: {
+        cwd,
+        task: "Implement feature",
+        allowWrite: true,
+        batchMode: "single",
+        allowedPaths: ["src/app.ts"]
+      }
+    });
+    const planSliceManifest = vi.fn();
+
+    const result = await bootstrapWriteJobChain(root, {
+      planSliceManifest,
+      captureRepositoryFingerprint: async () => "fp-test"
+    });
+
+    expect(result).toMatchObject({
+      status: "needs_input",
+      errorCode: "acceptance_config_missing"
+    });
+    expect(planSliceManifest).not.toHaveBeenCalled();
   });
 
   it("invalid plan fails root with slice_plan_invalid before any child", async () => {

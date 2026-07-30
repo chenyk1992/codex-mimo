@@ -78,7 +78,8 @@ import { persistJobCheckpoint } from "./job-checkpoint.js";
 import {
   captureScopedWorkspaceManifest,
   detectChangedFiles,
-  fingerprintWorkspaceFiles
+  fingerprintWorkspaceFiles,
+  type WorkspaceManifest
 } from "./changed-files.js";
 import { mergeAllowedPathScopes } from "./path-scope.js";
 import {
@@ -239,6 +240,17 @@ async function runOwnedJobWorker(
       await afterTerminalTransition(cwd, failed, deps);
       return;
     }
+    if (bootstrap.status === "needs_input") {
+      const needsInput = await transitionRecoverably(cwd, jobId, {
+        status: "needs_input",
+        summary: bootstrap.reason,
+        error: bootstrap.reason,
+        errorCode: bootstrap.errorCode,
+        acceptance: { stages: [] }
+      }, deps);
+      await afterTerminalTransition(cwd, needsInput, deps);
+      return;
+    }
     if (bootstrap.status === "bootstrapped") {
       bestEffortLog(bootstrap.root.logFile, {
         type: "job",
@@ -259,16 +271,29 @@ async function runOwnedJobWorker(
       });
       if (!preflight.ok) {
         executionGuard.stop();
+        if (preflight.code === "acceptance_config_missing") {
+          const result = await transitionRecoverably(cwd, jobId, {
+            status: "needs_input",
+            summary: preflight.message,
+            error: preflight.message,
+            errorCode: preflight.code,
+            changedFiles: [],
+            verification: [],
+            acceptance: { stages: [] }
+          }, deps);
+          await afterTerminalTransition(cwd, result, deps);
+          return;
+        }
         const result = await transitionRecoverably(cwd, jobId, {
           status: "failed",
           summary: preflight.message,
           error: preflight.message,
-          errorCode: "acceptance_command_unavailable",
+          errorCode: preflight.code,
           changedFiles: [],
           verification: [],
           failureCauses: [{
-            code: "acceptance_command_unavailable",
-            stage: preflight.stage,
+            code: preflight.code,
+            stage: preflight.stage ?? "build",
             ...(preflight.suggestion ? { suggestion: preflight.suggestion } : {})
           }]
         }, deps);
@@ -364,6 +389,9 @@ async function runOwnedJobWorker(
               deps,
               nowMs,
               isoNow,
+              gitStatusBefore,
+              workspaceManifestBefore,
+              monitoredPaths,
               requestTermination
             });
           },
@@ -1166,6 +1194,9 @@ interface ProgressMonitorOptions {
   deps: JobWorkerDependencies;
   nowMs: () => number;
   isoNow: () => string;
+  gitStatusBefore: GitStatusSnapshot;
+  workspaceManifestBefore?: WorkspaceManifest;
+  monitoredPaths?: string[];
   requestTermination: (reason: TerminationReason) => Promise<void>;
 }
 
@@ -1201,10 +1232,11 @@ function startProgressMonitor(options: ProgressMonitorOptions): { stop: () => vo
           }
           if (latestIdle === null || latestIdle < progressTimeoutMs) return;
 
-          await writeCheckpoint(options.cwd, options.jobId, latest);
           await options.requestTermination("progress_timeout");
           const stallErrorCode = classifyStallReasonForJob(latest, options.deps);
           const confirmed = confirmProcessTerminated(latest, options.deps);
+          const reconciled = await reconcileStalledJob(options, latest);
+          await writeCheckpoint(options.cwd, options.jobId, reconciled);
           if (confirmed) {
             const summary = publicProgressSummary({
               type: "job",
@@ -1215,7 +1247,11 @@ function startProgressMonitor(options: ProgressMonitorOptions): { stop: () => vo
               status: "stalled",
               summary,
               error: summary,
-              errorCode: stallErrorCode
+              errorCode: stallErrorCode,
+              changedFiles: reconciled.changedFiles,
+              ...(reconciled.reconciliation
+                ? { reconciliation: reconciled.reconciliation }
+                : {})
             }, options.deps);
             await afterTerminalTransition(options.cwd, result, options.deps);
           } else {
@@ -1228,7 +1264,11 @@ function startProgressMonitor(options: ProgressMonitorOptions): { stop: () => vo
               status: "blocked",
               summary,
               error: summary,
-              errorCode: "stalled_process_alive"
+              errorCode: "stalled_process_alive",
+              changedFiles: reconciled.changedFiles,
+              ...(reconciled.reconciliation
+                ? { reconciliation: reconciled.reconciliation }
+                : {})
             }, options.deps);
             await afterTerminalTransition(options.cwd, result, options.deps);
           }
@@ -1264,6 +1304,42 @@ function startProgressMonitor(options: ProgressMonitorOptions): { stop: () => vo
       clearInterval(timer);
     }
   };
+}
+
+async function reconcileStalledJob(
+  options: ProgressMonitorOptions,
+  job: JobRecord
+): Promise<JobRecord> {
+  try {
+    const captureStatus = options.deps.captureStatus ?? captureGitStatus;
+    const gitStatusAfter = withoutRuntimeStatus(await captureStatus(options.cwd));
+    const workspaceManifestAfter = captureScopedWorkspaceManifest(
+      options.cwd,
+      options.monitoredPaths
+    );
+    const changeDetection = detectChangedFiles({
+      cwd: options.cwd,
+      gitStatusBefore: options.gitStatusBefore,
+      gitStatusAfter,
+      manifestBefore: options.workspaceManifestBefore,
+      manifestAfter: workspaceManifestAfter
+    });
+    return {
+      ...job,
+      changedFiles: changeDetection.files,
+      reconciliation: {
+        status: changeDetection.status === "complete" ? "complete" : "degraded",
+        changeDetection: {
+          status: changeDetection.status,
+          sources: [...changeDetection.sources],
+          candidates: [...changeDetection.candidates],
+          ...(changeDetection.reason ? { reason: changeDetection.reason } : {})
+        }
+      }
+    };
+  } catch {
+    return job;
+  }
 }
 
 function classifyStallReasonForJob(job: JobRecord, deps: JobWorkerDependencies): string {

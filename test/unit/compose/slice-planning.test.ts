@@ -169,6 +169,30 @@ describe("planSliceManifest", () => {
     });
   });
 
+  it("materializes a non-acceptance write workflow without build or test tooling", async () => {
+    const cwd = makeProject();
+    const runMimo = vi.fn();
+
+    const result = await planSliceManifest({
+      cwd,
+      chainId: "chain-fix",
+      objective: "Fix one source file",
+      batchMode: "single",
+      repositoryFingerprint: "fp-fix",
+      allowedPaths: ["src/fix.ts"],
+      requireAcceptance: false,
+      runMimo
+    });
+
+    expect(runMimo).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      ok: true,
+      manifest: {
+        slices: [{ acceptance: {} }]
+      }
+    });
+  });
+
   it("runs the bridge read-only agent for auto mode and validates the parsed manifest", async () => {
     const cwd = makeProject({
       "package.json": JSON.stringify({ scripts: { build: "tsc", test: "vitest run" } })

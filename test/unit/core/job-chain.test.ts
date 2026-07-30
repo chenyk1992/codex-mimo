@@ -495,7 +495,13 @@ describe("advanceJobChainAfterChild", () => {
       summary: "Slice 1 failed.",
       error: "build broke",
       errorCode: "build_failed",
-      changedFiles: ["src/a.ts"]
+      changedFiles: ["src/a.ts"],
+      acceptance: {
+        stages: [{ stage: "build", outcome: "failed", command: "npm run build" }],
+        failedStage: "build",
+        failedCommand: "npm run build",
+        suggestion: "Fix the first build error."
+      }
     });
 
     const advanced = await advanceJobChainAfterChild(
@@ -510,6 +516,19 @@ describe("advanceJobChainAfterChild", () => {
     expect(advanced.root.status).toBe("failed");
     expect(advanced.root.errorCode).toBe("slice_failed");
     expect(advanced.root.changedFiles).toEqual(["src/a.ts"]);
+    expect(advanced.root.acceptance).toMatchObject({
+      failedStage: "build",
+      failedCommand: "npm run build",
+      suggestion: "Fix the first build error."
+    });
+    expect(advanced.root.failureCauses).toEqual([
+      expect.objectContaining({
+        code: "build_failed",
+        stage: "build",
+        command: "npm run build",
+        suggestion: "Fix the first build error."
+      })
+    ]);
     expect(advanced.startedChildId).toBeUndefined();
     expect(advanced.deliveryCreated).toBe(true);
 

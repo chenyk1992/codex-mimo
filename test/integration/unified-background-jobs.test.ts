@@ -78,7 +78,13 @@ function requests(cwd: string): JobRequestByKind {
       acceptance: PASSING_ACCEPTANCE
     },
     review: { cwd, base: "HEAD", timeoutMs: 2_000 },
-    "fix-ci": { cwd, file: "ci.log", task: "fix it", timeoutMs: 2_000 },
+    "fix-ci": {
+      cwd,
+      file: "ci.log",
+      task: "fix it",
+      timeoutMs: 2_000,
+      acceptance: PASSING_ACCEPTANCE
+    },
     resume: {
       cwd,
       jobId: "parent-1",
@@ -285,7 +291,13 @@ describe("unified background jobs", () => {
 
   it("times out and terminates the fake MiMo process", async () => {
     const cwd = workspace();
-    const request = { cwd, task: "timeout", allowWrite: true, timeoutMs: 40 };
+    const request = {
+      cwd,
+      task: "timeout",
+      allowWrite: true,
+      timeoutMs: 40,
+      acceptance: PASSING_ACCEPTANCE
+    };
     const job = createJobStore(cwd).create({ kind: "implement", task: "timeout", request });
 
     const timedOut = await runFake(cwd, job, { mode: "hang", callback: false, callbackWaitMs: 20 });
@@ -302,7 +314,8 @@ describe("unified background jobs", () => {
       progressTimeoutMs: 150,
       progressWarningMs: 50,
       idleTimeoutMs: 0,
-      timeoutMs: 60_000
+      timeoutMs: 60_000,
+      acceptance: PASSING_ACCEPTANCE
     };
     const job = createJobStore(cwd).create({
       kind: "implement",

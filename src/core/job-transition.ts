@@ -304,6 +304,7 @@ function buildPendingTransition(
     ...(transition.error !== undefined ? { error: publicSummary } : {}),
     ...(transition.errorCode !== undefined ? { errorCode: transition.errorCode } : {}),
     ...(transition.failureCauses !== undefined ? { failureCauses: transition.failureCauses } : {}),
+    ...(transition.assessment !== undefined ? { assessment: transition.assessment } : {}),
     ...(transition.reconciliation !== undefined
       ? { reconciliation: transition.reconciliation }
       : {})

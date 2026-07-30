@@ -12,6 +12,10 @@ import type { NotificationTarget } from "../notify/types.js";
 import { readDeliveries } from "../notify/outbox.js";
 import { renameWithWindowsRetry } from "./atomic-file.js";
 import { withProcessLock } from "./process-lock.js";
+import {
+  initializeContextOverhead,
+  resolveContextOverheadFile
+} from "./context-overhead.js";
 
 const DEFAULT_MAX_JOBS = 100;
 
@@ -119,6 +123,7 @@ export function createJobStore(cwd: string, options: JobStoreOptions = {}): {
       };
 
       writeJobRecord(cwd, record);
+      initializeContextOverhead(cwd, id);
       pruneRecordsBestEffort(cwd, maxJobs);
       observeStateRefresh(cwd, maxJobs);
 
@@ -347,6 +352,7 @@ function isJobRecord(value: unknown, expectedJobId: string): value is JobRecord 
     Array.isArray(value.changedFiles) &&
     Array.isArray(value.verification) &&
     isOptionalExecutionCallback(value.executionCallback) &&
+    isOptionalAssessment(value.assessment) &&
     isOptionalReconciliation(value.reconciliation) &&
     typeof value.logFile === "string" &&
     typeof value.eventsFile === "string" &&
@@ -507,6 +513,7 @@ function transitionRecordPatch(
     ...(transition.error !== undefined ? { error: transition.error } : {}),
     ...(transition.errorCode !== undefined ? { errorCode: transition.errorCode } : {}),
     ...(transition.failureCauses !== undefined ? { failureCauses: transition.failureCauses } : {}),
+    ...(transition.assessment !== undefined ? { assessment: transition.assessment } : {}),
     ...(transition.reconciliation !== undefined
       ? { reconciliation: transition.reconciliation }
       : {})
@@ -594,6 +601,7 @@ function isPendingJobTransition(
       !isOptionalVerificationArray(value.verification) ||
       !isOptionalAcceptance(value.acceptance) ||
       !isOptionalExecutionCallback(value.executionCallback) ||
+      !isOptionalAssessment(value.assessment) ||
       !isOptionalReconciliation(value.reconciliation) ||
       !isOptionalReportPaths(value.reportPaths) ||
       !isOptionalString(value.error) ||
@@ -691,6 +699,13 @@ function isOptionalReportPaths(value: unknown): boolean {
     isOptionalString(value.checkpoint) &&
     isOptionalString(value.slices) &&
     isOptionalString(value.executionEvidence);
+}
+
+function isOptionalAssessment(value: unknown): boolean {
+  return value === undefined ||
+    value === "needs_review" ||
+    value === "passed" ||
+    value === "failed";
 }
 
 function isOptionalReconciliation(value: unknown): boolean {
@@ -827,6 +842,7 @@ function pruneState(cwd: string, state: JobState, maxJobs: number): JobState {
     fs.rmSync(paths.logFile, { force: true });
     fs.rmSync(paths.eventsFile, { force: true });
     fs.rmSync(paths.signalsFile, { force: true });
+    fs.rmSync(resolveContextOverheadFile(cwd, job.id), { force: true });
   }
   return { jobs: kept.map((job) => job.id) };
 }

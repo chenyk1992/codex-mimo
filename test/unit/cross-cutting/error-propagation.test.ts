@@ -18,7 +18,16 @@ describe("error propagation", () => {
     const job = createJobStore(cwd).create({
       kind: "implement",
       task: "Test ENOENT",
-      request: { cwd, task: "Test ENOENT", allowWrite: true }
+      request: {
+        cwd,
+        task: "Test ENOENT",
+        allowWrite: true,
+        acceptance: {
+          build: ["node -e process.exit(0)"],
+          test: ["node -e process.exit(0)"],
+          diffCheck: false
+        }
+      }
     });
     const enoent = new Error("spawn mimo ENOENT") as NodeJS.ErrnoException;
     enoent.code = "ENOENT";

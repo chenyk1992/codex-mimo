@@ -1,4 +1,5 @@
 import type {
+  ArtifactAssessment,
   ExecutionCallbackSummary,
   JobAcceptanceSummary,
   JobReconciliationSummary,
@@ -43,6 +44,8 @@ export interface JobOutcome {
   error?: string;
   errorCode?: string;
   causes?: JobFailureCause[];
+  /** Compose-specific deliverable assessment derived from the report status. */
+  assessment?: ArtifactAssessment;
   reconciliation?: JobReconciliationSummary;
 }
 

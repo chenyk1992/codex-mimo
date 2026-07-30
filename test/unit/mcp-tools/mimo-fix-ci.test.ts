@@ -24,4 +24,22 @@ describe("mimo_fix_ci", () => {
       progressWarningMs: 120_000, progressTimeoutMs: 300_000
     });
   });
+
+  it("stores the structured host acceptance contract", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mimo-fix-ci-"));
+    dirs.push(cwd);
+    const acceptance = {
+      build: ["npm run build"],
+      test: ["npm test -- ci.test.ts"],
+      diffCheck: true,
+      artifactPaths: ["coverage/**"]
+    };
+
+    const result = await mimoFixCi({ cwd, file: "ci.log", acceptance }, {
+      env: {},
+      spawnJobSupervisor: vi.fn().mockReturnValue(123)
+    });
+
+    expect(readJob(cwd, result.jobId)?.request).toMatchObject({ acceptance });
+  });
 });

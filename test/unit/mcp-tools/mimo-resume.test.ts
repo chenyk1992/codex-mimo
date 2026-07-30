@@ -211,6 +211,167 @@ describe("mimo_resume", () => {
     });
   });
 
+  it("inherits development acceptance and write scope into the resume request", async () => {
+    const cwd = tempWorkspace();
+    const source = createJobStore(cwd).create({
+      kind: "implement",
+      task: "Build feature",
+      request: {
+        cwd,
+        task: "Build feature",
+        allowWrite: true,
+        acceptance: {
+          build: ["npm run build"],
+          test: ["npm test"],
+          diffCheck: true,
+          artifactPaths: ["out/**"]
+        },
+        allowedPaths: ["src/**"]
+      }
+    });
+    updateJob(cwd, source.id, {
+      status: "blocked",
+      sessionId: "ses_parent",
+      summary: "Need input."
+    });
+
+    const receipt = await mimoResume({ cwd, jobId: source.id, task: "Continue" }, {
+      env: {},
+      spawnJobSupervisor: vi.fn().mockReturnValue(123)
+    });
+
+    expect(readJob(cwd, receipt.jobId)?.request).toMatchObject({
+      requireAcceptance: true,
+      acceptance: {
+        build: ["npm run build"],
+        test: ["npm test"],
+        diffCheck: true,
+        artifactPaths: ["out/**"]
+      },
+      allowedPaths: ["src/**"]
+    });
+  });
+
+  it("overrides inherited acceptance field-by-field and replaces write scope", async () => {
+    const cwd = tempWorkspace();
+    const source = createJobStore(cwd).create({
+      kind: "implement",
+      task: "Build feature",
+      request: {
+        cwd,
+        task: "Build feature",
+        allowWrite: true,
+        acceptance: {
+          build: ["npm run old-build"],
+          test: ["npm run old-test"],
+          diffCheck: true
+        },
+        allowedPaths: ["src/old/**"]
+      }
+    });
+    updateJob(cwd, source.id, {
+      status: "blocked",
+      sessionId: "ses_parent",
+      summary: "Need input."
+    });
+
+    const receipt = await mimoResume({
+      cwd,
+      jobId: source.id,
+      task: "Continue",
+      acceptance: {
+        test: ["npm run new-test"],
+        diffCheck: false,
+        artifactPaths: ["coverage/**"]
+      },
+      allowedPaths: ["src/new/**"]
+    }, {
+      env: {},
+      spawnJobSupervisor: vi.fn().mockReturnValue(123)
+    });
+
+    expect(readJob(cwd, receipt.jobId)?.request).toMatchObject({
+      requireAcceptance: true,
+      acceptance: {
+        build: ["npm run old-build"],
+        test: ["npm run new-test"],
+        diffCheck: false,
+        artifactPaths: ["coverage/**"]
+      },
+      allowedPaths: ["src/new/**"]
+    });
+  });
+
+  it("rejects an acceptance override that overlaps the inherited write scope", async () => {
+    const cwd = tempWorkspace();
+    const source = createJobStore(cwd).create({
+      kind: "implement",
+      task: "Build feature",
+      request: {
+        cwd,
+        task: "Build feature",
+        allowWrite: true,
+        acceptance: {
+          build: ["npm run build"],
+          test: ["npm test"]
+        },
+        allowedPaths: ["src/**"]
+      }
+    });
+    updateJob(cwd, source.id, {
+      status: "blocked",
+      sessionId: "ses_parent"
+    });
+
+    await expect(mimoResume({
+      cwd,
+      jobId: source.id,
+      task: "Continue",
+      acceptance: { artifactPaths: ["src/generated/**"] }
+    }, {
+      env: {},
+      spawnJobSupervisor: vi.fn().mockReturnValue(123)
+    })).rejects.toThrow(/must not overlap/);
+  });
+
+  it("resumes acceptance_config_missing without a prior session when acceptance is supplied", async () => {
+    const cwd = tempWorkspace();
+    const source = createJobStore(cwd).create({
+      kind: "fix-ci",
+      task: "Fix CI",
+      request: { cwd, file: "ci.log" }
+    });
+    updateJob(cwd, source.id, {
+      status: "needs_input",
+      errorCode: "acceptance_config_missing",
+      summary: "Acceptance is required."
+    });
+
+    const receipt = await mimoResume({
+      cwd,
+      jobId: source.id,
+      acceptance: {
+        build: ["npm run build"],
+        test: ["npm test"],
+        diffCheck: true
+      }
+    }, {
+      env: {},
+      spawnJobSupervisor: vi.fn().mockReturnValue(123)
+    });
+
+    expect(readJob(cwd, receipt.jobId)?.request).toMatchObject({
+      task: "Fix CI",
+      requireAcceptance: true,
+      acceptance: {
+        build: ["npm run build"],
+        test: ["npm test"],
+        diffCheck: true
+      }
+    });
+    expect(readJob(cwd, receipt.jobId)?.request).not.toHaveProperty("sessionId");
+  });
+
   it("resumes a stalled parent with session reuse", async () => {
     const cwd = tempWorkspace();
     const source = await stalledParent(cwd, { sessionId: "ses_stalled" });

@@ -224,6 +224,10 @@ export function buildComposePrompt(input: BuildComposePromptInput): string {
     lines.push("- If the Objective covers multiple independent subsystems, produce a plan index with sub-plan outlines — do not attempt one exhaustive plan.");
     lines.push("- Stop exploring and start writing the plan as soon as you have enough context to identify files and interfaces.");
     lines.push("- Intermediate analysis (code reviews, file surveys) must feed into the plan, not replace it.");
+    lines.push("- Structure the final plan as: Conclusions, Evidence, Assumptions and Unknowns, Ordered Implementation Steps, Executable Acceptance.");
+    lines.push("- Support conclusions with repository files, interfaces, tests, or command output inspected in this run.");
+    lines.push("- Do not claim behavior is existing, safe, or idempotent without repository evidence; label unsupported inferences as assumptions.");
+    lines.push("- Acceptance entries must be directly executable commands, not prose criteria.");
     lines.push("- If you cannot complete the full plan, output a partial plan with clear gaps listed.");
     lines.push("- Return the plan in your final response only. Do not save plan files, project docs, reports, or notes to disk.");
     lines.push("- Do not invoke compose:execute, compose:subagent, compose:tdd, compose:verify, compose:report, or any implementation handoff.");
@@ -233,6 +237,9 @@ export function buildComposePrompt(input: BuildComposePromptInput): string {
   if (workflow.name === "brainstorm") {
     lines.push("");
     lines.push("Use compose:brainstorm to clarify the Objective. Ask concise questions only when needed.");
+    lines.push("- Keep the final synthesis concise: Conclusions, Evidence, Assumptions and Unknowns, Options and Tradeoffs, Recommended Next Steps, Executable Acceptance.");
+    lines.push("- Separate observed repository evidence from assumptions and open questions.");
+    lines.push("- Do not call a proposal idempotent or already supported without repository evidence; otherwise label it as an assumption.");
   }
 
   if (file) {

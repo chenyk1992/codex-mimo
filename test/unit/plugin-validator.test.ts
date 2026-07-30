@@ -92,8 +92,13 @@ const WORK_SCHEMAS: Record<string, Record<string, unknown>> = {
     allowedPaths: { type: "array", items: string }
   }, ["cwd", "task", "allowWrite"]),
   mimo_review: workSchema({ base: { ...string, default: "HEAD" } }, ["cwd"]),
-  mimo_fix_ci: workSchema({ file: string, task: string }, ["cwd", "file"]),
-  mimo_resume: workSchema({ jobId: string, task: string }, ["cwd", "jobId"]),
+  mimo_fix_ci: workSchema({ file: string, task: string, acceptance }, ["cwd", "file"]),
+  mimo_resume: workSchema({
+    jobId: string,
+    task: string,
+    acceptance,
+    allowedPaths: { type: "array", items: string }
+  }, ["cwd", "jobId"]),
   mimo_compose: workSchema({
     workflow: {
       type: "string",
@@ -250,6 +255,48 @@ describe("lightweight plugin validator", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("skills/mimocode/SKILL.md frontmatter must define description");
+  });
+
+  it("accepts companion guidance from a linked on-demand reference", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      skillBody: [
+        "Codex Desktop uses an in-chat scheduled heartbeat.",
+        "On attention call mimo_result and delete the schedule.",
+        "[Cursor delivery](references/cursor-delivery.md)"
+      ].join("\n\n")
+    });
+    const references = path.join(root, "skills", "mimocode", "references");
+    mkdirSync(references, { recursive: true });
+    writeFileSync(
+      path.join(references, "cursor-delivery.md"),
+      "With the companion call mimo_result. Without companion, return the receipt and stop."
+    );
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(0);
+  });
+
+  it("rejects a missing linked skill reference", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      skillBody: `${VALID_MIMOCODE_SKILL_BODY}\n\n[Diagnostics](references/missing.md)`
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("references missing file references/missing.md");
+  });
+
+  it("rejects a MiMoCode entry skill larger than 8192 bytes", () => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      skillBody: `${VALID_MIMOCODE_SKILL_BODY}\n\n${"entry guidance ".repeat(700)}`
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("8192-byte entry-skill budget");
   });
 
   it("rejects a built MCP tool list that contains a removed tool", () => {

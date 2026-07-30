@@ -3,8 +3,7 @@ import {
   COMPOSE_WORKFLOW_NAMES,
   getComposeWorkflow,
   normalizeComposeBatchMode,
-  validateComposeWorkflowInput,
-  workflowRequiresDevelopmentAcceptance
+  validateComposeWorkflowInput
 } from "../compose/workflow.js";
 import { SINGLE_MODE_ALLOWED_PATHS_REQUIRED_MESSAGE } from "../core/safety-contracts.js";
 import {
@@ -120,13 +119,45 @@ export const ReviewInput = JobOptionsSchema.extend({
 
 export const FixCiInput = JobOptionsSchema.extend({
   file: z.string().min(1),
-  task: z.string().min(1).optional()
+  task: z.string().min(1).optional(),
+  acceptance: DevelopmentAcceptanceSchema.optional()
 }).strict();
+
+const FixCiInputWithRequirements = FixCiInput.superRefine((input, context) => {
+  for (const message of collectArtifactPathIssues(
+    undefined,
+    input.acceptance?.artifactPaths
+  )) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message });
+  }
+});
+
+export function parseFixCiInput(input: unknown): z.infer<typeof FixCiInput> {
+  return FixCiInputWithRequirements.parse(input);
+}
 
 export const ResumeInput = JobOptionsSchema.extend({
   jobId: z.string().min(1),
-  task: z.string().min(1).optional()
+  task: z.string().min(1).optional(),
+  acceptance: DevelopmentAcceptanceSchema.optional(),
+  allowedPaths: AllowedPathsSchema.optional()
 }).strict();
+
+const ResumeInputWithRequirements = ResumeInput.superRefine((input, context) => {
+  for (const message of collectAllowedPathsIssues(input.allowedPaths, { required: false })) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message });
+  }
+  for (const message of collectArtifactPathIssues(
+    input.allowedPaths,
+    input.acceptance?.artifactPaths
+  )) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message });
+  }
+});
+
+export function parseResumeInput(input: unknown): z.infer<typeof ResumeInput> {
+  return ResumeInputWithRequirements.parse(input);
+}
 
 export const HealthcheckInput = z.object({
   cwd: z.string().optional()
@@ -168,10 +199,7 @@ const ComposeInputWithWorkflowRequirements = ComposeInput.superRefine((input, co
     });
     return;
   }
-  if (
-    !workflowRequiresDevelopmentAcceptance(input.workflow) &&
-    input.acceptance?.artifactPaths !== undefined
-  ) {
+  if (!workflow.writesAllowed && input.acceptance?.artifactPaths !== undefined) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       message: `Workflow ${input.workflow} does not use acceptance.artifactPaths.`

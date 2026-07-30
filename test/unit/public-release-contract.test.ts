@@ -3,14 +3,37 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const SKILL = "skills/mimocode/SKILL.md";
+const SKILL_REFERENCES = [
+  "desktop-delivery.md",
+  "cursor-delivery.md",
+  "app-server-notify.md",
+  "recovery-and-errors.md",
+  "compose-workflows.md",
+  "diagnostics.md"
+] as const;
 const USER_DOCS = ["README.md", "doc/operations-guide.md", "doc/compose-workflows.md"] as const;
 const ALL_DOCS = [SKILL, ...USER_DOCS] as const;
 
 function readDoc(file: string): string {
-  return fs.readFileSync(path.resolve(file), "utf8");
+  const entry = fs.readFileSync(path.resolve(file), "utf8");
+  if (file !== SKILL) return entry;
+  return [
+    entry,
+    ...SKILL_REFERENCES.map((reference) =>
+      fs.readFileSync(path.resolve("skills/mimocode/references", reference), "utf8")
+    )
+  ].join("\n\n");
 }
 
 describe("public release contract", () => {
+  it("keeps optional MiMoCode guidance out of the always-loaded entry", () => {
+    const entry = fs.readFileSync(path.resolve(SKILL), "utf8");
+    expect(Buffer.byteLength(entry, "utf8")).toBeLessThanOrEqual(8_192);
+    for (const reference of SKILL_REFERENCES) {
+      expect(entry).toContain(`references/${reference}`);
+    }
+  });
+
   it("describes the six queued work tools and seven control or diagnostic tools", () => {
     const manifest = JSON.parse(
       fs.readFileSync(path.resolve(".codex-plugin/plugin.json"), "utf8")

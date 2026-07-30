@@ -1,6 +1,5 @@
 import { execa } from "execa";
 import {
-  FixCiInput,
   HealthcheckInput,
   ImplementInput,
   JobCancelInput,
@@ -11,7 +10,8 @@ import {
   JobWaitInput,
   PlanInput,
   parseComposeInput,
-  ResumeInput,
+  parseFixCiInput,
+  parseResumeInput,
   ReviewInput
 } from "./tool-schemas.js";
 import { launchJob, type LaunchJobDependencies } from "../core/job-launcher.js";
@@ -67,6 +67,11 @@ import type { NotificationDelivery } from "../notify/types.js";
 import { startNotificationDispatch } from "../notify/dispatch-process.js";
 import { publicProgressSummary } from "../core/public-summary.js";
 import { probeCodexCommand } from "../notify/codex-command.js";
+import {
+  collectContextOverheadMetrics,
+  recordContextToolCall
+} from "../core/context-overhead.js";
+import { workflowRequiresDevelopmentAcceptance } from "../compose/workflow.js";
 
 const WAIT_CHECK_INTERVAL_MS = 1_000;
 
@@ -121,7 +126,7 @@ export async function mimoReview(input: unknown, deps: LaunchJobDependencies = {
 }
 
 export async function mimoFixCi(input: unknown, deps: LaunchJobDependencies = {}) {
-  const parsed = FixCiInput.parse(input);
+  const parsed = parseFixCiInput(input);
   const { notify, ...request } = parsed;
   return launchJob({
     kind: "fix-ci",
@@ -179,6 +184,15 @@ function requiresCheckpointContext(parent: JobRecord): boolean {
       RESUMABLE_FAILURE_CODES.has(parent.errorCode));
 }
 
+function isAcceptanceConfigurationResume(
+  parent: JobRecord,
+  acceptance: Record<string, unknown> | undefined
+): boolean {
+  return parent.status === "needs_input" &&
+    parent.errorCode === "acceptance_config_missing" &&
+    hasConfiguredAcceptance(acceptance);
+}
+
 function assertParentProcessNotAlive(
   parent: JobRecord,
   verify: (
@@ -193,8 +207,48 @@ function assertParentProcessNotAlive(
   }
 }
 
+function inheritedResumeContract(source: JobRecord): {
+  requireAcceptance: boolean;
+  acceptance?: Record<string, unknown>;
+  allowedPaths?: string[];
+} {
+  const request = typeof source.request === "object" && source.request !== null
+    ? source.request as Record<string, unknown>
+    : {};
+  const acceptance = typeof request.acceptance === "object" && request.acceptance !== null
+    ? request.acceptance as Record<string, unknown>
+    : undefined;
+  const allowedPaths = Array.isArray(request.allowedPaths) &&
+      request.allowedPaths.every((entry) => typeof entry === "string")
+    ? request.allowedPaths as string[]
+    : undefined;
+  const composeRequiresAcceptance = source.kind === "compose" &&
+    typeof request.workflow === "string" &&
+    workflowRequiresDevelopmentAcceptance(
+      request.workflow as Parameters<typeof workflowRequiresDevelopmentAcceptance>[0]
+    );
+  return {
+    requireAcceptance: source.kind === "implement" ||
+      source.kind === "fix-ci" ||
+      composeRequiresAcceptance ||
+      request.requireAcceptance === true ||
+      hasConfiguredAcceptance(acceptance),
+    ...(acceptance ? { acceptance } : {}),
+    ...(allowedPaths ? { allowedPaths } : {})
+  };
+}
+
+function hasConfiguredAcceptance(acceptance: Record<string, unknown> | undefined): boolean {
+  return acceptance !== undefined && [
+    "build",
+    "test",
+    "diffCheck",
+    "artifactPaths"
+  ].some((field) => acceptance[field] !== undefined);
+}
+
 export async function mimoResume(input: unknown, deps: MimoResumeDependencies = {}) {
-  const parsed = ResumeInput.parse(input);
+  const parsed = parseResumeInput(input);
   const parent = readJob(parsed.cwd, parsed.jobId);
   if (!parent) throw new Error(`No job found for ${parsed.jobId}.`);
   if (!isResumableParent(parent)) {
@@ -203,14 +257,27 @@ export async function mimoResume(input: unknown, deps: MimoResumeDependencies = 
   if (parent.status === "blocked" && parent.errorCode === "stalled_process_alive") {
     throw new Error(`Job ${parent.id} is not resumable while stalled_process_alive.`);
   }
-  if (requiresExplicitTask(parent) && !parsed.task?.trim()) {
+  const acceptanceOverride = parsed.acceptance as Record<string, unknown> | undefined;
+  const acceptanceConfigurationResume = isAcceptanceConfigurationResume(
+    parent,
+    acceptanceOverride
+  );
+  if (
+    requiresExplicitTask(parent) &&
+    !parsed.task?.trim() &&
+    !acceptanceConfigurationResume
+  ) {
     throw new Error(`Job ${parent.id} requires a non-empty task before it can be resumed.`);
   }
 
   const chainResume = resolveChainResumeContext(parsed.cwd, parent);
   const resumeSource = chainResume?.sourceJob ?? parent;
 
-  if (requiresExplicitTask(parent) && !resumeSource.sessionId) {
+  if (
+    requiresExplicitTask(parent) &&
+    !resumeSource.sessionId &&
+    !acceptanceConfigurationResume
+  ) {
     throw new Error(`Job ${parent.id} does not have a sessionId and cannot be resumed.`);
   }
 
@@ -267,12 +334,34 @@ export async function mimoResume(input: unknown, deps: MimoResumeDependencies = 
     resumeSource.task ||
     parent.task;
   const executionPolicy = bindJobDefinition(parent).executionPolicy;
-  const { notify, ...options } = parsed;
+  const inheritedContract = inheritedResumeContract(resumeSource);
+  const {
+    notify,
+    acceptance: parsedAcceptanceOverride,
+    allowedPaths: allowedPathsOverride,
+    ...options
+  } = parsed;
+  const acceptance = inheritedContract.acceptance || parsedAcceptanceOverride
+    ? {
+        ...inheritedContract.acceptance,
+        ...parsedAcceptanceOverride
+      }
+    : undefined;
+  const allowedPaths = allowedPathsOverride ?? inheritedContract.allowedPaths;
+  parseResumeInput({
+    ...parsed,
+    ...(acceptance ? { acceptance } : {}),
+    ...(allowedPaths ? { allowedPaths } : {})
+  });
   const request = {
     ...options,
     jobId: parent.id,
     task,
     executionPolicy,
+    requireAcceptance: inheritedContract.requireAcceptance ||
+      hasConfiguredAcceptance(acceptance),
+    ...(acceptance ? { acceptance } : {}),
+    ...(allowedPaths ? { allowedPaths } : {}),
     ...(resumeSource.sessionId ? { sessionId: resumeSource.sessionId } : {}),
     ...(checkpoint ? { checkpoint } : {})
   };
@@ -371,6 +460,7 @@ export async function mimoStatus(
   const parsed = JobStatusInput.parse(input);
   const job = parsed.jobId ? readJob(parsed.cwd, parsed.jobId) : listJobs(parsed.cwd)[0];
   if (!job) throw new Error("No jobs recorded for this workspace.");
+  recordContextToolCall(parsed.cwd, job.id, { tool: "status", level: parsed.level });
   if (parsed.level === "compact") return renderCompactJobStatus(job);
 
   const processAlive = probeProcessAlive(job, deps);
@@ -481,26 +571,49 @@ export async function mimoResult(input: unknown): Promise<RenderedJobResult> {
   if (!isResultStatus(job.status)) {
     throw new Error(`Job result is not available while ${job.id} is ${job.status}.`);
   }
+  const contextOverhead = collectContextOverheadMetrics(
+    job,
+    listJobs(parsed.cwd),
+    readNotificationDeliveries(parsed.cwd),
+    { tool: "result", level: parsed.level }
+  );
 
   if (parsed.level === "full") {
     const fallbackOutput = job.reportPaths?.result
       ? undefined
       : readFinalJobOutput(job.eventsFile);
-    return renderFullJobResult(job, {
+    const result = renderFullJobResult(job, {
       notification: notificationStatus(job),
+      contextOverhead,
       ...readJobDiagnostics(job, fallbackOutput)
     });
+    recordContextToolCall(parsed.cwd, job.id, { tool: "result", level: parsed.level });
+    return result;
   }
 
   const output = isSemanticResultJob(job) ? readSavedJobOutput(job) : undefined;
   if (parsed.level === "compact") {
-    return renderCompactJobResult(job, { output });
+    const result = renderCompactJobResult(job, {
+      output,
+      contextOverhead,
+      measureCompactBytes: true
+    });
+    recordContextToolCall(
+      parsed.cwd,
+      job.id,
+      { tool: "result", level: parsed.level },
+      result.contextOverhead?.compactResultBytes ?? undefined
+    );
+    return result;
   }
-  return renderJobResult(job, {
+  const result = renderJobResult(job, {
     notification: notificationStatus(job),
     output,
-    keyError: readKeyVerificationError(job.reportPaths?.verification)
+    keyError: readKeyVerificationError(job.reportPaths?.verification),
+    contextOverhead
   });
+  recordContextToolCall(parsed.cwd, job.id, { tool: "result", level: parsed.level });
+  return result;
 }
 
 export interface MimoJobsDependencies {
