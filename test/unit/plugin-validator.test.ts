@@ -92,7 +92,15 @@ const WORK_SCHEMAS: Record<string, Record<string, unknown>> = {
     allowedPaths: { type: "array", items: string }
   }, ["cwd", "task", "allowWrite"]),
   mimo_review: workSchema({ base: { ...string, default: "HEAD" } }, ["cwd"]),
-  mimo_fix_ci: workSchema({ file: string, task: string, acceptance }, ["cwd", "file"]),
+  mimo_fix_ci: workSchema(
+    {
+      file: string,
+      task: string,
+      acceptance,
+      allowedPaths: { type: "array", items: string },
+    },
+    ["cwd", "file"],
+  ),
   mimo_resume: workSchema({
     jobId: string,
     task: string,

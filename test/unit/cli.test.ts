@@ -119,6 +119,7 @@ describe("unified CLI work commands", () => {
       "--test", "npm test -- ci.test.ts",
       "--diff-check",
       "--artifact-path", "coverage/**",
+      "--allowed-path", "src/**",
       "Fix CI"
     ]);
     expect(fixCi.deps.mimoFixCi).toHaveBeenCalledWith({
@@ -130,7 +131,8 @@ describe("unified CLI work commands", () => {
         test: ["npm test -- ci.test.ts"],
         diffCheck: true,
         artifactPaths: ["coverage/**"]
-      }
+      },
+      allowedPaths: ["src/**"]
     });
 
     const resume = await invoke([

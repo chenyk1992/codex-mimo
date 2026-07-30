@@ -49,6 +49,7 @@ import {
 } from "../mimo/hook-callback.js";
 import {
   runMimoCliStreaming,
+  StreamingProcessExitError,
   type StreamingRunResult,
   type TerminationReason
 } from "../mimo/streaming-runner.js";
@@ -354,7 +355,8 @@ async function runOwnedJobWorker(
         cwd,
         kind: initial.kind,
         expectedQueryHash,
-        ...(allowedPaths ? { allowedPaths } : {})
+        ...(allowedPaths ? { allowedPaths } : {}),
+        ...(usesWorktreeWorkflow(initial.request) ? { allowExternalDirectory: true } : {})
       }),
       executionGuard.signal,
       {
@@ -717,6 +719,9 @@ async function runOwnedJobWorker(
       }
     } else {
       await eventWrites;
+    }
+    if (error instanceof StreamingProcessExitError) {
+      await (deps.updateRunningJobProcess ?? updateRunningJobProcess)(cwd, jobId, null, null);
     }
     await failWorker(cwd, jobId, stage, error, deps);
   } finally {
@@ -1477,6 +1482,15 @@ function readAllowedPathsFromJobRequest(request: unknown): string[] | undefined 
     return undefined;
   }
   return value;
+}
+
+function usesWorktreeWorkflow(request: unknown): boolean {
+  if (typeof request !== "object" || request === null) return false;
+  const record = request as {
+    workflow?: unknown;
+    checkpoint?: { workflow?: unknown };
+  };
+  return record.workflow === "worktree" || record.checkpoint?.workflow === "worktree";
 }
 
 function readArtifactPathsFromJobRequest(request: unknown): string[] | undefined {

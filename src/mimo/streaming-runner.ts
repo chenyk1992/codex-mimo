@@ -50,6 +50,16 @@ export class StreamingProcessStartError extends Error {
   }
 }
 
+export class StreamingProcessExitError extends Error {
+  readonly pid: number | null;
+
+  constructor(pid: number | null, cause: unknown) {
+    super("MiMoCode process emitted an error before close.", { cause });
+    this.name = "StreamingProcessExitError";
+    this.pid = pid;
+  }
+}
+
 interface StreamingChildProcess extends EventEmitter {
   stdout?: Readable | null;
   stderr?: Readable | null;
@@ -66,6 +76,7 @@ export interface StreamingRunOptions {
   timeoutWarningMs?: number;
   idleTimeoutMs?: number;
   idleCheckIntervalMs?: number;
+  pipeDrainGraceMs?: number;
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
   omitEnv?: readonly string[];
@@ -213,6 +224,7 @@ export async function runMimoCliStreaming(
   let timeout: NodeJS.Timeout | null = null;
   let warningTimeout: NodeJS.Timeout | null = null;
   let idleCheck: NodeJS.Timeout | null = null;
+  let pipeDrainTimeout: NodeJS.Timeout | null = null;
   let lastActivityAt = Date.now();
   let termination: Promise<void> | null = null;
   const clearTerminationTimers = () => {
@@ -222,6 +234,22 @@ export async function runMimoCliStreaming(
     timeout = null;
     warningTimeout = null;
     idleCheck = null;
+  };
+  const endReadable = (stream: Readable | null | undefined) => {
+    if (!stream || stream.readableEnded || stream.destroyed) return;
+    try {
+      stream.push(null);
+    } catch {
+      stream.destroy();
+    }
+  };
+  const schedulePipeDrain = () => {
+    if (pipeDrainTimeout) return;
+    pipeDrainTimeout = setTimeout(() => {
+      pipeDrainTimeout = null;
+      endReadable(child.stdout);
+      endReadable(child.stderr);
+    }, Math.max(0, options.pipeDrainGraceMs ?? 250));
   };
 
   let stdoutReader: readline.Interface | undefined;
@@ -272,34 +300,41 @@ export async function runMimoCliStreaming(
 
   let cleanupExitListeners = () => undefined;
   const exitCodePromise = new Promise<number>((resolve, reject) => {
+    let settled = false;
+    const settle = (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(terminationReason ? 124 : code ?? 1);
+    };
     const onError = (error: Error) => {
       processClosed = true;
       clearTerminationTimers();
+      child.off("exit", onExit);
       child.off("close", onClose);
-      reject(error);
+      reject(new StreamingProcessExitError(child.pid ?? null, error));
+    };
+    const onExit = (code: number | null) => {
+      processClosed = true;
+      clearTerminationTimers();
+      child.off("error", onError);
+      schedulePipeDrain();
+      settle(code);
     };
     const onClose = (code: number | null) => {
       processClosed = true;
       clearTerminationTimers();
       child.off("error", onError);
-      if (!terminationReason) {
-        setImmediate(() => {
-          const stderr = child.stderr;
-          if (!stderr || stderr.readableEnded || stderr.destroyed) return;
-          try {
-            stderr.push(null);
-          } catch {
-            stderr.destroy();
-          }
-        });
-      }
-      resolve(terminationReason ? 124 : code ?? 1);
+      child.off("exit", onExit);
+      if (!terminationReason) setImmediate(() => endReadable(child.stderr));
+      settle(code);
     };
     cleanupExitListeners = () => {
       child.off("error", onError);
+      child.off("exit", onExit);
       child.off("close", onClose);
     };
     child.once("error", onError);
+    child.once("exit", onExit);
     child.once("close", onClose);
   });
   void exitCodePromise.catch(() => undefined);
@@ -422,6 +457,7 @@ export async function runMimoCliStreaming(
     };
   } finally {
     clearTerminationTimers();
+    if (pipeDrainTimeout) clearTimeout(pipeDrainTimeout);
     abortCleanup?.();
     cleanupExitListeners();
     cleanupStdoutListeners();

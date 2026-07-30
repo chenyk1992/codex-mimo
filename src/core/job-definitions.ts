@@ -178,9 +178,10 @@ const ReviewRequestSchema = CommonRequestSchema.extend({
 const FixCiRequestSchema = CommonRequestSchema.extend({
   file: z.string().min(1),
   task: z.string().min(1).optional(),
-  acceptance: DevelopmentAcceptanceRequestSchema.optional()
+  acceptance: DevelopmentAcceptanceRequestSchema.optional(),
+  allowedPaths: z.array(z.string().min(1)).optional()
 }).superRefine((request, context) => {
-  addArtifactScopeIssues(undefined, request.acceptance?.artifactPaths, context);
+  addArtifactScopeIssues(request.allowedPaths, request.acceptance?.artifactPaths, context);
 });
 
 const JobExecutionPolicySchema = z.object({
@@ -1303,14 +1304,19 @@ function applyAcceptanceFailure(
   const message = acceptance.suggestion ??
     acceptance.failedCommand ??
     "MiMoCode acceptance failed.";
+  const filteredCauses = outcome.causes?.filter((cause) =>
+    cause.code !== "verification_failed" || errorCode === "verification_failed"
+  );
+  const { causes: _causes, ...outcomeWithoutCauses } = outcome;
   return {
-    ...outcome,
+    ...outcomeWithoutCauses,
     status: "failed",
     summary: message,
     error: message,
     errorCode,
     verification: compact,
-    acceptance: acceptanceSummary
+    acceptance: acceptanceSummary,
+    ...(filteredCauses && filteredCauses.length > 0 ? { causes: filteredCauses } : {})
   };
 }
 
@@ -1418,7 +1424,7 @@ async function runAcceptanceForFinalize<Request extends { cwd: string }>(
   const diffPath = ensureDiffArtifact(context, input.reportDiff ?? context.diff);
   const runAcceptance = context.deps?.runDevelopmentAcceptance ?? runDevelopmentAcceptance;
   const runDiffCheck = context.deps?.runDiffCheck ??
-    createDefaultRunDiffCheck(context, input.writesAllowed, diffPath);
+    createDefaultRunDiffCheck(context, input.writesAllowed, diffPath, input.changedFiles);
 
   context.signal.throwIfAborted();
   const result = await runAcceptance(context.request.cwd, acceptancePlan, {
@@ -1511,7 +1517,8 @@ async function resolveDiffPathForReview(
 function createDefaultRunDiffCheck(
   context: JobFinalizeContext<{ cwd: string }>,
   writesAllowed: boolean,
-  initialDiffPath: string | undefined
+  initialDiffPath: string | undefined,
+  changedFiles: string[]
 ): (cwd: string, signal?: AbortSignal) => Promise<AcceptanceStageResult> {
   return async (cwd, signal) => {
     const runSelfCheck = context.deps?.runDiffAcceptanceSelfCheck ?? runDiffAcceptanceSelfCheck;
@@ -1523,6 +1530,7 @@ function createDefaultRunDiffCheck(
     const scopePaths = mergeAllowedPathScopes(allowedPaths, artifactPaths);
     const selfCheck = await runSelfCheck({
       cwd,
+      changedFiles,
       expectedWritesAllowed: writesAllowed,
       gitHeadBefore: context.gitHeadBefore,
       signal,

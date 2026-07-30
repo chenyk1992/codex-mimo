@@ -33,10 +33,20 @@ const READONLY_AGENT_CONFIG = {
 
 const BRIDGE_MCP_NAME = "codex-mimocode";
 
-export function buildBridgeRuntimeConfig(pluginFile?: string): Record<string, unknown> {
+export interface BridgeRuntimeConfigOptions {
+  allowExternalDirectory?: boolean;
+}
+
+export function buildBridgeRuntimeConfig(
+  pluginFile?: string,
+  options: BridgeRuntimeConfigOptions = {}
+): Record<string, unknown> {
   return {
     dream: { auto: false },
     distill: { auto: false },
+    ...(options.allowExternalDirectory
+      ? { permission: { external_directory: "allow" } }
+      : {}),
     mcp: {
       [BRIDGE_MCP_NAME]: { enabled: false }
     },
@@ -49,19 +59,29 @@ export function buildBridgeRuntimeConfig(pluginFile?: string): Record<string, un
 
 export function buildBridgeRuntimeEnvironment(
   pluginFile?: string,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  options: BridgeRuntimeConfigOptions = {}
 ): NodeJS.ProcessEnv {
-  const bridge = buildBridgeRuntimeConfig(pluginFile);
+  const bridge = buildBridgeRuntimeConfig(pluginFile, options);
   const existing = parseExistingConfigContent(env.MIMOCODE_CONFIG_CONTENT);
   const existingAgents = isRecord(existing.agent) ? existing.agent : {};
   const existingMcp = isRecord(existing.mcp) ? existing.mcp : {};
   const existingPlugins = Array.isArray(existing.plugin) ? existing.plugin : [];
+  const existingPermission = isRecord(existing.permission) ? existing.permission : {};
 
   return {
     MIMOCODE_CONFIG_CONTENT: JSON.stringify({
       ...existing,
       dream: { ...(isRecord(existing.dream) ? existing.dream : {}), auto: false },
       distill: { ...(isRecord(existing.distill) ? existing.distill : {}), auto: false },
+      ...(options.allowExternalDirectory
+        ? {
+            permission: {
+              ...existingPermission,
+              external_directory: "allow"
+            }
+          }
+        : {}),
       mcp: {
         ...existingMcp,
         [BRIDGE_MCP_NAME]: { enabled: false }

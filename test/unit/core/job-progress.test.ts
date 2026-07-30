@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { classifyEffectiveProgress } from "../../../src/core/job-progress.js";
+import {
+  classifyEffectiveProgress,
+  parseProgressEventInput
+} from "../../../src/core/job-progress.js";
 
 describe("classifyEffectiveProgress", () => {
   it("does not treat reasoning or plain text as progress", () => {
@@ -49,5 +52,21 @@ describe("classifyEffectiveProgress", () => {
       previousFingerprint: undefined,
       event: { type: "phase", phase: "editing" }
     })).toMatchObject({ progressed: true, kind: "phase_change" });
+  });
+
+  it("preserves nested step_finish reasons in progress fingerprints", () => {
+    const event = parseProgressEventInput(JSON.stringify({
+      type: "step_finish",
+      part: { type: "step-finish", reason: "stop" }
+    }));
+
+    expect(event).toMatchObject({ type: "step_finish", reason: "stop" });
+    expect(classifyEffectiveProgress({
+      previousFingerprint: "step_finish:tool-calls",
+      event: event!
+    })).toMatchObject({
+      progressed: true,
+      fingerprint: "step_finish:stop"
+    });
   });
 });

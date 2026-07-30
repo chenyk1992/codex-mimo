@@ -76,6 +76,7 @@ export interface DiffAcceptanceResult extends AcceptanceStageResult {
 
 export interface DiffCheckOptions {
   cwd: string;
+  changedFiles?: string[];
   allowedPaths?: string[];
   expectedWritesAllowed?: boolean;
   forbidCommits?: boolean;
@@ -407,8 +408,8 @@ export async function runDiffAcceptanceSelfCheck(
   ]);
 
   const statusFiles = [...parseGitStatusFiles(status.short)];
-  const changedFiles =
-    diffSnapshot.changedFiles.length > 0 ? diffSnapshot.changedFiles : statusFiles;
+  const changedFiles = options.changedFiles ??
+    (diffSnapshot.changedFiles.length > 0 ? diffSnapshot.changedFiles : statusFiles);
   const summary = buildDiffAcceptanceSummary(changedFiles, diffSnapshot.diffStat);
 
   const commitChanges = options.gitHeadBefore

@@ -21,6 +21,7 @@ export interface ProgressEventInput {
   phase?: string;
   exitCode?: number | null;
   text?: string;
+  reason?: string;
 }
 
 export interface ClassifyEffectiveProgressInput {
@@ -79,7 +80,7 @@ export function classifyEffectiveProgress(
   }
 
   if (type === "step_start" || type === "step_finish") {
-    const fingerprint = `${type}:${event.phase ?? event.text ?? ""}`;
+    const fingerprint = `${type}:${event.reason ?? event.phase ?? event.text ?? ""}`;
     if (fingerprint === input.previousFingerprint) return { progressed: false };
     return { progressed: true, kind: "phase_change", fingerprint };
   }
@@ -139,10 +140,12 @@ function progressEventInputFromRaw(raw: unknown): ProgressEventInput | undefined
   }
 
   if (type === "step_start" || type === "step_finish") {
+    const part = isRecord(raw.part) ? raw.part : undefined;
     return {
       type,
-      phase: stringValue(raw.phase),
-      text: stringValue(raw.text ?? raw.message)
+      phase: stringValue(raw.phase ?? part?.phase),
+      text: stringValue(raw.text ?? raw.message ?? part?.text),
+      reason: stringValue(raw.reason ?? part?.reason)
     };
   }
 

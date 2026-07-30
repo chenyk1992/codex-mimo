@@ -98,6 +98,40 @@ describe("hook callback payload helpers", () => {
     expect(CALLBACK_HEADER).toBe("x-codex-mimo-callback-token");
   });
 
+  it("drops only stale unknown scope guards from completed callbacks", () => {
+    const completed = toExecutionCallbackEvidence("fallback", {
+      invocationId: "hook-invocation",
+      event: "session.post",
+      receivedAt: "2026-07-16T00:00:00.000Z",
+      sessionId: "ses-1",
+      outcome: "completed",
+      guardFailure: {
+        code: "write_scope_violation",
+        sessionId: "ses-1",
+        path: "unknown"
+      }
+    });
+    const failed = toExecutionCallbackEvidence("fallback", {
+      invocationId: "hook-invocation",
+      event: "session.post",
+      receivedAt: "2026-07-16T00:00:00.000Z",
+      sessionId: "ses-1",
+      outcome: "error",
+      guardFailure: {
+        code: "write_scope_violation",
+        sessionId: "ses-1",
+        path: "unknown"
+      }
+    });
+
+    expect(completed).not.toHaveProperty("failureCauses");
+    expect(failed.failureCauses).toEqual([{
+      code: "write_scope_violation",
+      stage: "scope_check",
+      suggestion: "Blocked path: unknown"
+    }]);
+  });
+
   it("writes a callable MiMoCode plugin under a runtime config directory", () => {
     const cwd = tempWorkspace();
     const paths = writeHookConfig({
@@ -177,6 +211,30 @@ describe("hook callback payload helpers", () => {
     expect(source).toContain("queryMatchesExpectedHash(input.query, expectedHash)");
     expect(source).toContain("JSON.parse(trimmedQuery)");
     expect(source).toContain("CODEX_MIMO_ALLOWED_PATHS_JSON");
+  });
+
+  it("writes an external-directory grant only for an explicit worktree run", () => {
+    const cwd = tempWorkspace();
+    const normal = writeHookConfig({
+      cwd,
+      invocationId: "implement-normal",
+      endpoint: "http://127.0.0.1:12345/mimo-hook",
+      token: "secret-token"
+    });
+    const worktree = writeHookConfig({
+      cwd,
+      invocationId: "compose-worktree",
+      endpoint: "http://127.0.0.1:12345/mimo-hook",
+      token: "secret-token",
+      allowExternalDirectory: true
+    });
+
+    expect(JSON.parse(fs.readFileSync(normal.configFile, "utf-8"))).not.toHaveProperty(
+      "permission"
+    );
+    expect(JSON.parse(fs.readFileSync(worktree.configFile, "utf-8"))).toMatchObject({
+      permission: { external_directory: "allow" }
+    });
   });
 });
 

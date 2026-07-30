@@ -66,6 +66,41 @@ describe("bridge runtime config", () => {
     expect(result).not.toHaveProperty("MIMOCODE_CONFIG_DIR");
   });
 
+  it("allows external directories only when the worktree runtime requests it", () => {
+    const base = {
+      MIMOCODE_CONFIG_CONTENT: JSON.stringify({
+        permission: {
+          read: "allow",
+          external_directory: "deny"
+        }
+      })
+    };
+
+    const normal = JSON.parse(
+      buildBridgeRuntimeEnvironment(undefined, base).MIMOCODE_CONFIG_CONTENT!
+    );
+    const worktree = JSON.parse(
+      buildBridgeRuntimeEnvironment(undefined, base, {
+        allowExternalDirectory: true
+      }).MIMOCODE_CONFIG_CONTENT!
+    );
+
+    expect(normal.permission).toEqual({
+      read: "allow",
+      external_directory: "deny"
+    });
+    expect(worktree.permission).toEqual({
+      read: "allow",
+      external_directory: "allow"
+    });
+    expect(buildBridgeRuntimeConfig()).not.toHaveProperty("permission");
+    expect(buildBridgeRuntimeConfig(undefined, {
+      allowExternalDirectory: true
+    })).toMatchObject({
+      permission: { external_directory: "allow" }
+    });
+  });
+
   it("refuses to overwrite unparseable MiMoCode config content", () => {
     expect(() => buildBridgeRuntimeEnvironment(undefined, {
       MIMOCODE_CONFIG_CONTENT: "{ // JSONC cannot be safely merged here"

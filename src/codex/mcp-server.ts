@@ -92,7 +92,8 @@ export function createMcpServer(overrides: Partial<McpToolHandlers> = {}): McpSe
     description: "Review the current diff in a background job", inputSchema: ReviewInput
   }, handle("mimo_review", handlers.mimoReview));
   server.registerTool("mimo_fix_ci", {
-    description: "Fix CI failures; host acceptance is required before verified success", inputSchema: FixCiInput
+    description: "Fix CI failures with optional allowedPaths; host acceptance is required before verified success",
+    inputSchema: FixCiInput
   }, handle("mimo_fix_ci", handlers.mimoFixCi));
   server.registerTool("mimo_resume", {
     description: "Resume a paused job; acceptance and allowedPaths may override inherited values",

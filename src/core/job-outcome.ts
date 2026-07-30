@@ -296,7 +296,32 @@ export function detectUnacceptedTask(finalText: string | undefined): string | un
 
 export function compactFailureCauses(causes: JobFailureCause[] | undefined): JobFailureCause[] | undefined {
   if (!causes || causes.length === 0) return undefined;
-  return causes.slice(0, COMPACT_FAILURE_CAUSE_LIMIT);
+  const hasSpecificVerificationCause = causes.some((cause) =>
+    cause.code === "build_failed" ||
+    cause.code === "tests_failed" ||
+    cause.code === "diff_check_failed"
+  );
+  const unique = new Map<string, JobFailureCause>();
+  for (const cause of causes) {
+    if (cause.code === "verification_failed" && hasSpecificVerificationCause) {
+      continue;
+    }
+    if (
+      cause.code === "write_scope_violation" &&
+      cause.suggestion?.trim().toLowerCase() === "blocked path: unknown"
+    ) {
+      continue;
+    }
+    const key = JSON.stringify([
+      cause.code,
+      cause.stage,
+      cause.command ?? "",
+      cause.suggestion ?? ""
+    ]);
+    if (!unique.has(key)) unique.set(key, cause);
+  }
+  const compact = [...unique.values()].slice(0, COMPACT_FAILURE_CAUSE_LIMIT);
+  return compact.length > 0 ? compact : undefined;
 }
 
 function normalizeGreetingPrefix(text: string): string {

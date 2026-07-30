@@ -125,6 +125,41 @@ describe("compact job rendering", () => {
     });
   });
 
+  it("exposes stalled worker_lost as a compact failure", () => {
+    const result = renderCompactJobResult(job({
+      status: "stalled",
+      phase: undefined,
+      errorCode: "worker_lost",
+      summary: "MiMoCode job stalled without effective progress."
+    }));
+
+    expect(result.failure).toMatchObject({
+      code: "worker_lost"
+    });
+  });
+
+  it("removes generic, duplicate, and unknown-path causes from compact failures", () => {
+    const result = renderCompactJobResult(job({
+      status: "stalled",
+      phase: undefined,
+      errorCode: "worker_lost",
+      failureCauses: [
+        { code: "diff_check_failed", stage: "diff_check", command: "git diff --check" },
+        { code: "verification_failed", stage: "test" },
+        {
+          code: "write_scope_violation",
+          stage: "scope_check",
+          suggestion: "Blocked path: unknown"
+        },
+        { code: "diff_check_failed", stage: "diff_check", command: "git diff --check" }
+      ]
+    }));
+
+    expect(result.failure?.causes).toEqual([
+      { code: "diff_check_failed", stage: "diff_check", command: "git diff --check" }
+    ]);
+  });
+
   it("omits output and operator metadata from compact implementation results", () => {
     const result = renderCompactJobResult(job({
       status: "completed",

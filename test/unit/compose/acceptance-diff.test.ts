@@ -106,6 +106,36 @@ describe("runDiffAcceptanceSelfCheck", () => {
       })
     );
   });
+
+  it("uses attributed job changes instead of unrelated pre-existing HEAD changes", async () => {
+    const runDeterministic = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const
+    }));
+
+    await runDiffAcceptanceSelfCheck(
+      makeOptions({
+        changedFiles: ["src/a.ts"],
+        allowedPaths: ["src/a.ts"],
+        captureStatus: vi.fn(async () => ({
+          short: " M src/a.ts\n M README.md",
+          dirty: true,
+          fingerprints: {}
+        })),
+        captureDiff: vi.fn(async () => ({
+          changedFiles: ["src/a.ts", "README.md"],
+          diffStat: " src/a.ts | 1 +\n README.md | 1 +",
+          diff: "diff content"
+        })),
+        runDeterministic
+      })
+    );
+
+    expect(runDeterministic).toHaveBeenCalledWith(expect.objectContaining({
+      changedFiles: ["src/a.ts"],
+      allowedPaths: ["src/a.ts"]
+    }));
+  });
 });
 
 describe("runDeterministicDiffAcceptance", () => {

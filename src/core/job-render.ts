@@ -122,7 +122,7 @@ export function renderCompactJobResult(
   });
   const tests = compactAcceptanceTests(job);
   const failedVerification = job.verification.find((result) => !result.passed);
-  const failure = job.status === "failed" || job.status === "cancelled" || job.status === "timeout"
+  const failure = job.status === "failed" || job.status === "cancelled" || job.status === "timeout" || job.status === "stalled"
     ? {
         code: job.errorCode ?? job.status,
         reason: publicSummary,

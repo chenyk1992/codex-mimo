@@ -104,6 +104,22 @@ describe("job output helpers", () => {
       .toBe("Verdict: Clean, with two minor observations.");
   });
 
+  it("prefers a review finding or assessment over a generic introduction", () => {
+    const output = [
+      "以下是对所提供差异的审查。",
+      "",
+      "### 问题",
+      "",
+      "1. **Bug：整数除法会静默截断小数部分**",
+      "",
+      "### 评估",
+      "",
+      "**准备合并？** **修复后合并**"
+    ].join("\n");
+
+    expect(summarizeJobOutput(output)).toBe("准备合并？ 修复后合并");
+  });
+
   it("redacts credentials before returning a semantic summary", () => {
     expect(summarizeJobOutput("# Plan\n\nUse token=private for the request."))
       .toBe("Use token=[REDACTED] for the request.");

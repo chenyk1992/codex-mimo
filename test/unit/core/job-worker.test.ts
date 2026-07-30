@@ -213,6 +213,35 @@ describe("runJobWorker", () => {
     expect(createHook.mock.calls[0][0]).not.toHaveProperty("artifactPaths");
   });
 
+  it.each([
+    ["compose worktree", "compose", { workflow: "worktree" }, true],
+    ["compose merge", "compose", { workflow: "merge" }, false],
+    ["resumed worktree", "resume", { checkpoint: { workflow: "worktree" } }, true]
+  ] as const)(
+    "scopes external-directory permission for %s",
+    async (_label, kind, request, expected) => {
+      const cwd = tempWorkspace();
+      const job = createJobStore(cwd).create({
+        kind,
+        task: "Exercise topology",
+        request: { cwd, ...request }
+      });
+      const createHook = vi.fn(async () => hook());
+
+      await runJobWorker(cwd, job.id, workerDeps({
+        createHookCallbackController: createHook
+      }));
+
+      if (expected) {
+        expect(createHook).toHaveBeenCalledWith(expect.objectContaining({
+          allowExternalDirectory: true
+        }));
+      } else {
+        expect(createHook.mock.calls[0][0]).not.toHaveProperty("allowExternalDirectory");
+      }
+    }
+  );
+
   it.each(["CODEX_MIMO_COMMAND", "MIMO_COMMAND"])(
     "does not select a current work job's protected %s value as the MiMo executable",
     async (secretEnv) => {

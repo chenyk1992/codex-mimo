@@ -89,7 +89,7 @@ describe("work tool schemas", () => {
     expect(Object.keys(PlanInput.shape).sort()).toEqual(["cwd", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
     expect(Object.keys(ImplementInputBase.shape).sort()).toEqual(["acceptance", "allowWrite", "allowedPaths", "batchMode", "cwd", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
     expect(Object.keys(ReviewInput.shape).sort()).toEqual(["base", "cwd", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "timeoutMs"]);
-    expect(Object.keys(FixCiInput.shape).sort()).toEqual(["acceptance", "cwd", "file", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
+    expect(Object.keys(FixCiInput.shape).sort()).toEqual(["acceptance", "allowedPaths", "cwd", "file", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
     expect(Object.keys(ResumeInput.shape).sort()).toEqual(["acceptance", "allowedPaths", "cwd", "idleTimeoutMs", "jobId", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
     expect(Object.keys(ComposeInputShape).sort()).toEqual([
       "acceptance", "allowedPaths", "batchMode", "cwd", "file", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "reportDir", "since", "task", "timeoutMs", "verification", "workflow"
@@ -172,12 +172,16 @@ describe("work tool schemas", () => {
     expect(parseFixCiInput({
       cwd: "E:/project",
       file: "ci.log",
+      allowedPaths: ["src/app.ts"],
       acceptance: {
         build: ["npm run build"],
         test: ["npm test"],
         artifactPaths: ["out/**"]
       }
-    }).acceptance?.artifactPaths).toEqual(["out/**"]);
+    })).toMatchObject({
+      allowedPaths: ["src/app.ts"],
+      acceptance: { artifactPaths: ["out/**"] }
+    });
     expect(parseResumeInput({
       cwd: "E:/project",
       jobId: "parent-1",
@@ -214,6 +218,12 @@ describe("work tool schemas", () => {
       file: "ci.log",
       acceptance: { artifactPaths: ["**"] }
     })).toThrow(/artifactPaths/);
+    expect(() => parseFixCiInput({
+      cwd: "E:/project",
+      file: "ci.log",
+      allowedPaths: ["src/**"],
+      acceptance: { artifactPaths: ["src/generated/**"] }
+    })).toThrow(/must not overlap/);
     expect(() => parseResumeInput({
       cwd: "E:/project",
       jobId: "parent-1",

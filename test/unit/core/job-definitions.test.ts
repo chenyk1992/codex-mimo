@@ -561,6 +561,97 @@ describe("job finalization", () => {
     });
   });
 
+  it("admits a native fix-ci repair declared in allowedPaths", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["fix-ci"] = {
+      cwd,
+      file: "ci.log",
+      allowedPaths: ["src/main/java/lab/Promotion.java"],
+      acceptance: {
+        build: ["npm run build"],
+        test: ["npm test -- ci.test.ts"],
+        diffCheck: true
+      }
+    };
+    const runDevelopmentAcceptance = vi.fn(async () => passingAcceptanceResult({
+      verificationCommand: "npm test -- ci.test.ts"
+    }));
+
+    const outcome = await getJobDefinition("fix-ci").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("fix-ci", request),
+      request,
+      run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "fixed", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      changeDetection: {
+        files: ["src/main/java/lab/Promotion.java"],
+        candidates: [],
+        status: "complete",
+        sources: ["git_fingerprint", "scope_manifest"]
+      },
+      verification: [],
+      deps: { runDevelopmentAcceptance }
+    });
+
+    expect(runDevelopmentAcceptance).toHaveBeenCalledOnce();
+    expect(outcome).toMatchObject({
+      status: "completed",
+      changedFiles: ["src/main/java/lab/Promotion.java"]
+    });
+  });
+
+  it("replaces generic verification failure causes with the acceptance error", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["fix-ci"] = {
+      cwd,
+      file: "ci.log",
+      acceptance: {
+        build: ["npm run build"],
+        test: ["npm test"],
+        diffCheck: true
+      }
+    };
+    const runDevelopmentAcceptance = vi.fn(async () => ({
+      ...passingAcceptanceResult(),
+      passed: false,
+      stages: [
+        { stage: "build" as const, outcome: "passed" as const, command: "npm run build" },
+        { stage: "test" as const, outcome: "passed" as const, command: "npm test" },
+        { stage: "diff_check" as const, outcome: "failed" as const, command: "git diff --check" }
+      ],
+      compactTests: [
+        { stage: "build" as const, command: "npm run build", outcome: "passed" as const },
+        { stage: "test" as const, command: "npm test", outcome: "passed" as const },
+        { stage: "diff_check" as const, command: "git diff --check", outcome: "failed" as const }
+      ],
+      errorCode: "diff_check_failed",
+      failedStage: "diff_check" as const,
+      failedCommand: "git diff --check",
+      suggestion: "Remove the trailing whitespace."
+    }));
+
+    const outcome = await getJobDefinition("fix-ci").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("fix-ci", request),
+      request,
+      run: { stdout: "", stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "fixed", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      failureCauses: [{ code: "verification_failed", stage: "test" }],
+      verification: [],
+      deps: { runDevelopmentAcceptance }
+    });
+
+    expect(outcome).toMatchObject({
+      status: "failed",
+      errorCode: "diff_check_failed"
+    });
+    expect(outcome.failureCauses ?? []).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "verification_failed" })
+    ]));
+  });
+
   it("allows declared acceptance artifacts without widening source edit scope", async () => {
     const cwd = tempDir();
     const request: JobRequestByKind["implement"] = {

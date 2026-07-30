@@ -35,11 +35,12 @@ describe("mimo_fix_ci", () => {
       artifactPaths: ["coverage/**"]
     };
 
-    const result = await mimoFixCi({ cwd, file: "ci.log", acceptance }, {
+    const allowedPaths = ["src/promotion.ts"];
+    const result = await mimoFixCi({ cwd, file: "ci.log", acceptance, allowedPaths }, {
       env: {},
       spawnJobSupervisor: vi.fn().mockReturnValue(123)
     });
 
-    expect(readJob(cwd, result.jobId)?.request).toMatchObject({ acceptance });
+    expect(readJob(cwd, result.jobId)?.request).toMatchObject({ acceptance, allowedPaths });
   });
 });

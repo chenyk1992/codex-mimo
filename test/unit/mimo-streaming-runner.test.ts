@@ -657,6 +657,28 @@ describe("streaming MiMo CLI runner", () => {
     expect(terminate).not.toHaveBeenCalled();
   });
 
+  it("finishes after root exit when a descendant keeps stdout and stderr open", async () => {
+    const child = makeChild(1017);
+    child.stdout = new Readable({ read() {} });
+    child.stderr = new Readable({ read() {} });
+    const run = runMimoCliStreaming("E:/project/app", ["run"], {
+      pipeDrainGraceMs: 5,
+      spawnProcess: () => child
+    });
+
+    child.stdout.push('{"type":"step_finish","part":{"reason":"stop"}}\n');
+    child.emit("exit", 0);
+
+    await expect(Promise.race([
+      run,
+      new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 100))
+    ])).resolves.toMatchObject({
+      exitCode: 0,
+      terminationReason: undefined,
+      stdout: expect.stringContaining('"reason":"stop"')
+    });
+  });
+
   it("destroys stream resources when termination fails before root exit", async () => {
     const abort = new AbortController();
     const child = makeChild(1016);

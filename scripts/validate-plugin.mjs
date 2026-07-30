@@ -122,7 +122,15 @@ const CANONICAL_WORK_TOOL_SCHEMAS = {
   ),
   mimo_review: canonicalWorkSchema({ base: { ...STRING_SCHEMA, default: "HEAD" } }, ["cwd"]),
   mimo_fix_ci: canonicalWorkSchema(
-    { file: STRING_SCHEMA, task: STRING_SCHEMA, acceptance: ACCEPTANCE_SCHEMA },
+    {
+      file: STRING_SCHEMA,
+      task: STRING_SCHEMA,
+      acceptance: ACCEPTANCE_SCHEMA,
+      allowedPaths: {
+        type: "array",
+        items: STRING_SCHEMA
+      }
+    },
     ["cwd", "file"]
   ),
   mimo_resume: canonicalWorkSchema(

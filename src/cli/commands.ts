@@ -163,13 +163,15 @@ async function runWork(
   if (command === "fix-ci") {
     const file = parsed.takeRequiredValue("--file");
     const acceptance = parseAcceptanceOptions(parsed);
+    const allowedPaths = parsed.takeValues("--allowed-path");
     const task = parsed.takeOptionalTask();
     parsed.assertConsumed();
     return (dependencies.mimoFixCi ?? defaultMimoFixCi)({
       ...common,
       file,
       ...(task ? { task } : {}),
-      ...(acceptance ? { acceptance } : {})
+      ...(acceptance ? { acceptance } : {}),
+      ...(allowedPaths.length > 0 ? { allowedPaths } : {})
     });
   }
   if (command === "resume") {

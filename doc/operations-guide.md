@@ -38,7 +38,9 @@ cannot complete without ordered host acceptance. Prefer `acceptance.build` /
 workspace-local outputs, declare bounded non-overlapping
 `acceptance.artifactPaths` such as `["out/**"]`; these paths are audited but do
 not widen source `write`/`edit` permissions. Stages run fail-fast: build → test
-→ diffCheck. A MiMo build/test result is reused only when its exact command,
+→ diffCheck. Native `mimo_fix_ci` also accepts optional bounded `allowedPaths`
+so the required source repair is admitted by both the hook and post-run scope
+audit. A MiMo build/test result is reused only when its exact command,
 resolved working directory, zero exit code, position after the last declared
 write, and repository fingerprint match the final state. The deterministic
 diff self-check always runs; the secondary read-only MiMo review is

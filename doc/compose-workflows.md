@@ -66,6 +66,12 @@ Rejected: bare `**`, absolute paths, `..`, UNC paths, and mid-path globs such as
 
 Build/test outputs use a separate optional scope, `acceptance.artifactPaths`, with the same bounded pattern syntax. Artifact paths are admitted only by post-run and diff auditing, never by the `write`/`edit` hook, and must not overlap `allowedPaths`. Declared ignored artifacts are fingerprinted and are not automatically deleted.
 
+The `worktree` workflow (and a Resume inherited from it) receives a run-scoped
+MiMoCode `external_directory=allow` permission so it can operate in the named
+sibling worktree. Other workflows preserve the caller's external-directory
+policy. Keep each worktree objective bounded to one explicit child path and
+branch, and verify the child topology after completion.
+
 ## Execution and Status
 
 The common worker validates the stored request, runs write workflows with MiMoCode's `build` agent and read-only workflows with the bridge's read-only agent, captures Git evidence, creates the internal `session.post` controller, streams events, runs finalization, and transitions the job. The workflow's Compose skill chain remains the behavior source in both cases.

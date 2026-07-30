@@ -31,22 +31,27 @@ export function summarizeJobOutput(
   if (!lines || lines.length === 0) return undefined;
 
   const explicitSummary = lines.findIndex((line) =>
-    /^#{1,6}\s+(?:summary|result|摘要|总结)\s*$/i.test(line));
+    /^#{1,6}\s+(?:summary|result|assessment|摘要|总结|评估)\s*$/i.test(line));
+  const findingsSection = lines.findIndex((line) =>
+    /^#{1,6}\s+(?:findings?|issues?|问题)\s*$/i.test(line));
   const preferredConclusion = lines.find((line) =>
-    /^(?:#{1,6}\s+)?(?:\*{1,2})?(?:verdict|judgment|conclusion|结论|判定)(?:\*{1,2})?\s*[:：]/i
+    /^(?:#{1,6}\s+)?(?:\*{1,2})?(?:verdict|judgment|conclusion|finding|结论|结果|判定)(?:\*{1,2})?\s*[:：]/i
       .test(line)
   );
   const substantive = (explicitSummary >= 0
     ? lines.slice(explicitSummary + 1).find(isSubstantiveSummaryLine)
     : undefined) ??
     preferredConclusion ??
+    (findingsSection >= 0
+      ? lines.slice(findingsSection + 1).find(isSubstantiveSummaryLine)
+      : undefined) ??
     lines.find(isSubstantiveSummaryLine) ??
     lines[0];
   const sentence = substantive.match(/^.*?[.!?。！？](?:\s|$)/)?.[0] ?? substantive;
   const singleLine = sentence
     .replace(/^#{1,6}\s+/, "")
     .replace(/^[-*+]\s+/, "")
-    .replace(/^\*{1,2}|\*{1,2}$/g, "")
+    .replace(/\*{1,2}/g, "")
     .replace(/[\u0000-\u001f\u007f]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();

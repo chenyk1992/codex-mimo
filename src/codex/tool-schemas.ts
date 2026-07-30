@@ -120,12 +120,16 @@ export const ReviewInput = JobOptionsSchema.extend({
 export const FixCiInput = JobOptionsSchema.extend({
   file: z.string().min(1),
   task: z.string().min(1).optional(),
-  acceptance: DevelopmentAcceptanceSchema.optional()
+  acceptance: DevelopmentAcceptanceSchema.optional(),
+  allowedPaths: AllowedPathsSchema.optional()
 }).strict();
 
 const FixCiInputWithRequirements = FixCiInput.superRefine((input, context) => {
+  for (const message of collectAllowedPathsIssues(input.allowedPaths, { required: false })) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message });
+  }
   for (const message of collectArtifactPathIssues(
-    undefined,
+    input.allowedPaths,
     input.acceptance?.artifactPaths
   )) {
     context.addIssue({ code: z.ZodIssueCode.custom, message });

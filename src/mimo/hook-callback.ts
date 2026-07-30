@@ -108,7 +108,10 @@ export function toExecutionCallbackEvidence(
       }
     };
   }
-  const failureCauses = callback.guardFailure
+  const failureCauses = callback.guardFailure &&
+    !(callback.outcome === "completed" &&
+      callback.guardFailure.code === "write_scope_violation" &&
+      callback.guardFailure.path === "unknown")
     ? [{
         code: callback.guardFailure.code,
         stage: callback.guardFailure.code === "prompt_identity_mismatch"
@@ -140,6 +143,7 @@ export function writeHookConfig(input: {
   invocationId: string;
   endpoint: string;
   token: string;
+  allowExternalDirectory?: boolean;
 }): HookConfigPaths {
   const configDir = path.join(input.cwd, ".codex-mimo", "runtime-hooks", input.invocationId);
   const pluginDir = path.join(configDir, "plugin");
@@ -148,7 +152,17 @@ export function writeHookConfig(input: {
 
   fs.mkdirSync(pluginDir, { recursive: true });
   fs.writeFileSync(hookFile, buildHookSource(), "utf-8");
-  fs.writeFileSync(configFile, JSON.stringify(buildBridgeRuntimeConfig(), null, 2), "utf-8");
+  fs.writeFileSync(
+    configFile,
+    JSON.stringify(
+      buildBridgeRuntimeConfig(undefined, {
+        allowExternalDirectory: input.allowExternalDirectory
+      }),
+      null,
+      2
+    ),
+    "utf-8"
+  );
 
   return { configDir, pluginDir, hookFile, configFile };
 }
@@ -376,6 +390,7 @@ export async function createHookCallbackController(
     callbackWaitMs?: number;
     now?: () => number;
     random?: () => string;
+    allowExternalDirectory?: boolean;
   } & HookExecutionGuardInput,
   deps: HookCallbackControllerDeps = {}
 ): Promise<HookCallbackController> {
@@ -534,7 +549,13 @@ export async function createHookCallbackController(
   const endpoint = `http://127.0.0.1:${address.port}/mimo-hook`;
   let hookConfig: HookConfigPaths;
   try {
-    hookConfig = (deps.writeHookConfig ?? writeHookConfig)({ cwd: input.cwd, invocationId, endpoint, token });
+    hookConfig = (deps.writeHookConfig ?? writeHookConfig)({
+      cwd: input.cwd,
+      invocationId,
+      endpoint,
+      token,
+      allowExternalDirectory: input.allowExternalDirectory
+    });
   } catch (error) {
     resolveWithNull();
     await closeServer(server);
@@ -551,7 +572,9 @@ export async function createHookCallbackController(
     getRunSession,
     getDiagnostics: () => [...diagnostics],
     env: {
-      ...buildBridgeRuntimeEnvironment(hookConfig.hookFile),
+      ...buildBridgeRuntimeEnvironment(hookConfig.hookFile, process.env, {
+        allowExternalDirectory: input.allowExternalDirectory
+      }),
       CODEX_MIMO_INVOCATION_ID: invocationId,
       CODEX_MIMO_CALLBACK_ENDPOINT: endpoint,
       CODEX_MIMO_CALLBACK_TOKEN: token,
