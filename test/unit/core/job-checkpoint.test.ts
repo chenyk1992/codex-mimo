@@ -5,6 +5,8 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  captureRepositoryFingerprint,
+  captureResumeConflictCheck,
   computeRepositoryFingerprint,
   detectResumeConflict,
   readJobCheckpoint,
@@ -97,9 +99,111 @@ describe("writeJobCheckpoint", () => {
     expect(paths.result?.replace(/\\/g, "/")).toBe(existing.result.replace(/\\/g, "/"));
     expect(paths.checkpoint).toMatch(/\.checkpoint\.json$/);
   });
+
+  it("writes the checkpoint under control while fingerprinting an isolated execution workspace", async () => {
+    const control = tempGitWorkspace();
+    const execution = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-checkpoint-execution-"));
+    roots.push(execution);
+    fs.mkdirSync(path.join(execution, "src"), { recursive: true });
+    fs.writeFileSync(path.join(execution, "src", "new.ts"), "export const isolated = true;\n", "utf8");
+    const job = sampleJob(control);
+    const paths = await writeJobCheckpoint({
+      job,
+      objective: job.task,
+      changedFiles: ["src/new.ts"],
+      sourceCwd: execution
+    });
+
+    const checkpoint = readJobCheckpoint(paths.checkpoint!)!;
+    expect(paths.checkpoint?.replace(/\\/g, "/")).toContain(control.replace(/\\/g, "/"));
+    expect(checkpoint.fileFingerprints?.["src/new.ts"]).not.toBe("missing");
+  });
 });
 
 describe("detectResumeConflict", () => {
+  it("keeps a legacy checkpoint resumable when its repository state is unchanged", async () => {
+    const cwd = tempGitWorkspace();
+    const job = sampleJob(cwd);
+    const paths = await writeJobCheckpoint({ job, objective: job.task, changedFiles: job.changedFiles });
+    const checkpoint = readJobCheckpoint(paths.checkpoint!)!;
+    const { fileFingerprints: _fileFingerprints, ...legacyCheckpoint } = checkpoint;
+    legacyCheckpoint.repositoryFingerprint = await captureRepositoryFingerprint(cwd, [
+      ...legacyCheckpoint.contextFiles,
+      ...legacyCheckpoint.changedFiles
+    ]);
+
+    expect(detectResumeConflict(
+      legacyCheckpoint,
+      await captureResumeConflictCheck(cwd, legacyCheckpoint)
+    )).toBeNull();
+  });
+
+  it("detects a relevant file change for a legacy checkpoint", async () => {
+    const cwd = tempGitWorkspace();
+    const job = sampleJob(cwd);
+    const paths = await writeJobCheckpoint({ job, objective: job.task, changedFiles: job.changedFiles });
+    const checkpoint = readJobCheckpoint(paths.checkpoint!)!;
+    const { fileFingerprints: _fileFingerprints, ...legacyCheckpoint } = checkpoint;
+    legacyCheckpoint.repositoryFingerprint = await captureRepositoryFingerprint(cwd, ["src/a.ts"]);
+    fs.writeFileSync(path.join(cwd, "src", "a.ts"), "export const a = 2;\n", "utf8");
+
+    expect(detectResumeConflict(
+      legacyCheckpoint,
+      await captureResumeConflictCheck(cwd, legacyCheckpoint)
+    )).toEqual({ code: "resume_conflict", paths: ["src/a.ts"] });
+  });
+
+  it("detects a HEAD change for a legacy checkpoint", async () => {
+    const cwd = tempGitWorkspace();
+    const job = sampleJob(cwd);
+    const paths = await writeJobCheckpoint({ job, objective: job.task, changedFiles: job.changedFiles });
+    const checkpoint = readJobCheckpoint(paths.checkpoint!)!;
+    const { fileFingerprints: _fileFingerprints, ...legacyCheckpoint } = checkpoint;
+    legacyCheckpoint.repositoryFingerprint = await captureRepositoryFingerprint(cwd, ["src/a.ts"]);
+    fs.writeFileSync(path.join(cwd, "README.md"), "next commit\n", "utf8");
+    execFileSync("git", ["add", "README.md"], { cwd });
+    execFileSync("git", ["commit", "-m", "next"], { cwd, stdio: "ignore" });
+
+    expect(detectResumeConflict(
+      legacyCheckpoint,
+      await captureResumeConflictCheck(cwd, legacyCheckpoint)
+    )).toEqual({ code: "resume_conflict", paths: ["src/a.ts"] });
+  });
+
+  it("ignores runtime artifacts that were not part of the stable checkpoint", async () => {
+    const cwd = tempGitWorkspace();
+    const job = sampleJob(cwd);
+    const paths = await writeJobCheckpoint({
+      job,
+      objective: job.task,
+      changedFiles: ["src/a.ts", ".codex-mimo/jobs/run.log", "build/generated.js"],
+      contextFiles: ["src/a.ts", ".codex-mimo/reports/job.md", "build"]
+    });
+    const checkpoint = readJobCheckpoint(paths.checkpoint!)!;
+
+    fs.mkdirSync(path.join(cwd, ".codex-mimo", "jobs"), { recursive: true });
+    fs.mkdirSync(path.join(cwd, "build"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, ".codex-mimo", "jobs", "run.log"), "later", "utf8");
+    fs.writeFileSync(path.join(cwd, "build", "generated.js"), "later", "utf8");
+
+    expect(checkpoint.contextFiles).toEqual(["src/a.ts"]);
+    expect(checkpoint.changedFiles).toEqual(["src/a.ts"]);
+    expect(detectResumeConflict(checkpoint, await captureResumeConflictCheck(cwd, checkpoint))).toBeNull();
+  });
+
+  it("reports only the relevant file whose snapshot changed", async () => {
+    const cwd = tempGitWorkspace();
+    const job = sampleJob(cwd);
+    const paths = await writeJobCheckpoint({ job, objective: job.task, changedFiles: job.changedFiles });
+    const checkpoint = readJobCheckpoint(paths.checkpoint!)!;
+    fs.writeFileSync(path.join(cwd, "src", "a.ts"), "export const a = 2;\n", "utf8");
+
+    expect(detectResumeConflict(checkpoint, await captureResumeConflictCheck(cwd, checkpoint))).toEqual({
+      code: "resume_conflict",
+      paths: ["src/a.ts"]
+    });
+  });
+
   it("detects resume_conflict when repository fingerprint changes", async () => {
     const cwd = tempGitWorkspace();
     const job = sampleJob(cwd);

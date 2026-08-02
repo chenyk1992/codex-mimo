@@ -29,6 +29,8 @@ export interface JobCheckpoint {
   sliceId?: string;
   sessionId?: string | null;
   repositoryFingerprint: string;
+  /** Stable file-level state for precise resume conflict reporting. */
+  fileFingerprints?: Record<string, string>;
   contextFiles: string[];
   changedFiles: string[];
   completedSlices: string[];
@@ -44,6 +46,8 @@ export interface JobCheckpoint {
 
 export interface WriteJobCheckpointInput {
   job: JobRecord;
+  /** Workspace used to read fingerprints; reports still belong to job.cwd/reportDir. */
+  sourceCwd?: string;
   objective: string;
   contextFiles?: string[];
   changedFiles?: string[];
@@ -58,6 +62,7 @@ export interface WriteJobCheckpointInput {
 
 export interface ResumeConflictCheck {
   repositoryFingerprint: string;
+  fileFingerprints?: Record<string, string>;
 }
 
 export interface ResumeConflict {
@@ -95,25 +100,19 @@ export async function writeJobCheckpoint(
     path.join(input.job.cwd, ".codex-mimo", "reports");
   fs.mkdirSync(reportDir, { recursive: true });
 
-  const changedFiles = normalizePaths(input.changedFiles ?? input.job.changedFiles);
-  const contextFiles = normalizePaths(
+  const sourceCwd = input.sourceCwd ?? input.job.cwd;
+  const changedFiles = normalizeResumePaths(sourceCwd, input.changedFiles ?? input.job.changedFiles);
+  const contextFiles = normalizeResumePaths(sourceCwd,
     input.contextFiles?.length
       ? input.contextFiles
       : collectContextFilesFromEvents(input.job.eventsFile, changedFiles)
   );
   const relevantFiles = normalizePaths([...contextFiles, ...changedFiles]);
 
-  const captureHead = input.captureHead ?? captureGitHead;
-  const captureStatus = input.captureStatus ?? captureGitStatus;
-  const [head, status] = await Promise.all([
-    captureHead(input.job.cwd),
-    captureStatus(input.job.cwd)
-  ]);
-  const repositoryFingerprint = computeRepositoryFingerprint(
-    head.oid,
-    relevantFiles,
-    status.fingerprints
-  );
+  const fileFingerprints = captureRelevantFileFingerprints(sourceCwd, relevantFiles);
+  // Resume only depends on files this job read or changed, not unrelated commits
+  // or volatile generated files elsewhere in the workspace.
+  const repositoryFingerprint = computeRepositoryFingerprint("", relevantFiles, fileFingerprints);
   const workflow = readWorkflow(input.job.request);
   const checkpointPath = path.join(reportDir, `${input.job.id}.checkpoint.json`);
   const existingCheckpoint = readJobCheckpoint(checkpointPath);
@@ -133,6 +132,7 @@ export async function writeJobCheckpoint(
     ...(input.job.sliceId ? { sliceId: input.job.sliceId } : {}),
     sessionId: input.job.sessionId ?? null,
     repositoryFingerprint,
+    fileFingerprints,
     contextFiles,
     changedFiles,
     completedSlices: input.completedSlices ?? [],
@@ -179,10 +179,38 @@ export async function captureRepositoryFingerprint(
   return computeRepositoryFingerprint(head.oid, relevantFiles, status.fingerprints);
 }
 
+export async function captureResumeConflictCheck(
+  cwd: string,
+  checkpoint: JobCheckpoint
+): Promise<ResumeConflictCheck> {
+  if (!checkpoint.fileFingerprints) {
+    const relevantFiles = normalizeResumePaths(cwd, [
+      ...checkpoint.contextFiles,
+      ...checkpoint.changedFiles
+    ]);
+    return {
+      repositoryFingerprint: await captureRepositoryFingerprint(cwd, relevantFiles)
+    };
+  }
+  const relevantFiles = Object.keys(checkpoint.fileFingerprints);
+  const fileFingerprints = captureRelevantFileFingerprints(cwd, relevantFiles);
+  return {
+    repositoryFingerprint: computeRepositoryFingerprint("", relevantFiles, fileFingerprints),
+    fileFingerprints
+  };
+}
+
 export function detectResumeConflict(
   checkpoint: JobCheckpoint,
   current: ResumeConflictCheck
 ): ResumeConflict | null {
+  if (checkpoint.fileFingerprints && current.fileFingerprints) {
+    const paths = normalizePaths([
+      ...Object.keys(checkpoint.fileFingerprints),
+      ...Object.keys(current.fileFingerprints)
+    ]).filter((file) => checkpoint.fileFingerprints![file] !== current.fileFingerprints![file]);
+    return paths.length > 0 ? { code: "resume_conflict", paths } : null;
+  }
   if (current.repositoryFingerprint === checkpoint.repositoryFingerprint) return null;
   return {
     code: "resume_conflict",
@@ -235,6 +263,7 @@ export async function persistJobCheckpoint(
     workspaceManifestBefore?: WorkspaceManifest;
     captureHead?: typeof captureGitHead;
     captureStatus?: typeof captureGitStatus;
+    sourceCwd?: string;
   } = {}
 ): Promise<JobReportPaths> {
   const reportPaths = await writeJobCheckpoint({
@@ -247,6 +276,7 @@ export async function persistJobCheckpoint(
       : {}),
     ...(options.captureHead ? { captureHead: options.captureHead } : {}),
     ...(options.captureStatus ? { captureStatus: options.captureStatus } : {}),
+    ...(options.sourceCwd ? { sourceCwd: options.sourceCwd } : {}),
     existingReportPaths: job.reportPaths
   });
   await updateJobAuthoritative(cwd, job.id, {
@@ -271,6 +301,61 @@ function writeCheckpointAtomically(checkpointPath: string, checkpoint: JobCheckp
 
 function normalizePaths(paths: Iterable<string>): string[] {
   return [...new Set([...paths].map((file) => file.replace(/\\/g, "/")).filter(Boolean))].sort();
+}
+
+const VOLATILE_RESUME_PATH_SEGMENTS = new Set([
+  ".codex-mimo",
+  "node_modules",
+  "build",
+  "dist",
+  "out",
+  "coverage",
+  "target",
+  ".gradle"
+]);
+
+function normalizeResumePaths(cwd: string, paths: Iterable<string>): string[] {
+  const root = path.resolve(cwd);
+  const normalized: string[] = [];
+  for (const candidate of paths) {
+    if (!candidate) continue;
+    const absolute = path.resolve(root, candidate);
+    const relative = path.relative(root, absolute);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    const file = relative.replace(/\\/g, "/");
+    if (!file || isVolatileResumePath(file)) continue;
+    try {
+      if (fs.lstatSync(absolute).isDirectory()) continue;
+    } catch {
+      // A deleted relevant file must still be compared as "missing".
+    }
+    normalized.push(file);
+  }
+  return normalizePaths(normalized);
+}
+
+function isVolatileResumePath(file: string): boolean {
+  const segments = file.split("/");
+  return segments.some((segment) => VOLATILE_RESUME_PATH_SEGMENTS.has(segment)) ||
+    /(?:^|\/)[^/]+\.(?:log|tmp)$/i.test(file);
+}
+
+function captureRelevantFileFingerprints(
+  cwd: string,
+  relevantFiles: string[]
+): Record<string, string> {
+  const root = path.resolve(cwd);
+  return Object.fromEntries(relevantFiles.map((file) => {
+    const absolute = path.resolve(root, file);
+    try {
+      const stat = fs.lstatSync(absolute);
+      if (stat.isSymbolicLink()) return [file, `symlink:${fs.readlinkSync(absolute)}`];
+      if (!stat.isFile()) return [file, stat.isDirectory() ? "directory" : "special"];
+      return [file, crypto.createHash("sha256").update(fs.readFileSync(absolute)).digest("hex")];
+    } catch {
+      return [file, "missing"];
+    }
+  }));
 }
 
 function normalizeCheckpointReportPaths(reportPaths?: JobReportPaths): JobReportPaths {

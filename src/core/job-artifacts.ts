@@ -5,6 +5,7 @@ import { publicProgressSummary } from "./public-summary.js";
 import type {
   JobRecord,
   JobReportPaths,
+  ReviewInputIntegrity,
   JobStatus,
   JobVerification,
   JobVerificationDetails
@@ -15,6 +16,8 @@ export interface WriteJobArtifactsInput {
   status: JobStatus;
   errorCode?: string;
   changedFiles: string[];
+  artifactFiles?: string[];
+  reviewInput?: ReviewInputIntegrity;
   verification: JobVerificationDetails[];
   compactVerification?: JobVerification[];
   finalText: string;
@@ -26,6 +29,7 @@ export interface WriteJobArtifactsInput {
 }
 
 export function writeJobArtifacts(input: WriteJobArtifactsInput): JobReportPaths {
+  const reviewInput = input.reviewInput ?? input.job.reviewInput;
   const reportDir = input.reportDir ??
     path.join(input.job.cwd, ".codex-mimo", "reports");
   const diffsDir = input.diffsDir ??
@@ -98,6 +102,8 @@ export function writeJobArtifacts(input: WriteJobArtifactsInput): JobReportPaths
     status: input.status,
     summary,
     changedFiles: [...input.changedFiles],
+    ...(input.artifactFiles?.length ? { artifactFiles: [...input.artifactFiles] } : {}),
+    ...(reviewInput ? { reviewInput } : {}),
     verification: compactVerification,
     ...(input.errorCode ? { errorCode: input.errorCode } : {}),
     reportPaths: storedReportPaths
@@ -125,6 +131,20 @@ export function writeJobArtifacts(input: WriteJobArtifactsInput): JobReportPaths
       "## Changed Files",
       "",
       ...changedFiles,
+      ...(input.artifactFiles?.length
+        ? ["", "## Artifact Files", "", ...input.artifactFiles.map((file) => `- \`${file}\``)]
+        : []),
+      ...(reviewInput
+        ? [
+            "",
+            "## Review Input Integrity",
+            "",
+            `Status: \`${reviewInput.status}\``,
+            ...reviewInput.attachments.map((attachment) =>
+              `- \`${attachment.path}\` sha256 \`${attachment.sha256}\`${attachment.base ? ` base \`${attachment.base}\`` : ""}${attachment.head ? ` head \`${attachment.head}\`` : ""}`
+            )
+          ]
+        : []),
       "",
       "## Verification",
       "",

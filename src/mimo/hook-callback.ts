@@ -55,6 +55,8 @@ export interface HookCallbackController {
   env: Record<string, string>;
   bindRunSession(sessionId: string): void;
   getRunSession(): string | undefined;
+  /** Returns an already accepted callback without starting the callback wait timer. */
+  getReceivedCallback(): MimoHookCallbackSummary | null;
   getDiagnostics(): string[];
   waitForCallback: () => Promise<MimoHookCallbackSummary | null>;
   close: () => Promise<void>;
@@ -108,10 +110,7 @@ export function toExecutionCallbackEvidence(
       }
     };
   }
-  const failureCauses = callback.guardFailure &&
-    !(callback.outcome === "completed" &&
-      callback.guardFailure.code === "write_scope_violation" &&
-      callback.guardFailure.path === "unknown")
+  const failureCauses = callback.guardFailure
     ? [{
         code: callback.guardFailure.code,
         stage: callback.guardFailure.code === "prompt_identity_mismatch"
@@ -258,11 +257,18 @@ function readAllowedPaths() {
 }
 
 function resolveWritePath(input) {
-  const state = input?.state ?? input;
-  const toolInput = state?.input ?? input?.input ?? input;
-  for (const field of WRITE_PATH_FIELD_PRIORITY) {
-    const value = pick(toolInput, field);
-    if (typeof value === "string" && value.trim()) return value.trim();
+  const candidates = [
+    input?.part?.state?.input,
+    input?.state?.input,
+    input?.part?.input,
+    input?.input,
+    input
+  ];
+  for (const toolInput of candidates) {
+    for (const field of WRITE_PATH_FIELD_PRIORITY) {
+      const value = pick(toolInput, field);
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
   }
   return undefined;
 }
@@ -404,6 +410,7 @@ export async function createHookCallbackController(
   fs.mkdirSync(callbackDir, { recursive: true });
 
   let settled = false;
+  let receivedCallback: MimoHookCallbackSummary | null = null;
   let timer: NodeJS.Timeout | null = null;
   let boundRunSession: string | undefined;
   const stagedCallbacks: MimoHookCallbackSummary[] = [];
@@ -420,6 +427,7 @@ export async function createHookCallbackController(
   const acceptCallback = (summary: MimoHookCallbackSummary) => {
     if (settled) return;
     settled = true;
+    receivedCallback = summary;
     clearCallbackTimer();
     fs.writeFileSync(callbackFile, JSON.stringify(summary, null, 2), "utf-8");
     resolveCallback(summary);
@@ -570,6 +578,7 @@ export async function createHookCallbackController(
     callbackFile,
     bindRunSession,
     getRunSession,
+    getReceivedCallback: () => receivedCallback,
     getDiagnostics: () => [...diagnostics],
     env: {
       ...buildBridgeRuntimeEnvironment(hookConfig.hookFile, process.env, {

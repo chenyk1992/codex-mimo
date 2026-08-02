@@ -133,6 +133,13 @@ describe("compose prompt semantics", () => {
     expect(prompt).toMatch(/idempotent.*repository evidence/i);
   });
 
+  it("binds compose worktree to its bridge-owned current directory", () => {
+    const prompt = buildComposePrompt({ workflow: getComposeWorkflow("worktree"), task: "Make an isolated edit." });
+    expect(prompt).toContain("only bridge-owned worktree");
+    expect(prompt).toContain("Do not create, remove, switch, checkout, branch, reset");
+    expect(prompt).toContain("control workspace or any external directory");
+  });
+
   it.each([
     ["dev", true],
     ["fix", true],

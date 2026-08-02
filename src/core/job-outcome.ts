@@ -37,6 +37,7 @@ export interface JobOutcome {
   summary: string;
   sessionId?: string | null;
   changedFiles?: string[];
+  artifactFiles?: string[];
   verification?: JobVerification[];
   acceptance?: JobAcceptanceSummary;
   executionCallback?: ExecutionCallbackSummary;
@@ -88,6 +89,13 @@ const UNACCEPTED_TASK_PATTERNS = [
 ] as const;
 
 const UNACCEPTED_TASK_ERROR = "MiMoCode did not receive or accept the task objective.";
+const UNFINISHED_TASK_ERROR = "MiMoCode explicitly reported that the task was not completed.";
+
+const TERMINAL_UNFINISHED_PATTERNS = [
+  /^(?:status|result|outcome)\s*[:\-]\s*(?:blocked|incomplete|unfinished|not completed)\b[\s\S]*$/i,
+  /^(?:the )?(?:task|job|run|implementation)\s+(?:is|was|remains)\s+(?:blocked|incomplete|unfinished|not completed)\b[\s\S]*$/i,
+  /^(?:i|we)\s+(?:am|are|was|were|remain|remained|cannot|can't|could not|did not|didn't)\b[\s\S]*(?:complete|finish|continue|proceed|implement)\b[\s\S]*$/i
+] as const;
 
 export function classifyRunOutcome(evidence: RunEvidence): JobOutcome {
   const context: OutcomeClassificationContext = {
@@ -287,11 +295,17 @@ function classifyExecutionFailure(
 
 export function detectUnacceptedTask(finalText: string | undefined): string | undefined {
   const text = finalText?.trim();
-  if (!text || text.length > 500 || text.includes("```")) return undefined;
-  const normalized = normalizeGreetingPrefix(text);
+  if (!text) return undefined;
+  const isLongResult = text.length > 500;
+  const semanticParagraphs = finalSemanticParagraphs(text);
+  const normalized = normalizeGreetingPrefix(semanticParagraphs.at(-1) ?? text);
   return UNACCEPTED_TASK_PATTERNS.some((pattern) => pattern.test(normalized))
     ? UNACCEPTED_TASK_ERROR
-    : undefined;
+    : isLongResult && semanticParagraphs.some((paragraph) =>
+      TERMINAL_UNFINISHED_PATTERNS.some((pattern) => pattern.test(paragraph))
+    )
+      ? UNFINISHED_TASK_ERROR
+      : undefined;
 }
 
 export function compactFailureCauses(causes: JobFailureCause[] | undefined): JobFailureCause[] | undefined {
@@ -304,12 +318,6 @@ export function compactFailureCauses(causes: JobFailureCause[] | undefined): Job
   const unique = new Map<string, JobFailureCause>();
   for (const cause of causes) {
     if (cause.code === "verification_failed" && hasSpecificVerificationCause) {
-      continue;
-    }
-    if (
-      cause.code === "write_scope_violation" &&
-      cause.suggestion?.trim().toLowerCase() === "blocked path: unknown"
-    ) {
       continue;
     }
     const key = JSON.stringify([
@@ -326,6 +334,15 @@ export function compactFailureCauses(causes: JobFailureCause[] | undefined): Job
 
 function normalizeGreetingPrefix(text: string): string {
   return text.replace(/^(?:hello|hi|hey)\b(?:[!.,]+\s*|\s+)/i, "").trim();
+}
+
+function finalSemanticParagraphs(text: string): string[] {
+  const paragraphs = text
+    .replace(/```[\s\S]*?(?:```|$)/g, "")
+    .split(/(?:\r?\n){2,}/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0 && !/^#{1,6}\s/.test(part));
+  return paragraphs.slice(-4);
 }
 
 function commonOutcomeFields(evidence: RunEvidence): Pick<

@@ -49,4 +49,29 @@ describe("mimo_jobs", () => {
     const result = await mimoJobs({ cwd, all: true });
     expect(result).toHaveLength(10);
   });
+
+  it("never exposes a persistent-worktree lease in job listings", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "compose", task: "Worktree", request: {} });
+    const ownerToken = "2b4a1a94-6d90-4c2d-baa5-6aed2da4c5a8";
+    const executionRoot = path.resolve(cwd, "..", `${path.basename(cwd)}-execution`);
+    updateJob(cwd, job.id, {
+      status: "completed",
+      executionWorkspaceLease: {
+        mode: "persistent",
+        jobId: job.id,
+        controlRoot: cwd,
+        executionRoot,
+        ownerMetadataPath: path.join(executionRoot, ".git", "owner.json"),
+        ownerToken,
+        branch: `codex-mimo/worktree/${job.id}`,
+        createdAt: "2026-08-02T00:00:00.000Z"
+      }
+    });
+
+    const serialized = JSON.stringify(await mimoJobs({ cwd, all: true }));
+    expect(serialized).not.toContain(ownerToken);
+    expect(serialized).not.toContain("executionWorkspaceLease");
+    expect(serialized).not.toContain("ownerMetadataPath");
+  });
 });

@@ -60,6 +60,11 @@ Phase 2 `mimo_resume` and
 `batchMode` to `auto` (default), `single`, or `sliced`. Compose `fix-ci`,
 `parallel`, `worktree`, `merge`, and `new-skill` already own their execution
 topology and run directly; the bridge strips `batchMode` for those workflows.
+`worktree` is retained in the platform state directory and may be resumed; it
+does not grant MiMoCode external-directory access or promote changes into the
+control checkout. `merge` requires pinned local `sourceRef`/`targetRef` values
+and non-empty bounded `allowedPaths`, and publishes only a new
+`refs/heads/codex-mimo/merge/<jobId>` integration ref.
 For sliceable roots, the orchestrator plans a slice manifest
 (`.codex-mimo/reports/<rootJobId>.slices.json`), persists
 `.codex-mimo/jobs/<chainId>.chain.json`, and runs slices sequentially — one at

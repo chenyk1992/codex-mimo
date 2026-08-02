@@ -48,6 +48,7 @@ describe("multi-source changed file detection", () => {
       toolUsePaths: ["generated/client.ts"]
     })).toEqual({
       files: ["generated/client.ts"],
+      artifactFiles: [],
       candidates: [],
       status: "complete",
       sources: ["scope_manifest"]
@@ -76,6 +77,7 @@ describe("multi-source changed file detection", () => {
       toolUsePaths: ["src/app.ts"]
     })).toMatchObject({
       files: [],
+      artifactFiles: [],
       candidates: ["src/app.ts"],
       status: "partial",
       sources: []
@@ -90,6 +92,7 @@ describe("multi-source changed file detection", () => {
       toolUsePaths: []
     })).toEqual({
       files: [],
+      artifactFiles: [],
       candidates: [],
       status: "complete",
       sources: ["git_fingerprint"]
@@ -121,6 +124,7 @@ describe("multi-source changed file detection", () => {
       }
     })).toEqual({
       files: ["src/new.ts"],
+      artifactFiles: [],
       candidates: [],
       status: "complete",
       sources: ["git_fingerprint", "git_diff"]
@@ -149,9 +153,68 @@ describe("multi-source changed file detection", () => {
       }
     })).toMatchObject({
       files: ["src/fallback.ts"],
+      artifactFiles: [],
       sources: ["git_diff"],
       status: "partial"
     });
+  });
+
+  it("separates declared build outputs from source changes without losing either", () => {
+    const result = detectChangedFiles({
+      cwd: "E:/repo",
+      gitStatusBefore: { short: "", dirty: false, fingerprints: {} },
+      gitStatusAfter: {
+        short: "?? src/app.ts\n?? out/classes/App.class",
+        dirty: true,
+        fingerprints: {
+          "src/app.ts": { status: "??", contentHash: "source" },
+          "out/classes/App.class": { status: "??", contentHash: "artifact" }
+        }
+      },
+      artifactPaths: ["out/**"],
+      toolUsePaths: ["src/app.ts", "out/classes/App.class"]
+    });
+
+    expect(result.files).toEqual(["src/app.ts"]);
+    expect(result.artifactFiles).toEqual(["out/classes/App.class"]);
+    expect(result.candidates).toEqual([]);
+  });
+
+  it("retains only declared artifacts when no business files changed", () => {
+    const result = detectChangedFiles({
+      cwd: "E:/repo",
+      gitStatusBefore: { short: "", dirty: false, fingerprints: {} },
+      gitStatusAfter: {
+        short: "?? build/classes/App.class",
+        dirty: true,
+        fingerprints: {
+          "build/classes/App.class": { status: "??", contentHash: "artifact" }
+        }
+      },
+      artifactPaths: ["build/**"]
+    });
+
+    expect(result.files).toEqual([]);
+    expect(result.artifactFiles).toEqual(["build/classes/App.class"]);
+    expect(result.status).toBe("complete");
+  });
+
+  it("does not classify ordinary source files as artifacts without a matching declaration", () => {
+    const result = detectChangedFiles({
+      cwd: "E:/repo",
+      gitStatusBefore: { short: "", dirty: false, fingerprints: {} },
+      gitStatusAfter: {
+        short: "?? src/generated.ts",
+        dirty: true,
+        fingerprints: {
+          "src/generated.ts": { status: "??", contentHash: "source" }
+        }
+      },
+      artifactPaths: ["build/**"]
+    });
+
+    expect(result.files).toEqual(["src/generated.ts"]);
+    expect(result.artifactFiles).toEqual([]);
   });
 
   it("fingerprints current workspace file content deterministically", () => {

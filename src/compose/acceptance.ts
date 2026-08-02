@@ -80,6 +80,7 @@ export interface DiffCheckOptions {
   allowedPaths?: string[];
   expectedWritesAllowed?: boolean;
   forbidCommits?: boolean;
+  requireMergeTopology?: boolean;
   gitHeadBefore?: GitHeadSnapshot;
   signal?: AbortSignal;
   captureStatus?: typeof captureGitStatus;
@@ -435,7 +436,7 @@ export async function runDiffAcceptanceSelfCheck(
     return { stage: "diff_check", outcome: "passed" };
   }
 
-  if (changedFiles.length === 0 && !status.dirty) {
+  if (changedFiles.length === 0 && !status.dirty && !options.requireMergeTopology) {
     return { stage: "diff_check", outcome: "passed" };
   }
 
@@ -448,7 +449,8 @@ export async function runDiffAcceptanceSelfCheck(
     commitChanges,
     diffText: diffSnapshot.diff,
     signal: options.signal,
-    forbidCommits: options.forbidCommits
+    forbidCommits: options.forbidCommits,
+    requireMergeTopology: options.requireMergeTopology
   });
 
   return {

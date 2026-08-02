@@ -27,7 +27,7 @@ Choose one work tool:
 | Current-diff review | `mimo_review` | `cwd`; optional `base` |
 | Repair from a CI log | `mimo_fix_ci` | `cwd`, log `file`, host acceptance; optional task |
 | Continue saved work | `mimo_resume` | `cwd`, parent `jobId`; optional acceptance/scope overrides |
-| Registered Compose workflow | `mimo_compose` | `cwd`, `workflow`, workflow-specific task/file |
+| Registered Compose workflow | `mimo_compose` | `cwd`, `workflow`, workflow-specific task/file; `merge` also requires local `sourceRef`, `targetRef`, and bounded `allowedPaths` |
 
 Control tools are `mimo_status`, `mimo_events`, `mimo_wait`, `mimo_result`, `mimo_cancel`, `mimo_jobs`, and `mimo_healthcheck`. Normal delivery uses only compact `mimo_status` and compact `mimo_result`; use the others only for explicit user requests or targeted diagnosis.
 

@@ -30,14 +30,13 @@ export function summarizeJobOutput(
     .filter(Boolean);
   if (!lines || lines.length === 0) return undefined;
 
-  const explicitSummary = lines.findIndex((line) =>
-    /^#{1,6}\s+(?:summary|result|assessment|摘要|总结|评估)\s*$/i.test(line));
-  const findingsSection = lines.findIndex((line) =>
-    /^#{1,6}\s+(?:findings?|issues?|问题)\s*$/i.test(line));
-  const preferredConclusion = lines.find((line) =>
+  const explicitSummary = findLastLineIndex(lines, isExplicitSummaryHeading);
+  const findingsSection = findLastLineIndex(lines, isFindingsHeading);
+  const preferredConclusion = [...lines].reverse().find((line) =>
     /^(?:#{1,6}\s+)?(?:\*{1,2})?(?:verdict|judgment|conclusion|finding|结论|结果|判定)(?:\*{1,2})?\s*[:：]/i
       .test(line)
   );
+  const synthesizedFindingsHeading = [...lines].reverse().find(isSynthesizedFindingsHeading);
   const substantive = (explicitSummary >= 0
     ? lines.slice(explicitSummary + 1).find(isSubstantiveSummaryLine)
     : undefined) ??
@@ -45,6 +44,8 @@ export function summarizeJobOutput(
     (findingsSection >= 0
       ? lines.slice(findingsSection + 1).find(isSubstantiveSummaryLine)
       : undefined) ??
+    synthesizedFindingsHeading ??
+    lines.find((line) => isSubstantiveSummaryLine(line) && !isGenericOpening(line)) ??
     lines.find(isSubstantiveSummaryLine) ??
     lines[0];
   const sentence = substantive.match(/^.*?[.!?。！？](?:\s|$)/)?.[0] ?? substantive;
@@ -63,6 +64,33 @@ export function summarizeJobOutput(
 function isSubstantiveSummaryLine(line: string): boolean {
   return !/^#{1,6}\s+/.test(line) &&
     !/^(?:---+|\*\*\*+|___+)$/.test(line);
+}
+
+function isExplicitSummaryHeading(line: string): boolean {
+  return /^#{1,6}\s+(?:summary|result|assessment|conclusion|verdict|摘要|总结|评估|结论|结果|判定)\s*$/i
+    .test(line);
+}
+
+function isFindingsHeading(line: string): boolean {
+  return /^#{1,6}\s+(?:findings?|issues?|问题)\s*$/i.test(line);
+}
+
+function isSynthesizedFindingsHeading(line: string): boolean {
+  return /^#{1,6}\s+synthesized\s+findings?\b(?:\s*[-—:：].+)?$/i.test(line);
+}
+
+function isGenericOpening(line: string): boolean {
+  return /^(?:i(?:'ve| have)|we(?:'ve| have))\s+(?:now\s+)?(?:have|gathered)\s+(?:all|enough|the necessary)\s+(?:the\s+)?(?:context|information|details)\b/i
+    .test(line) ||
+    /^(?:现在)?(?:我|我们)(?:已经|已)?(?:对.+)?(?:有了|具备了)(?:完整|充分|足够|必要).*(?:了解|上下文|信息|背景)/
+      .test(line);
+}
+
+function findLastLineIndex(lines: readonly string[], predicate: (line: string) => boolean): number {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (predicate(lines[index]!)) return index;
+  }
+  return -1;
 }
 
 export function readTextArtifact(file: string | undefined): string | undefined {

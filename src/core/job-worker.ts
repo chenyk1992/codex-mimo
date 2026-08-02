@@ -10,10 +10,15 @@ import {
   type WriteChainBootstrapDependencies
 } from "./job-definitions.js";
 import { appendJobLogLine, appendRawAndNormalizedEvent } from "./job-log.js";
-import { listWebhookSecretEnvironmentNames, readJob } from "./job-store.js";
+import {
+  listWebhookSecretEnvironmentNames,
+  readJob,
+  updateJobAuthoritative
+} from "./job-store.js";
 import {
   recoverPendingTransition,
   transitionJob,
+  transitionJobAfterGuardedAction,
   updateRunningJobObservation,
   updateRunningJobProcess,
   type JobTransition,
@@ -42,6 +47,9 @@ import {
   type GitStatusSnapshot
 } from "../git/diff.js";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   createHookCallbackController,
   toExecutionCallbackEvidence,
@@ -87,9 +95,50 @@ import {
   readExecutionEvidence,
   readExecutionEvents,
   updateExecutionEvidenceAttempts,
+  updateExecutionEvidenceMergeTransaction,
+  updateExecutionEvidenceWorkspace,
   writeExecutionEvidence,
   type JobExecutionEvidence
 } from "./job-execution-evidence.js";
+import {
+  remapPromptTransportToWorkspace,
+  verifyImmutablePromptAttachments
+} from "../mimo/prompt-transport.js";
+import {
+  disposeExecutionWorkspace,
+  prepareExecutionWorkspace,
+  type PreparedExecutionWorkspace
+} from "./execution-workspace.js";
+import {
+  applyWorkspacePromotion,
+  createWorkspacePromotionPlan
+} from "./workspace-promotion.js";
+import {
+  disposeGitExecutionWorkspace,
+  preparePersistentGitWorktree,
+  reopenPersistentGitWorktree,
+  prepareGitExecutionWorkspace,
+  type PersistentWorktreeLease,
+  type PreparedGitExecutionWorkspace
+} from "../git/worktree.js";
+import {
+  disposeMergeExecutionWorktree,
+  defaultMergeTransactionJournalPath,
+  MergePublicationUncertainError,
+  prepareMergeExecutionWorktreeFromSnapshot,
+  publishIntegrationBranch,
+  startHostMerge,
+  validateMergeTransactionJournalEvidence,
+  validateAndCommitMerge,
+  type PreparedMergeExecutionWorktree,
+  type MergeTransactionSnapshot
+} from "../git/merge-transaction.js";
+import {
+  createComposeReport,
+  updateComposeReportMergeTransaction,
+  writeComposeReport
+} from "../compose/report.js";
+import type { ExecutionWorkspaceLease, ExecutionWorkspaceSummary, MergeTransactionSummary, ReviewInputIntegrity } from "./jobs.js";
 
 export interface JobWorkerDependencies {
   bindJobDefinition?: (job: JobRecord) => BoundJobDefinition;
@@ -168,6 +217,8 @@ async function runOwnedJobWorker(
   const initial = requireJob(cwd, jobId);
   if (TERMINAL_STATUSES.has(initial.status)) return;
 
+  if (await recoverPublishedMergeTransaction(cwd, initial, deps)) return;
+
   const transition = deps.transitionJob ?? transitionJob;
   if (initial.status === "running") {
     if (isChainOrchestratorRoot(initial)) {
@@ -209,9 +260,15 @@ async function runOwnedJobWorker(
   let eventWrites = Promise.resolve();
   let eventWriteError: unknown;
   let executionGuard: JobExecutionGuard | undefined;
+  let executionWorkspace: PreparedExecutionWorkspace | PreparedGitExecutionWorkspace | PersistentWorktreeLease | undefined;
+  let persistentWorktree = false;
+  let executionWorkspaceRetained = false;
+  let executionWorkspaceDisposed = false;
+  let mergePrepared: PreparedMergeExecutionWorktree | undefined;
+  let mergeRetained = false;
 
   try {
-    const definition = (deps.bindJobDefinition ?? bindJobDefinition)(initial);
+    let definition = (deps.bindJobDefinition ?? bindJobDefinition)(initial);
     await transition(cwd, jobId, {
       status: "running",
       phase: "starting",
@@ -308,32 +365,140 @@ async function runOwnedJobWorker(
       }
     }
 
-    const prompt = await awaitWithAbort(
+    const controlPrompt = await awaitWithAbort(
       definition.buildPrompt(executionGuard.signal),
       executionGuard.signal
     );
     assertJobActive(cwd, jobId, executionGuard.signal);
+    let executionCwd = cwd;
+    let prompt = controlPrompt;
+    if (usesMergeWorkflow(initial.request) && !deps.bindJobDefinition) {
+      const snapshot = readMergeSnapshot(initial.request);
+      const parent = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-merge-"));
+      try {
+        mergePrepared = prepareMergeExecutionWorktreeFromSnapshot(snapshot, {
+          jobId: initial.id,
+          executionRoot: path.join(parent, "workspace")
+        });
+      } catch (error) {
+        try { fs.rmdirSync(parent); } catch { /* preserve merge failure */ }
+        throw error;
+      }
+      executionCwd = mergePrepared.executionRoot;
+      const preparedSummary = mergeTransactionSummary(mergePrepared, "prepared");
+      await updateJobAuthoritative(cwd, jobId, {
+        executionWorkspace: mergeExecutionWorkspaceSummary(mergePrepared, "prepared"),
+        mergeTransaction: preparedSummary
+      });
+      prompt = remapPromptTransportToWorkspace(controlPrompt, { controlRoot: cwd, executionRoot: executionCwd });
+      definition = bindJobDefinition(initial, { runtimeCwd: executionCwd });
+    } else if ((usesWorktreeWorkflow(initial.request) || initial.executionWorkspaceLease !== undefined) && !deps.bindJobDefinition) {
+      persistentWorktree = true;
+      const storedLease = initial.executionWorkspaceLease;
+      executionWorkspace = storedLease
+        ? reopenPersistentGitWorktree(storedLease)
+        : preparePersistentGitWorktree(cwd, initial.id);
+      if (!storedLease) {
+        await updateJobAuthoritative(cwd, jobId, { executionWorkspaceLease: toPersistentLease(executionWorkspace) });
+      }
+      executionCwd = executionWorkspace.executionRoot;
+      await updateJobAuthoritative(cwd, jobId, { executionWorkspace: executionWorkspaceSummary(executionWorkspace, "retained") });
+      prompt = remapPromptTransportToWorkspace(controlPrompt, { controlRoot: cwd, executionRoot: executionCwd });
+      if (!deps.bindJobDefinition) definition = bindJobDefinition(initial, { runtimeCwd: executionCwd });
+    } else if (shouldUseExecutionIsolation(initial, definition, deps)) {
+      executionWorkspace = prepareOwnedExecutionWorkspace(cwd);
+      executionCwd = executionWorkspace.executionRoot;
+      await updateJobAuthoritative(cwd, jobId, {
+        executionWorkspace: executionWorkspaceSummary(executionWorkspace, "prepared")
+      });
+      prompt = remapPromptTransportToWorkspace(controlPrompt, {
+        controlRoot: cwd,
+        executionRoot: executionCwd
+      });
+      // Test doubles intentionally retain their already-bound behavior. Real
+      // definitions are rebound so build args and finalization execute here.
+      if (!deps.bindJobDefinition) {
+        definition = bindJobDefinition(initial, { runtimeCwd: executionCwd });
+      }
+    }
+    let reviewInput: ReviewInputIntegrity | undefined;
+    if (prompt.immutableAttachments?.length) {
+      const beforeRun = verifyImmutablePromptAttachments(prompt);
+      reviewInput = {
+        attachments: prompt.immutableAttachments,
+        status: beforeRun.ok ? "verified_before_run" : "modified"
+      };
+      await updateJobAuthoritative(cwd, jobId, { reviewInput });
+      if (!beforeRun.ok) {
+        executionGuard.stop();
+        const result = await transitionRecoverably(cwd, jobId, {
+          status: "failed",
+          summary: "MiMoCode review input integrity verification failed before execution.",
+          error: "The frozen review diff attachment was modified or is unavailable.",
+          errorCode: "review_attachment_modified",
+          failureCauses: [{ code: "review_attachment_modified", stage: "prompt" }]
+        }, deps);
+        await afterTerminalTransition(cwd, result, deps);
+        return;
+      }
+    }
     const mimoArgs = definition.buildMimoArgs(prompt);
     const expectedQueryHash = crypto.createHash("sha256").update(prompt.message, "utf8").digest("hex");
     const allowedPaths = readAllowedPathsFromJobRequest(initial.request);
     const artifactPaths = readArtifactPathsFromJobRequest(initial.request);
     const monitoredPaths = mergeAllowedPathScopes(allowedPaths, artifactPaths);
-    const workspaceManifestBefore = captureScopedWorkspaceManifest(cwd, monitoredPaths);
+    const workspaceManifestBefore = captureScopedWorkspaceManifest(executionCwd, monitoredPaths);
     const captureStatus = deps.captureStatus ?? captureGitStatus;
     const captureHead = deps.captureHead ?? captureGitHead;
     const gitStatusBefore = withoutRuntimeStatus(
       await awaitWithAbort(
-        captureStatus(cwd, { signal: executionGuard.signal }),
+        captureStatus(executionCwd, { signal: executionGuard.signal }),
         executionGuard.signal
       )
     );
     assertJobActive(cwd, jobId, executionGuard.signal);
     const gitHeadBefore = await awaitWithAbort(
-      captureHead(cwd, { signal: executionGuard.signal }),
+      captureHead(executionCwd, { signal: executionGuard.signal }),
       executionGuard.signal
     );
     assertJobActive(cwd, jobId, executionGuard.signal);
-    if (workspaceManifestBefore) {
+    if (mergePrepared) {
+      const hostMerge = startHostMerge(mergePrepared);
+      if (hostMerge.status === "already_integrated") {
+        const summary = mergeTransactionSummary(mergePrepared, "already_integrated");
+        const noOpReportPaths = writeAlreadyIntegratedMergeArtifacts(
+          cwd,
+          requireJob(cwd, jobId),
+          summary,
+          gitStatusBefore,
+          gitHeadBefore
+        );
+        try {
+          disposeMergeExecutionWorktree(mergePrepared);
+          await updateJobAuthoritative(cwd, jobId, {
+            executionWorkspace: mergeExecutionWorkspaceSummary(mergePrepared, "disposed"),
+            mergeTransaction: summary
+          });
+        } catch (error) {
+          mergeRetained = true;
+          await updateJobAuthoritative(cwd, jobId, {
+            executionWorkspace: mergeExecutionWorkspaceSummary(mergePrepared, "retained", errorMessage(error)),
+            mergeTransaction: summary
+          });
+        }
+        executionGuard.stop();
+        const result = await transitionRecoverably(cwd, jobId, {
+          status: "completed",
+          summary: "Source branch is already integrated into the pinned target; no merge was published.",
+          changedFiles: [],
+          verification: [],
+          ...(Object.keys(noOpReportPaths).length ? { reportPaths: noOpReportPaths } : {})
+        }, deps);
+        await afterTerminalTransition(cwd, result, deps);
+        return;
+      }
+    }
+    if (workspaceManifestBefore && !executionWorkspace) {
       try {
         await persistJobCheckpoint(cwd, requireJob(cwd, jobId), {
           workspaceManifestBefore,
@@ -352,11 +517,11 @@ async function runOwnedJobWorker(
     stage = "hook";
     hook = await awaitWithAbort(
       (deps.createHookCallbackController ?? createHookCallbackController)({
-        cwd,
+        cwd: executionCwd,
         kind: initial.kind,
         expectedQueryHash,
         ...(allowedPaths ? { allowedPaths } : {}),
-        ...(usesWorktreeWorkflow(initial.request) ? { allowExternalDirectory: true } : {})
+        // Bridge-owned worktrees run under executionCwd; external directories are never granted.
       }),
       executionGuard.signal,
       {
@@ -398,7 +563,7 @@ async function runOwnedJobWorker(
     const isoNow = () => new Date(nowMs()).toISOString();
     let progressMonitor: { stop: () => void } | undefined;
     try {
-      run = await (deps.runMimoStreaming ?? runMimoCliStreaming)(cwd, mimoArgs, {
+      run = await (deps.runMimoStreaming ?? runMimoCliStreaming)(executionCwd, mimoArgs, {
           timeoutMs: readTimeout(initial.request),
           idleTimeoutMs: readIdleTimeout(initial.request),
           env: hook.env,
@@ -407,6 +572,7 @@ async function runOwnedJobWorker(
           onTerminationControl: ({ requestTermination }) => {
             progressMonitor = startProgressMonitor({
               cwd,
+              executionCwd,
               jobId,
               deps,
               nowMs,
@@ -414,7 +580,8 @@ async function runOwnedJobWorker(
               gitStatusBefore,
               workspaceManifestBefore,
               monitoredPaths,
-              requestTermination
+              requestTermination,
+              getReceivedCallbackEvidence: () => receivedCallbackEvidence(hook)
             });
           },
           onStart: async (pid) => {
@@ -535,12 +702,26 @@ async function runOwnedJobWorker(
     assertJobActive(cwd, jobId, executionGuard.signal);
 
     stage = "callback";
-    const callbackSummary = await waitForExecutionCallback(hook, executionGuard.signal);
-    const callbackEvidence = toExecutionCallbackEvidence(
-      hook.invocationId,
-      callbackSummary,
-      hook.getDiagnostics()
-    );
+    const skipCallbackWait = shouldSkipCallbackWait(run.terminationReason);
+    if (skipCallbackWait) {
+      bestEffortJobLog(
+        cwd,
+        jobId,
+        `Skipped session.post wait after ${run.terminationReason}; late or missing callback is diagnostic only.`
+      );
+    }
+    const callbackSummary = skipCallbackWait
+      ? hook.getReceivedCallback()
+      : await waitForExecutionCallback(hook, executionGuard.signal);
+    const callbackEvidence = callbackSummary
+      ? toExecutionCallbackEvidence(
+        hook.invocationId,
+        callbackSummary,
+        hook.getDiagnostics()
+      )
+      : undefined;
+    const callbackFailureCauses = callbackEvidence?.failureCauses;
+    const executionCallback = callbackEvidence?.executionCallback;
     if (eventSessionMismatch) {
       bestEffortJobLog(cwd, jobId, "JSONL event session mismatch detected.");
     }
@@ -563,49 +744,64 @@ async function runOwnedJobWorker(
     const captureCommitChanges = deps.captureCommitChanges ?? captureGitCommitChanges;
     const gitStatusAfter = withoutRuntimeStatus(
       await awaitWithAbort(
-        captureStatus(cwd, { signal: executionGuard.signal }),
+        captureStatus(executionCwd, { signal: executionGuard.signal }),
         executionGuard.signal
       )
     );
     assertJobActive(cwd, jobId, executionGuard.signal);
     const gitHeadAfter = await awaitWithAbort(
-      captureHead(cwd, { signal: executionGuard.signal }),
+      captureHead(executionCwd, { signal: executionGuard.signal }),
       executionGuard.signal
     );
     assertJobActive(cwd, jobId, executionGuard.signal);
     const capturedDiff = await awaitWithAbort(
-      captureDiff(cwd, "HEAD", { signal: executionGuard.signal }),
+      captureDiff(executionCwd, "HEAD", { signal: executionGuard.signal }),
       executionGuard.signal
     );
     assertJobActive(cwd, jobId, executionGuard.signal);
     const capturedCommitChanges = await awaitWithAbort(
-      captureCommitChanges(cwd, gitHeadBefore, gitHeadAfter, { signal: executionGuard.signal }),
+      captureCommitChanges(executionCwd, gitHeadBefore, gitHeadAfter, { signal: executionGuard.signal }),
       executionGuard.signal
     );
     assertJobActive(cwd, jobId, executionGuard.signal);
     const diff = withoutRuntimeDiff(capturedDiff);
     const commitChanges = withoutRuntimeCommitChanges(capturedCommitChanges);
-    const workspaceManifestAfter = captureScopedWorkspaceManifest(cwd, monitoredPaths);
+    const workspaceManifestAfter = captureScopedWorkspaceManifest(executionCwd, monitoredPaths);
     const changeDetection = detectChangedFiles({
-      cwd,
+      cwd: executionCwd,
       gitStatusBefore,
       gitStatusAfter,
       diff,
       commitChanges,
       manifestBefore: workspaceManifestBefore,
       manifestAfter: workspaceManifestAfter,
-      toolUsePaths: extractToolUseWritePaths(events)
+      toolUsePaths: extractToolUseWritePaths(events),
+      artifactPaths
     });
     const finalRepositoryFingerprint = fingerprintWorkspaceFiles(
-      cwd,
-      [...changeDetection.files, ...changeDetection.candidates]
+      executionCwd,
+      [...changeDetection.files, ...changeDetection.artifactFiles, ...changeDetection.candidates]
     );
-    const commandEvidence = extractPassingCommandEvidence(events, cwd).map((evidence) => ({
+    const commandEvidence = extractPassingCommandEvidence(events, executionCwd).map((evidence) => ({
       ...evidence,
       ...(evidence.afterLastWrite ? { repositoryFingerprint: finalRepositoryFingerprint } : {})
     }));
     const reconciliationWarnings: JobReconciliationWarning[] = [];
+    const afterRunAttachmentVerification = reviewInput
+      ? verifyImmutablePromptAttachments(prompt)
+      : undefined;
+    if (reviewInput && afterRunAttachmentVerification) {
+      reviewInput = {
+        ...reviewInput,
+        status: afterRunAttachmentVerification.ok ? "verified" : "modified"
+      };
+      await updateJobAuthoritative(cwd, jobId, { reviewInput });
+    }
+    const reviewAttachmentFailure = afterRunAttachmentVerification && !afterRunAttachmentVerification.ok
+      ? { code: "review_attachment_modified", stage: "prompt" as const }
+      : undefined;
     let evidenceReportPaths: JobRecord["reportPaths"] = {};
+    let executionEvidence: JobExecutionEvidence | undefined;
     try {
       const saved = writeExecutionEvidence(
         requireJob(cwd, jobId),
@@ -617,10 +813,14 @@ async function runOwnedJobWorker(
           },
           ...(runSessionId ? { runSessionId } : {}),
           ...(eventSessionMismatch ? { eventSessionMismatch: true as const } : {}),
-          ...(callbackEvidence.failureCauses
-            ? { failureCauses: callbackEvidence.failureCauses }
+          ...(callbackFailureCauses
+            ? { failureCauses: callbackFailureCauses }
             : {}),
-          executionCallback: callbackEvidence.executionCallback,
+          ...(executionCallback ? { executionCallback } : {}),
+          ...(reviewInput ? { reviewInput } : {}),
+          ...(executionWorkspace ? {
+            executionWorkspace: executionWorkspaceSummary(executionWorkspace, "prepared")
+          } : {}),
           gitStatusBefore,
           gitStatusAfter,
           gitHeadBefore,
@@ -633,6 +833,7 @@ async function runOwnedJobWorker(
         },
         extractFinalText(events)
       );
+      executionEvidence = saved.evidence;
       evidenceReportPaths = {
         executionEvidence: saved.evidencePath,
         ...(saved.resultPath ? { result: saved.resultPath } : {})
@@ -643,11 +844,52 @@ async function runOwnedJobWorker(
         stage: "artifacts"
       });
     }
+    const persistWorkspaceEvidence = (summary: ExecutionWorkspaceSummary): void => {
+      if (!executionEvidence) return;
+      try {
+        executionEvidence = updateExecutionEvidenceWorkspace(
+          requireJob(cwd, jobId),
+          executionEvidence,
+          summary
+        );
+      } catch {
+        // The job record remains the authoritative audit record.
+      }
+    };
+    const persistMergeEvidence = (
+      summary: MergeTransactionSummary,
+      terminal?: Parameters<typeof updateComposeReportMergeTransaction>[2]
+    ): void => {
+      if (executionEvidence) {
+        try {
+          executionEvidence = updateExecutionEvidenceMergeTransaction(
+            requireJob(cwd, jobId), executionEvidence, summary,
+            terminal ? {
+              status: terminal.status === "timeout" ? "timeout" : terminal.status === "passed" ? "completed" : "failed",
+              ...(terminal.errorCode ? { errorCode: terminal.errorCode } : {}),
+              ...(terminal.gitHeadAfter ? { gitHeadAfter: terminal.gitHeadAfter } : {}),
+              ...(terminal.gitCommits ? { gitCommits: terminal.gitCommits } : {})
+            } : undefined
+          );
+        } catch {
+          // Job metadata remains authoritative if the auxiliary evidence write fails.
+        }
+      }
+      try {
+        updateComposeReportMergeTransaction(requireJob(cwd, jobId).reportPaths?.json, summary, terminal);
+      } catch {
+        // Report augmentation is best-effort and must not replace the transaction outcome.
+      }
+    };
     await (deps.updateRunningJobObservation ?? updateRunningJobObservation)(cwd, jobId, {
       phase: "finalizing",
       ...(runSessionId ? { sessionId: runSessionId } : {}),
       changedFiles: changeDetection.files,
-      executionCallback: callbackEvidence.executionCallback,
+      ...(changeDetection.artifactFiles.length
+        ? { artifactFiles: changeDetection.artifactFiles }
+        : {}),
+      ...(executionCallback ? { executionCallback } : {}),
+      ...(reviewInput ? { reviewInput } : {}),
       reportPaths: {
         ...requireJob(cwd, jobId).reportPaths,
         ...evidenceReportPaths
@@ -674,8 +916,13 @@ async function runOwnedJobWorker(
       events,
       ...(runSessionId ? { runSessionId } : {}),
       ...(eventSessionMismatch ? { eventSessionMismatch: true } : {}),
-      ...(callbackEvidence.failureCauses ? { failureCauses: callbackEvidence.failureCauses } : {}),
-      executionCallback: callbackEvidence.executionCallback,
+      ...(callbackFailureCauses || reviewAttachmentFailure
+        ? { failureCauses: [
+            ...(callbackFailureCauses ?? []),
+            ...(reviewAttachmentFailure ? [reviewAttachmentFailure] : [])
+          ] }
+        : {}),
+      ...(executionCallback ? { executionCallback } : {}),
       gitStatusBefore,
       gitStatusAfter,
       gitHeadBefore,
@@ -685,30 +932,367 @@ async function runOwnedJobWorker(
       changeDetection,
       commandEvidence,
       finalRepositoryFingerprint,
+      controlCwd: cwd,
+      executionCwd,
       ...(reconciliationWarnings.length > 0
         ? { reconciliationWarnings }
         : {}),
       signal: executionGuard.signal
     };
-    const outcome = await finalizeWithRetry(
+    if (reviewAttachmentFailure) {
+      executionGuard.stop();
+      const result = await transitionRecoverably(cwd, jobId, {
+        status: "failed",
+        summary: "MiMoCode review input changed during execution; the review was rejected.",
+        error: "The frozen review diff attachment no longer matched its SHA-256.",
+        errorCode: "review_attachment_modified",
+        ...(executionCallback ? { executionCallback } : {}),
+        ...(evidenceReportPaths.executionEvidence
+          ? { reportPaths: {
+              ...requireJob(cwd, jobId).reportPaths,
+              ...evidenceReportPaths
+            } }
+          : {}),
+        failureCauses: [reviewAttachmentFailure]
+      }, deps);
+      await afterTerminalTransition(cwd, result, deps);
+      return;
+    }
+    let outcome = await finalizeWithRetry(
       requireJob(cwd, jobId),
       definition,
       context,
       executionGuard.signal
     );
 
+    if (run.terminationReason === "host_abort" && skipCallbackWait) {
+      outcome = {
+        ...outcome,
+        status: "failed",
+        summary: "MiMoCode execution failed.",
+        error: "MiMoCode run was aborted by the host.",
+        errorCode: "mimo_exit_nonzero",
+        ...(executionCallback ? { executionCallback } : {})
+      };
+    }
+
+    if (executionWorkspace && gitHeadBefore.oid !== gitHeadAfter.oid) {
+      executionWorkspaceRetained = true;
+      const summary = executionWorkspaceSummary(
+        executionWorkspace,
+        "retained",
+        undefined,
+        undefined,
+        "MiMoCode created a Git commit in the isolated execution workspace."
+      );
+      await updateJobAuthoritative(cwd, jobId, { executionWorkspace: summary });
+      persistWorkspaceEvidence(summary);
+      const commitCause = { code: "commit_not_allowed", stage: "diff_check" as const };
+      outcome = {
+        ...outcome,
+        status: outcome.status === "cancelled" || outcome.status === "timeout"
+          ? outcome.status
+          : "failed",
+        summary: "MiMoCode created a Git commit in the isolated execution workspace.",
+        error: "Write jobs must leave changes uncommitted so the bridge can validate and promote them safely.",
+        errorCode: "commit_not_allowed",
+        causes: [commitCause, ...(outcome.causes ?? [])]
+      };
+    }
+
+    let committedMerge: ReturnType<typeof validateAndCommitMerge> | undefined;
+    if (mergePrepared && outcome.status === "completed") {
+      try {
+        committedMerge = validateAndCommitMerge({
+          prepared: mergePrepared,
+          allowedPaths: allowedPaths ?? [],
+          // The host owns this commit and must remain non-interactive even in
+          // a fresh repository without user.name/user.email configured.
+          author: { name: "Codex MiMo Bridge", email: "codex-mimo@local" }
+        });
+        const summary = {
+            ...mergeTransactionSummary(mergePrepared, "merged"),
+            mergeOid: committedMerge.mergeOid,
+            // Persist before guarded publication. A crash in the next narrow
+            // window can recover this path and prove whether CAS ran.
+            journalPath: defaultMergeTransactionJournalPath(mergePrepared)
+          };
+        await updateJobAuthoritative(cwd, jobId, { mergeTransaction: summary });
+        persistMergeEvidence(summary);
+        outcome = { ...outcome, changedFiles: committedMerge.changedFiles };
+      } catch (error) {
+        mergeRetained = true;
+        const reason = errorMessage(error);
+        const summary = mergeTransactionSummary(mergePrepared, "retained");
+        await updateJobAuthoritative(cwd, jobId, {
+          executionWorkspace: mergeExecutionWorkspaceSummary(mergePrepared, "retained", reason),
+          mergeTransaction: summary
+        });
+        persistMergeEvidence(summary);
+        outcome = {
+          ...outcome,
+          status: "failed",
+          summary: "Merge transaction validation failed; the execution worktree was retained.",
+          error: reason,
+          errorCode: "merge_validation_failed",
+          causes: [{ code: "merge_validation_failed", stage: "diff_check" }, ...(outcome.causes ?? [])]
+        };
+      }
+    }
+
+    let promotionPlan: ReturnType<typeof createWorkspacePromotionPlan> | undefined;
+    if (executionWorkspace && outcome.status === "completed") {
+      promotionPlan = createWorkspacePromotionPlan({
+        baseline: executionWorkspace.baseline,
+        executionRoot: executionCwd,
+        // An absent user scope keeps the existing unrestricted-write contract;
+        // runtime directories are excluded by the workspace manifest itself.
+        allowedPaths,
+        artifactPaths
+      });
+      if (!promotionPlan.passed) {
+        executionWorkspaceRetained = true;
+        persistWorkspaceEvidence(executionWorkspaceSummary(
+          executionWorkspace,
+          "retained",
+          undefined,
+          undefined,
+          promotionPlan.reason
+        ));
+        outcome = {
+          ...outcome,
+          status: "failed",
+          summary: promotionPlan.reason ?? "Execution changes failed promotion scope validation.",
+          error: promotionPlan.reason ?? "Execution changes failed promotion scope validation.",
+          errorCode: promotionPlan.failureCode === "promotion_scope_violation"
+            ? "write_scope_violation"
+            : "promotion_apply_failed",
+          causes: [{
+            code: promotionPlan.failureCode ?? "promotion_apply_failed",
+            stage: "scope_check"
+          }]
+        };
+      }
+    }
+    // A persistent Compose worktree is deliberately never promoted. The pure
+    // promotion plan above remains the final scope audit.
+    if (persistentWorktree && promotionPlan?.passed) {
+      executionWorkspaceRetained = true;
+      persistWorkspaceEvidence(executionWorkspaceSummary(executionWorkspace!, "retained"));
+    }
+    if (mergePrepared && outcome.status !== "completed" && !mergeRetained) {
+      mergeRetained = true;
+      const existing = requireJob(cwd, jobId).mergeTransaction;
+      const summary: MergeTransactionSummary = {
+        ...(existing ?? mergeTransactionSummary(mergePrepared, "retained")),
+        status: "retained"
+      };
+      await updateJobAuthoritative(cwd, jobId, {
+        executionWorkspace: mergeExecutionWorkspaceSummary(
+          mergePrepared,
+          "retained",
+          outcome.error ?? outcome.summary
+        ),
+        mergeTransaction: summary
+      });
+      persistMergeEvidence(summary);
+    }
+    if (executionWorkspace && outcome.status !== "completed" && !executionWorkspaceRetained) {
+      executionWorkspaceRetained = true;
+      await updateJobAuthoritative(cwd, jobId, {
+        executionWorkspace: executionWorkspaceSummary(executionWorkspace, "retained")
+      });
+      persistWorkspaceEvidence(executionWorkspaceSummary(executionWorkspace, "retained"));
+    }
+
     assertJobActive(cwd, jobId, executionGuard.signal);
     executionGuard.stop();
     const { causes, ...transitionFields } = outcome;
     const durableEvidence = requireJob(cwd, jobId);
-    const result = await transition(cwd, jobId, {
+    const completedTransition = {
       ...transitionFields,
       reportPaths: {
         ...durableEvidence.reportPaths,
         ...transitionFields.reportPaths
       },
       ...(causes ? { failureCauses: causes } : {})
-    });
+    };
+    let result: JobTransitionResult;
+    if (mergePrepared && committedMerge && outcome.status === "completed" && !deps.transitionJob) {
+      try {
+        result = await transitionJobAfterGuardedAction(cwd, jobId, completedTransition, () => {
+          const published = publishIntegrationBranch({ prepared: mergePrepared!, merge: committedMerge! });
+          return {
+            mergeTransaction: {
+              ...mergeTransactionSummary(mergePrepared!, "published"),
+              mergeOid: committedMerge!.mergeOid,
+              integrationRef: published.integrationRef,
+              journalPath: published.journalPath
+            }
+          };
+        });
+      } catch (error) {
+        const uncertainJournalPath = error instanceof MergePublicationUncertainError
+          ? error.journalPath
+          : undefined;
+        const uncertain = uncertainJournalPath
+          ? validateMergeTransactionJournalEvidence(cwd, uncertainJournalPath)
+          : undefined;
+        if (uncertain?.publication === "published") {
+          const summary = {
+            ...mergeTransactionSummary(mergePrepared, "published"),
+            mergeOid: committedMerge.mergeOid,
+            integrationRef: uncertain.journal.integrationRef,
+            journalPath: uncertainJournalPath
+          };
+          await updateJobAuthoritative(cwd, jobId, { mergeTransaction: summary });
+          persistMergeEvidence(summary);
+          result = await transition(cwd, jobId, completedTransition);
+        } else {
+          mergeRetained = true;
+          const reason = uncertain?.reason ?? errorMessage(error);
+          const summary = { ...mergeTransactionSummary(mergePrepared, "retained"), mergeOid: committedMerge.mergeOid,
+            ...(error instanceof MergePublicationUncertainError ? { journalPath: error.journalPath } : {}) };
+        await updateJobAuthoritative(cwd, jobId, {
+          executionWorkspace: mergeExecutionWorkspaceSummary(mergePrepared, "retained", reason),
+          mergeTransaction: summary
+        });
+        persistMergeEvidence(summary);
+        result = await transition(cwd, jobId, {
+          ...completedTransition,
+          status: "failed",
+          summary: "Merge integration branch was not published; the execution worktree was retained.",
+          error: reason,
+          errorCode: "merge_publish_failed",
+          failureCauses: [{ code: "merge_publish_failed", stage: "execution" }]
+        });
+        }
+      }
+    } else if (executionWorkspace && !persistentWorktree && promotionPlan?.passed && outcome.status === "completed" && !deps.transitionJob) {
+      try {
+        result = await transitionJobAfterGuardedAction(cwd, jobId, completedTransition, () => {
+          const applied = applyWorkspacePromotion({
+            controlRoot: cwd,
+            executionRoot: executionCwd,
+            baseline: executionWorkspace!.baseline,
+            plan: promotionPlan!
+          });
+          if (!applied.passed) throw new PromotionApplyError(applied);
+          const summary = executionWorkspaceSummary(executionWorkspace!, "promoted", applied.journalPath);
+          persistWorkspaceEvidence(summary);
+          return { executionWorkspace: summary };
+        });
+      } catch (error) {
+        if (!(error instanceof PromotionApplyError)) throw error;
+        executionWorkspaceRetained = true;
+        const conflict = error.applied.failureCode === "promotion_conflict";
+        const summary = executionWorkspaceSummary(
+          executionWorkspace,
+          "retained",
+          error.applied.journalPath,
+          error.applied.conflictPaths,
+          error.applied.reason
+        );
+        persistWorkspaceEvidence(summary);
+        result = await transition(cwd, jobId, {
+          ...completedTransition,
+          status: conflict ? "needs_input" : "failed",
+          summary: error.applied.reason ?? "Execution changes could not be promoted.",
+          error: error.applied.reason ?? "Execution changes could not be promoted.",
+          errorCode: error.applied.failureCode ?? "promotion_apply_failed",
+          failureCauses: [{
+            code: error.applied.failureCode ?? "promotion_apply_failed",
+            stage: conflict ? "scope_check" : "execution"
+          }],
+          reportPaths: {
+            ...completedTransition.reportPaths,
+            ...requireJob(cwd, jobId).reportPaths
+          },
+          // The normal transition owns lifecycle; persist retained metadata
+          // before it when a test-injected transition implementation is used.
+        });
+        await updateJobAuthoritative(cwd, jobId, { executionWorkspace: summary });
+      }
+    } else {
+      result = await transition(cwd, jobId, completedTransition);
+    }
+    if (executionWorkspace && !persistentWorktree && !executionWorkspaceRetained && result.job.status === "completed") {
+      try {
+        await persistJobCheckpoint(cwd, result.job, {
+          changedFiles: outcome.changedFiles ?? changeDetection.files,
+          sourceCwd: cwd
+        });
+      } catch (error) {
+        bestEffortJobLog(cwd, jobId, `Failed to refresh the promoted checkpoint: ${errorMessage(error)}`);
+      }
+    }
+    if (mergePrepared && result.job.status === "completed" && !mergeRetained) {
+      try {
+        disposeMergeExecutionWorktree(mergePrepared);
+        const current = requireJob(cwd, jobId).mergeTransaction;
+        await updateJobAuthoritative(cwd, jobId, {
+          executionWorkspace: mergeExecutionWorkspaceSummary(mergePrepared, "disposed"),
+          ...(current ? { mergeTransaction: current } : {})
+        });
+      } catch (error) {
+        mergeRetained = true;
+        await updateJobAuthoritative(cwd, jobId, {
+          executionWorkspace: mergeExecutionWorkspaceSummary(mergePrepared, "retained", errorMessage(error))
+        });
+      }
+    }
+    if (mergePrepared) {
+      const summary = requireJob(cwd, jobId).mergeTransaction;
+      if (summary) {
+        // Successful merge worktrees are disposed before this audit hook. The
+        // host-verified merge OID is therefore the only trustworthy final HEAD.
+        const terminalHead = summary.mergeOid
+          ? { oid: summary.mergeOid, short: summary.mergeOid.slice(0, 12), subject: "Bridge-created merge commit" }
+          : await captureHead(executionCwd).catch(() => undefined);
+        const terminalStatus = result.job.status === "timeout"
+          ? "timeout" as const
+          : result.job.status === "completed"
+            ? "passed" as const
+            : "failed" as const;
+        persistMergeEvidence(summary, {
+          status: terminalStatus,
+          ...(result.job.errorCode ? { errorCode: result.job.errorCode } : {}),
+          ...(result.job.changedFiles.length ? { changedFiles: result.job.changedFiles } : {}),
+          ...(terminalHead ? { gitHeadAfter: terminalHead } : {}),
+          ...(summary.mergeOid ? { gitCommits: [summary.mergeOid] } : {})
+        });
+      }
+    }
+    if (executionWorkspace && persistentWorktree && result.job.status === "completed") {
+      try {
+        await persistJobCheckpoint(cwd, result.job, {
+          changedFiles: outcome.changedFiles ?? changeDetection.files,
+          sourceCwd: executionCwd
+        });
+      } catch (error) {
+        bestEffortJobLog(cwd, jobId, `Failed to persist persistent-worktree checkpoint: ${errorMessage(error)}`);
+      }
+    }
+    if (executionWorkspace && !persistentWorktree && !executionWorkspaceRetained && result.job.status === "completed") {
+      try {
+        disposeOwnedExecutionWorkspace(executionWorkspace);
+        executionWorkspaceDisposed = true;
+        await updateJobAuthoritative(cwd, jobId, {
+          executionWorkspace: executionWorkspaceSummary(executionWorkspace, "disposed")
+        });
+      } catch (error) {
+        executionWorkspaceRetained = true;
+        await updateJobAuthoritative(cwd, jobId, {
+          executionWorkspace: executionWorkspaceSummary(
+            executionWorkspace,
+            "retained",
+            undefined,
+            undefined,
+            `Promotion completed, but workspace cleanup was retained: ${errorMessage(error)}`
+          )
+        });
+      }
+    }
     await afterTerminalTransition(cwd, result, deps);
   } catch (error) {
     if (executionGuard) {
@@ -742,6 +1326,15 @@ async function runOwnedJobWorker(
         }
       }
     }
+    if (executionWorkspace && !executionWorkspaceDisposed && !executionWorkspaceRetained) {
+      try {
+        await updateJobAuthoritative(cwd, jobId, {
+          executionWorkspace: executionWorkspaceSummary(executionWorkspace, "retained")
+        });
+      } catch {
+        // The failure transition remains authoritative if the audit patch cannot persist.
+      }
+    }
   }
 }
 
@@ -750,6 +1343,22 @@ async function waitForExecutionCallback(
   signal: AbortSignal
 ): Promise<Awaited<ReturnType<HookCallbackController["waitForCallback"]>>> {
   return awaitWithAbort(hook.waitForCallback(), signal);
+}
+
+function receivedCallbackEvidence(
+  hook: HookCallbackController | undefined
+): ReturnType<typeof toExecutionCallbackEvidence> | undefined {
+  const callback = hook?.getReceivedCallback();
+  if (!hook || !callback) return undefined;
+  return toExecutionCallbackEvidence(hook.invocationId, callback, hook.getDiagnostics());
+}
+
+function shouldSkipCallbackWait(reason: TerminationReason | undefined): boolean {
+  return reason === "process_timeout" ||
+    reason === "idle_timeout" ||
+    reason === "progress_timeout" ||
+    reason === "user_cancelled" ||
+    reason === "host_abort";
 }
 
 interface AbortAwareAwaitOptions<T> {
@@ -873,6 +1482,17 @@ async function reconcilePersistedExecution(
   evidence: JobExecutionEvidence,
   deps: JobWorkerDependencies
 ): Promise<void> {
+  if (job.executionWorkspace) {
+    const result = await transitionRecoverably(cwd, job.id, {
+      status: "needs_input",
+      summary: "The isolated execution workspace was retained after an interrupted worker and requires review before recovery.",
+      error: "Automatic reconciliation never promotes or completes an interrupted isolated execution workspace.",
+      errorCode: "isolation_recovery_required"
+    }, deps);
+    await afterTerminalTransition(cwd, result, deps);
+    return;
+  }
+
   if (job.cancellationRequestedAt) {
     const cancelled = await transitionRecoverably(cwd, job.id, {
       status: "cancelled",
@@ -885,6 +1505,19 @@ async function reconcilePersistedExecution(
 
   const controller = new AbortController();
   const definition = (deps.bindJobDefinition ?? bindJobDefinition)(job);
+  if (evidence.reviewInput?.status === "modified") {
+    const result = await transitionRecoverably(cwd, job.id, {
+      status: "failed",
+      summary: "MiMoCode review input changed during execution; the review was rejected.",
+      error: "The frozen review diff attachment no longer matched its SHA-256.",
+      errorCode: "review_attachment_modified",
+      ...(evidence.executionCallback ? { executionCallback: evidence.executionCallback } : {}),
+      ...(job.reportPaths ? { reportPaths: job.reportPaths } : {}),
+      failureCauses: [{ code: "review_attachment_modified", stage: "prompt" }]
+    }, deps);
+    await afterTerminalTransition(cwd, result, deps);
+    return;
+  }
   const context: JobExecutionFinalizeContext = {
     run: {
       stdout: "",
@@ -902,6 +1535,7 @@ async function reconcilePersistedExecution(
     ...(evidence.executionCallback
       ? { executionCallback: evidence.executionCallback }
       : {}),
+    ...(evidence.reviewInput ? { reviewInput: evidence.reviewInput } : {}),
     ...(evidence.gitStatusBefore ? { gitStatusBefore: evidence.gitStatusBefore } : {}),
     ...(evidence.gitStatusAfter ? { gitStatusAfter: evidence.gitStatusAfter } : {}),
     ...(evidence.gitHeadBefore ? { gitHeadBefore: evidence.gitHeadBefore } : {}),
@@ -1215,6 +1849,7 @@ function readNonNegativeIntFromRequest(
 
 interface ProgressMonitorOptions {
   cwd: string;
+  executionCwd?: string;
   jobId: string;
   deps: JobWorkerDependencies;
   nowMs: () => number;
@@ -1223,6 +1858,7 @@ interface ProgressMonitorOptions {
   workspaceManifestBefore?: WorkspaceManifest;
   monitoredPaths?: string[];
   requestTermination: (reason: TerminationReason) => Promise<void>;
+  getReceivedCallbackEvidence?: () => ReturnType<typeof toExecutionCallbackEvidence> | undefined;
 }
 
 function startProgressMonitor(options: ProgressMonitorOptions): { stop: () => void } {
@@ -1261,6 +1897,7 @@ function startProgressMonitor(options: ProgressMonitorOptions): { stop: () => vo
           const stallErrorCode = classifyStallReasonForJob(latest, options.deps);
           const confirmed = confirmProcessTerminated(latest, options.deps);
           const reconciled = await reconcileStalledJob(options, latest);
+          const callbackEvidence = options.getReceivedCallbackEvidence?.();
           await writeCheckpoint(options.cwd, options.jobId, reconciled);
           if (confirmed) {
             const summary = publicProgressSummary({
@@ -1274,6 +1911,12 @@ function startProgressMonitor(options: ProgressMonitorOptions): { stop: () => vo
               error: summary,
               errorCode: stallErrorCode,
               changedFiles: reconciled.changedFiles,
+              ...(callbackEvidence?.failureCauses
+                ? { failureCauses: callbackEvidence.failureCauses }
+                : {}),
+              ...(callbackEvidence?.executionCallback
+                ? { executionCallback: callbackEvidence.executionCallback }
+                : {}),
               ...(reconciled.reconciliation
                 ? { reconciliation: reconciled.reconciliation }
                 : {})
@@ -1291,6 +1934,12 @@ function startProgressMonitor(options: ProgressMonitorOptions): { stop: () => vo
               error: summary,
               errorCode: "stalled_process_alive",
               changedFiles: reconciled.changedFiles,
+              ...(callbackEvidence?.failureCauses
+                ? { failureCauses: callbackEvidence.failureCauses }
+                : {}),
+              ...(callbackEvidence?.executionCallback
+                ? { executionCallback: callbackEvidence.executionCallback }
+                : {}),
               ...(reconciled.reconciliation
                 ? { reconciliation: reconciled.reconciliation }
                 : {})
@@ -1337,21 +1986,25 @@ async function reconcileStalledJob(
 ): Promise<JobRecord> {
   try {
     const captureStatus = options.deps.captureStatus ?? captureGitStatus;
-    const gitStatusAfter = withoutRuntimeStatus(await captureStatus(options.cwd));
+    const gitStatusAfter = withoutRuntimeStatus(await captureStatus(options.executionCwd ?? options.cwd));
     const workspaceManifestAfter = captureScopedWorkspaceManifest(
-      options.cwd,
+      options.executionCwd ?? options.cwd,
       options.monitoredPaths
     );
     const changeDetection = detectChangedFiles({
-      cwd: options.cwd,
+      cwd: options.executionCwd ?? options.cwd,
       gitStatusBefore: options.gitStatusBefore,
       gitStatusAfter,
       manifestBefore: options.workspaceManifestBefore,
-      manifestAfter: workspaceManifestAfter
+      manifestAfter: workspaceManifestAfter,
+      artifactPaths: readArtifactPathsFromJobRequest(job.request)
     });
     return {
       ...job,
       changedFiles: changeDetection.files,
+      ...(changeDetection.artifactFiles.length
+        ? { artifactFiles: changeDetection.artifactFiles }
+        : {}),
       reconciliation: {
         status: changeDetection.status === "complete" ? "complete" : "degraded",
         changeDetection: {
@@ -1416,6 +2069,288 @@ function confirmProcessTerminated(job: JobRecord, deps: JobWorkerDependencies): 
 function jobDeadlineExpired(job: JobRecord, now = Date.now()): boolean {
   const startedAt = Date.parse(job.startedAt ?? "");
   return Number.isFinite(startedAt) && now - startedAt >= readTimeout(job.request);
+}
+
+function shouldUseExecutionIsolation(
+  job: JobRecord,
+  definition: BoundJobDefinition,
+  deps: JobWorkerDependencies
+): boolean {
+  // Dependency-injected definitions are deterministic worker-test harnesses;
+  // their simulated writes intentionally target the supplied control cwd.
+  if (deps.bindJobDefinition) return false;
+  if (!definition.executionPolicy.writesAllowed) return false;
+  return !usesWorktreeWorkflow(job.request) && !usesMergeWorkflow(job.request);
+}
+
+class PromotionApplyError extends Error {
+  constructor(readonly applied: ReturnType<typeof applyWorkspacePromotion>) {
+    super(applied.reason ?? "Execution changes could not be promoted.");
+  }
+}
+
+function usesMergeWorkflow(request: unknown): boolean {
+  if (typeof request !== "object" || request === null) return false;
+  const record = request as { workflow?: unknown; checkpoint?: { workflow?: unknown } };
+  return record.workflow === "merge" || record.checkpoint?.workflow === "merge";
+}
+
+/**
+ * A process can stop after the create-only ref CAS but before its terminal
+ * transition is durable. The journal is the authority in that narrow window;
+ * never rerun MiMoCode or attempt a second CAS.
+ */
+async function recoverPublishedMergeTransaction(
+  cwd: string,
+  job: JobRecord,
+  deps: JobWorkerDependencies
+): Promise<boolean> {
+  if (!usesMergeWorkflow(job.request) ||
+      (job.mergeTransaction?.status !== "published" && job.mergeTransaction?.status !== "merged") ||
+      !job.mergeTransaction.journalPath) return false;
+  let evidence: ReturnType<typeof validateMergeTransactionJournalEvidence> | undefined;
+  try {
+    evidence = validateMergeTransactionJournalEvidence(cwd, job.mergeTransaction.journalPath);
+  } catch {
+    // A merged transaction without a readable journal was interrupted before
+    // publication could be proven; retain it rather than rerunning MiMoCode.
+  }
+  if (evidence?.publication !== "published") {
+    await updateJobAuthoritative(cwd, job.id, {
+      executionWorkspace: job.executionWorkspace
+        ? { ...job.executionWorkspace, status: "retained", reason: evidence?.reason ?? "Merge publication recovery requires review." }
+        : undefined,
+      mergeTransaction: { ...job.mergeTransaction, status: "retained" }
+    });
+    const retained = await transitionRecoverably(cwd, job.id, {
+      status: "failed",
+      summary: "Published-merge recovery evidence is inconsistent; the transaction was retained for review.",
+      error: evidence?.reason ?? "Merge publication journal did not prove the integration ref.",
+      errorCode: "merge_publication_recovery_required",
+      failureCauses: [{ code: "merge_publication_recovery_required", stage: "execution" }]
+    }, deps);
+    await afterTerminalTransition(cwd, retained, deps);
+    return true;
+  }
+  if (job.status === "queued") {
+    await (deps.transitionJob ?? transitionJob)(cwd, job.id, {
+      status: "running", phase: "finalizing", summary: "Recovering published merge transaction."
+    });
+  }
+  const publishedSummary: MergeTransactionSummary = {
+    ...job.mergeTransaction,
+    status: "published",
+    ...(evidence.journal.mergeOid ? { mergeOid: evidence.journal.mergeOid } : {}),
+    ...(evidence.journal.integrationRef ? { integrationRef: evidence.journal.integrationRef } : {}),
+    journalPath: job.mergeTransaction.journalPath
+  };
+  await updateJobAuthoritative(cwd, job.id, { mergeTransaction: publishedSummary });
+  const current = requireJob(cwd, job.id);
+  try {
+    const execution = readExecutionEvidence(current);
+    if (execution) updateExecutionEvidenceMergeTransaction(current, execution, publishedSummary);
+    updateComposeReportMergeTransaction(current.reportPaths?.json, publishedSummary);
+  } catch {
+    // The durable job record and journal remain authoritative.
+  }
+  const completed = await transitionRecoverably(cwd, job.id, {
+    status: "completed",
+    summary: "Recovered a previously published merge integration branch.",
+    changedFiles: current.changedFiles,
+    verification: current.verification,
+    ...(current.reportPaths ? { reportPaths: current.reportPaths } : {})
+  }, deps);
+  try {
+    updateComposeReportMergeTransaction(current.reportPaths?.json, publishedSummary);
+  } catch {
+    // A durable job state and journal evidence are sufficient for recovery.
+  }
+  await afterTerminalTransition(cwd, completed, deps);
+  return true;
+}
+
+function writeAlreadyIntegratedMergeArtifacts(
+  cwd: string,
+  job: JobRecord,
+  mergeTransaction: MergeTransactionSummary,
+  gitStatus: GitStatusSnapshot,
+  gitHead: Awaited<ReturnType<typeof captureGitHead>>
+): NonNullable<JobRecord["reportPaths"]> {
+  const reportDir = path.join(cwd, ".codex-mimo", "reports");
+  const eventsDir = path.join(cwd, ".codex-mimo", "events");
+  const diffsDir = path.join(cwd, ".codex-mimo", "diffs");
+  const diff = { changedFiles: [], diffStat: "", diff: "" };
+  const finalText = "Source branch was already integrated into the pinned target. No MiMoCode run, merge commit, or integration branch was created.";
+  try {
+    const report = createComposeReport({
+      id: job.id,
+      createdAt: job.createdAt,
+      workflow: "merge",
+      cwd,
+      requestedSkills: ["compose:merge"],
+      status: "passed",
+      events: [],
+      diff,
+      gitStatusBefore: gitStatus,
+      gitStatusAfter: gitStatus,
+      gitHeadBefore: gitHead,
+      gitHeadAfter: gitHead,
+      verification: [],
+      reportDir,
+      eventsDir,
+      diffsDir,
+      mergeTransaction
+    });
+    writeComposeReport(report);
+    const execution = writeExecutionEvidence(job, {
+      reconciliationAttempts: 0,
+      run: { exitCode: 0 },
+      gitStatusBefore: gitStatus,
+      gitStatusAfter: gitStatus,
+      gitHeadBefore: gitHead,
+      gitHeadAfter: gitHead,
+      diff,
+      changeDetection: { files: [], artifactFiles: [], candidates: [], status: "complete", sources: [] },
+      commandEvidence: [],
+      finalRepositoryFingerprint: "",
+      mergeTransaction
+    }, finalText);
+    return {
+      json: report.reportPaths.json,
+      markdown: report.reportPaths.markdown,
+      eventsJsonl: report.reportPaths.eventsJsonl,
+      executionEvidence: execution.evidencePath,
+      ...(execution.resultPath ? { result: execution.resultPath } : {})
+    };
+  } catch {
+    return {};
+  }
+}
+
+function readMergeSnapshot(request: unknown): MergeTransactionSnapshot {
+  if (typeof request !== "object" || request === null) {
+    throw new Error("Merge transaction is missing its pinned launch snapshot.");
+  }
+  const snapshot = (request as { mergeSnapshot?: unknown }).mergeSnapshot;
+  if (!snapshot || typeof snapshot !== "object") {
+    throw new Error("Merge transaction is missing its pinned launch snapshot.");
+  }
+  const value = snapshot as Partial<MergeTransactionSnapshot>;
+  if (typeof value.controlRoot !== "string" || typeof value.sourceRef !== "string" ||
+      typeof value.targetRef !== "string" || typeof value.sourceOid !== "string" ||
+      typeof value.targetOid !== "string" || !value.workspace || !Array.isArray(value.worktrees)) {
+    throw new Error("Merge transaction launch snapshot is invalid.");
+  }
+  return value as MergeTransactionSnapshot;
+}
+
+function mergeTransactionSummary(
+  prepared: PreparedMergeExecutionWorktree,
+  status: MergeTransactionSummary["status"]
+): MergeTransactionSummary {
+  return {
+    transactionId: prepared.transactionId,
+    sourceRef: prepared.snapshot.sourceRef,
+    targetRef: prepared.snapshot.targetRef,
+    sourceOid: prepared.snapshot.sourceOid,
+    targetOid: prepared.snapshot.targetOid,
+    status
+  };
+}
+
+function mergeExecutionWorkspaceSummary(
+  prepared: PreparedMergeExecutionWorktree,
+  status: ExecutionWorkspaceSummary["status"],
+  reason?: string
+): ExecutionWorkspaceSummary {
+  return {
+    path: prepared.executionRoot,
+    kind: "git_worktree",
+    status,
+    isolationGuarantee: "cwd_relative_write_containment",
+    ...(reason ? { reason } : {})
+  };
+}
+
+function prepareOwnedExecutionWorkspace(
+  controlRoot: string
+): PreparedExecutionWorkspace | PreparedGitExecutionWorkspace {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mimo-execution-"));
+  const executionRoot = path.join(temporaryRoot, "workspace");
+  try {
+    if (fs.existsSync(path.join(controlRoot, ".git"))) {
+      return prepareGitExecutionWorkspace(controlRoot, executionRoot);
+    }
+    return prepareExecutionWorkspace({ sourceRoot: controlRoot, executionRoot });
+  } catch (error) {
+    // The parent is created solely for this attempt and contains no user
+    // workspace. Remove it only while it is still directly under the system
+    // temp directory with our fixed prefix.
+    if (path.basename(temporaryRoot).startsWith("codex-mimo-execution-")) {
+      fs.rmSync(temporaryRoot, { recursive: true, force: true });
+    }
+    throw error;
+  }
+}
+
+function disposeOwnedExecutionWorkspace(
+  workspace: PreparedExecutionWorkspace | PreparedGitExecutionWorkspace
+): void {
+  if (isGitExecutionWorkspace(workspace)) {
+    disposeGitExecutionWorkspace(workspace);
+  } else {
+    disposeExecutionWorkspace(workspace as PreparedExecutionWorkspace);
+  }
+  const parent = path.dirname(workspace.executionRoot);
+  if (path.basename(parent).startsWith("codex-mimo-execution-") && fs.existsSync(parent)) {
+    try {
+      fs.rmdirSync(parent);
+    } catch {
+      // Diagnostics remain readable if an unexpected file was left behind.
+    }
+  }
+}
+
+function executionWorkspaceSummary(
+  workspace: PreparedExecutionWorkspace | PreparedGitExecutionWorkspace | PersistentWorktreeLease,
+  status: ExecutionWorkspaceSummary["status"],
+  journalPath?: string,
+  conflictPaths?: string[],
+  reason?: string
+): ExecutionWorkspaceSummary {
+  return {
+    path: workspace.executionRoot,
+    kind: isGitExecutionWorkspace(workspace) ? "git_worktree" : "copy",
+    status,
+    // This is deliberately not an OS sandbox: an agent can still issue an
+    // explicit absolute-path write under the same user identity.
+    isolationGuarantee: "cwd_relative_write_containment",
+    ...(journalPath ? { journalPath } : {}),
+    ...(conflictPaths && conflictPaths.length > 0 ? { conflictPaths } : {}),
+    ...(reason ? { reason } : {}),
+    ...(isPersistentWorktreeLease(workspace)
+      ? { mode: "persistent" as const, branch: workspace.branch, resumable: true as const }
+      : {})
+  };
+}
+
+function toPersistentLease(workspace: PreparedExecutionWorkspace | PreparedGitExecutionWorkspace | PersistentWorktreeLease): ExecutionWorkspaceLease {
+  if (!isPersistentWorktreeLease(workspace)) throw new Error("Persistent worktree lease expected.");
+  return { mode: "persistent", jobId: workspace.jobId, controlRoot: workspace.controlRoot,
+    executionRoot: workspace.executionRoot, ownerMetadataPath: workspace.ownerMetadataPath,
+    ownerToken: workspace.ownerToken, branch: workspace.branch, createdAt: workspace.createdAt };
+}
+
+function isGitExecutionWorkspace(
+  workspace: PreparedExecutionWorkspace | PreparedGitExecutionWorkspace | PersistentWorktreeLease
+): workspace is PreparedGitExecutionWorkspace {
+  return "controlRoot" in workspace;
+}
+
+function isPersistentWorktreeLease(
+  workspace: PreparedExecutionWorkspace | PreparedGitExecutionWorkspace | PersistentWorktreeLease
+): workspace is PersistentWorktreeLease {
+  return "mode" in workspace && workspace.mode === "persistent";
 }
 
 function requireJob(cwd: string, jobId: string): JobRecord {

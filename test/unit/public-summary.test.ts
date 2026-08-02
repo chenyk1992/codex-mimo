@@ -22,6 +22,24 @@ describe("publicProgressSummary", () => {
     ).toBe("MiMoCode job idle-timed out.");
   });
 
+  it("explains missing acceptance configuration for needs_input jobs and signals", () => {
+    const expected = "MiMoCode needs explicit acceptance commands before it can continue.";
+    expect(
+      publicProgressSummary({
+        type: "job",
+        status: "needs_input",
+        errorCode: "acceptance_config_missing"
+      })
+    ).toBe(expected);
+    expect(
+      publicProgressSummary({
+        type: "signal",
+        kind: "needs_input",
+        errorCode: "acceptance_config_missing"
+      })
+    ).toBe(expected);
+  });
+
   it("falls back to the generic failed summary for unknown errorCodes", () => {
     expect(
       publicProgressSummary({
@@ -30,6 +48,14 @@ describe("publicProgressSummary", () => {
         errorCode: "agent_said_something_secret"
       })
     ).toBe("MiMoCode job failed.");
+  });
+
+  it("uses a safe explanation when frozen review input was modified", () => {
+    expect(publicProgressSummary({
+      type: "job",
+      status: "failed",
+      errorCode: "review_attachment_modified"
+    })).toContain("review input changed");
   });
 
   it("does not pass through arbitrary strings via unknown errorCode values", () => {

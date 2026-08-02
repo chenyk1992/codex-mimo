@@ -5,7 +5,7 @@ import {
   spawnNotificationWorker
 } from "./job-process.js";
 import { transitionJob } from "./job-transition.js";
-import type { JobKind, JobReceipt, JobRecord } from "./jobs.js";
+import type { ExecutionWorkspaceLease, JobKind, JobReceipt, JobRecord } from "./jobs.js";
 import {
   prepareCodexConnection,
   type PreparedCodexConnection
@@ -60,6 +60,8 @@ export interface LaunchJobInput {
   sliceId?: string | null;
   notify?: NotificationInput;
   notificationTarget?: NotificationTarget | null;
+  /** Private persisted lease; never part of a public tool request. */
+  executionWorkspaceLease?: ExecutionWorkspaceLease;
 }
 
 export interface LaunchJobDependencies {
@@ -116,7 +118,8 @@ export async function launchJob(
     parentJobId: input.parentJobId,
     ...(input.chainId !== undefined ? { chainId: input.chainId } : {}),
     ...(input.sliceId !== undefined ? { sliceId: input.sliceId } : {}),
-    notificationTarget: target
+    notificationTarget: target,
+    ...(input.executionWorkspaceLease ? { executionWorkspaceLease: input.executionWorkspaceLease } : {})
   });
 
   try {

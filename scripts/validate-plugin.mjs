@@ -163,7 +163,9 @@ const CANONICAL_WORK_TOOL_SCHEMAS = {
     allowedPaths: {
       type: "array",
       items: STRING_SCHEMA
-    }
+    },
+    sourceRef: STRING_SCHEMA,
+    targetRef: STRING_SCHEMA
   }, ["cwd", "workflow"])
 };
 

@@ -138,7 +138,7 @@ describe("compact job rendering", () => {
     });
   });
 
-  it("removes generic, duplicate, and unknown-path causes from compact failures", () => {
+  it("removes generic and duplicate causes while retaining unknown-path safety failures", () => {
     const result = renderCompactJobResult(job({
       status: "stalled",
       phase: undefined,
@@ -156,7 +156,12 @@ describe("compact job rendering", () => {
     }));
 
     expect(result.failure?.causes).toEqual([
-      { code: "diff_check_failed", stage: "diff_check", command: "git diff --check" }
+      { code: "diff_check_failed", stage: "diff_check", command: "git diff --check" },
+      {
+        code: "write_scope_violation",
+        stage: "scope_check",
+        suggestion: "Blocked path: unknown"
+      }
     ]);
   });
 
@@ -180,6 +185,72 @@ describe("compact job rendering", () => {
       reportPath: "report.md"
     });
     expect(JSON.stringify(result)).not.toMatch(/PRIVATE|session|notification|actions|output/);
+  });
+
+  it("exposes retained execution workspace diagnostics in compact and full results", () => {
+    const record = job({
+      status: "needs_input",
+      executionWorkspace: {
+        path: "E:/temp/codex-mimo-execution/workspace",
+        kind: "git_worktree",
+        status: "retained",
+        isolationGuarantee: "cwd_relative_write_containment",
+        conflictPaths: ["src/app.ts"]
+      }
+    });
+    expect(renderCompactJobResult(record).executionWorkspace).toMatchObject({
+      status: "retained", conflictPaths: ["src/app.ts"]
+    });
+    expect(renderFullJobResult(record).executionWorkspace).toMatchObject({ kind: "git_worktree" });
+  });
+
+  it("never serializes private persistent-worktree owner material", () => {
+    const ownerToken = "2b4a1a94-6d90-4c2d-baa5-6aed2da4c5a8";
+    const record = job({
+      status: "completed",
+      phase: undefined,
+      executionWorkspaceLease: {
+        mode: "persistent",
+        jobId: "implement-1",
+        controlRoot: "E:/project/control",
+        executionRoot: "E:/project/execution",
+        ownerMetadataPath: "E:/project/execution/.git/owner.json",
+        ownerToken,
+        branch: "codex-mimo/worktree/implement-1",
+        createdAt: "2026-08-02T00:00:00.000Z"
+      }
+    });
+
+    for (const result of [
+      renderJobStatus(record),
+      renderCompactJobStatus(record),
+      renderCompactJobResult(record),
+      renderJobResult(record),
+      renderFullJobResult(record)
+    ]) {
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain(ownerToken);
+      expect(serialized).not.toContain("executionWorkspaceLease");
+      expect(serialized).not.toContain("ownerMetadataPath");
+    }
+  });
+
+  it("keeps declared artifact files out of changedFiles while exposing their evidence", () => {
+    const completed = job({
+      status: "completed",
+      phase: undefined,
+      changedFiles: ["src/App.java"],
+      artifactFiles: ["build/classes/App.class"]
+    });
+
+    expect(renderCompactJobResult(completed)).toMatchObject({
+      changedFiles: ["src/App.java"],
+      artifactFiles: ["build/classes/App.class"]
+    });
+    expect(renderJobResult(completed)).toMatchObject({
+      changedFiles: ["src/App.java"],
+      artifactFiles: ["build/classes/App.class"]
+    });
   });
 
   it("exposes partial change detection without treating candidates as verified files", () => {

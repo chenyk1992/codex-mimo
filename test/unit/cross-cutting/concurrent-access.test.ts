@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createJobStore,
   listJobs,
+  mutateJobAuthoritative,
   readJob,
   updateJob
 } from "../../../src/core/job-store.js";
@@ -145,6 +146,41 @@ describe("concurrent access", () => {
     expect(listJobs(cwd).map((job) => job.id)).toEqual(
       expect.arrayContaining([existing.id, createdId])
     );
+  });
+
+  it("merges dependent authoritative mutations across processes without a lost update", async () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "aggregate child files",
+      request: { cwd }
+    });
+    const storeModule = pathToFileURL(path.resolve("src/core/job-store.ts")).href;
+    const script = `
+      import { mutateJobAuthoritative } from ${JSON.stringify(storeModule)};
+      const delay = Number(process.argv[2]) - Date.now();
+      if (delay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+      const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const updated = await mutateJobAuthoritative(process.argv[3], process.argv[4], async (existing) => {
+        await sleep(80);
+        return { changedFiles: [...existing.changedFiles, process.argv[5]] };
+      });
+      process.stdout.write(JSON.stringify(updated.changedFiles));
+    `;
+    const childScript = path.join(cwd, "mutate-child.ts");
+    fs.writeFileSync(childScript, script, "utf8");
+    const viteNode = path.resolve("node_modules/vite-node/vite-node.mjs");
+    const startAt = Date.now() + 300;
+    const mutate = (changedFile: string) => execFileAsync(process.execPath, [
+      viteNode, childScript, String(startAt), cwd, job.id, changedFile
+    ]);
+
+    await Promise.all([mutate("src/first.ts"), mutate("src/second.ts")]);
+
+    expect(readJob(cwd, job.id)?.changedFiles.sort()).toEqual([
+      "src/first.ts",
+      "src/second.ts"
+    ]);
   });
 
   it("only one concurrent claimant receives a delivery", async () => {

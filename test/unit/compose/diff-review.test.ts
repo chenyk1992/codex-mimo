@@ -153,9 +153,41 @@ describe("runReadOnlyDiffReview", () => {
     );
   });
 
-  it("fails with delivery_contract_missing when final text has no valid verdict", async () => {
+  it("repairs a missing verdict envelope once without rerunning the review", async () => {
     const diffPath = setupDiff("diff --git a/src/a.ts b/src/a.ts\n+change");
-    const runMimo = vi.fn(async () => makeRunResult("Review looks fine, no JSON here."));
+    const runMimo = vi.fn()
+      .mockResolvedValueOnce(makeRunResult("Review looks fine, no JSON here."))
+      .mockResolvedValueOnce(makeRunResult(JSON.stringify({ verdict: "pass", findings: [] })));
+
+    const result = await runReadOnlyDiffReview({
+      cwd: tmpDir,
+      diffPath: path.relative(tmpDir, diffPath),
+      runMimo,
+      captureStatus: vi.fn(async () => cleanStatus)
+    });
+
+    expect(result).toMatchObject({
+      stage: "diff_check",
+      outcome: "passed"
+    });
+    expect(runMimo).toHaveBeenCalledTimes(2);
+    expect(runMimo.mock.calls[1][1]).toEqual(expect.arrayContaining([
+      "--title",
+      "codex-mimo diff-review-format-repair"
+    ]));
+    const repairFiles = runMimo.mock.calls[1][1]
+      .filter((arg, index, args) => args[index - 1] === "--file");
+    expect(repairFiles).toContain(diffPath);
+    const repairPromptFile = repairFiles.find((file) => file !== diffPath);
+    expect(repairPromptFile).toBeDefined();
+    expect(fs.readFileSync(repairPromptFile!, "utf8")).toContain("not a second review");
+  });
+
+  it("fails with delivery_contract_missing after the single format-repair retry is invalid", async () => {
+    const diffPath = setupDiff("diff --git a/src/a.ts b/src/a.ts\n+change");
+    const runMimo = vi.fn()
+      .mockResolvedValueOnce(makeRunResult("Review looks fine, no JSON here."))
+      .mockResolvedValueOnce(makeRunResult("Still prose, no JSON."));
 
     const result = await runReadOnlyDiffReview({
       cwd: tmpDir,
@@ -169,6 +201,109 @@ describe("runReadOnlyDiffReview", () => {
       outcome: "failed",
       reason: "delivery_contract_missing"
     });
+    expect(result.suggestion).toContain("implementation and host acceptance may have passed");
+    expect(runMimo).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let a blocker finding be rewritten as a passing JSON verdict", async () => {
+    const diffPath = setupDiff("diff --git a/src/a.ts b/src/a.ts\n+change");
+    const runMimo = vi.fn()
+      .mockResolvedValueOnce(makeRunResult("Blocker: callback validation is missing."))
+      .mockResolvedValueOnce(makeRunResult(JSON.stringify({ verdict: "pass", findings: [] })));
+
+    const result = await runReadOnlyDiffReview({
+      cwd: tmpDir,
+      diffPath: path.relative(tmpDir, diffPath),
+      runMimo,
+      captureStatus: vi.fn(async () => cleanStatus)
+    });
+
+    expect(result).toMatchObject({
+      stage: "diff_check",
+      outcome: "failed",
+      reason: "diff_review_semantic_mismatch"
+    });
+    expect(runMimo).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves a clear failing conclusion when the repair emits JSON fail", async () => {
+    const diffPath = setupDiff("diff --git a/src/a.ts b/src/a.ts\n+change");
+    const runMimo = vi.fn()
+      .mockResolvedValueOnce(makeRunResult("Review failed: error handling is incomplete."))
+      .mockResolvedValueOnce(makeRunResult(JSON.stringify({ verdict: "fail", findings: [] })));
+
+    const result = await runReadOnlyDiffReview({
+      cwd: tmpDir,
+      diffPath: path.relative(tmpDir, diffPath),
+      runMimo,
+      captureStatus: vi.fn(async () => cleanStatus)
+    });
+
+    expect(result).toMatchObject({ stage: "diff_check", outcome: "failed" });
+    expect(result.reason).not.toBe("diff_review_semantic_mismatch");
+  });
+
+  it("does not let ambiguous prose establish a passing verdict", async () => {
+    const diffPath = setupDiff("diff --git a/src/a.ts b/src/a.ts\n+change");
+    const runMimo = vi.fn()
+      .mockResolvedValueOnce(makeRunResult("The diff changes several files."))
+      .mockResolvedValueOnce(makeRunResult(JSON.stringify({ verdict: "pass", findings: [] })));
+
+    const result = await runReadOnlyDiffReview({
+      cwd: tmpDir,
+      diffPath: path.relative(tmpDir, diffPath),
+      runMimo,
+      captureStatus: vi.fn(async () => cleanStatus)
+    });
+
+    expect(result).toMatchObject({
+      stage: "diff_check",
+      outcome: "failed",
+      reason: "diff_review_semantic_mismatch"
+    });
+  });
+
+  it("accepts a JSON pass only after an unambiguously positive prior review", async () => {
+    const diffPath = setupDiff("diff --git a/src/a.ts b/src/a.ts\n+change");
+    const runMimo = vi.fn()
+      .mockResolvedValueOnce(makeRunResult("Looks fine; no issues found."))
+      .mockResolvedValueOnce(makeRunResult(JSON.stringify({ verdict: "pass", findings: [] })));
+
+    const result = await runReadOnlyDiffReview({
+      cwd: tmpDir,
+      diffPath: path.relative(tmpDir, diffPath),
+      runMimo,
+      captureStatus: vi.fn(async () => cleanStatus)
+    });
+
+    expect(result).toMatchObject({ stage: "diff_check", outcome: "passed" });
+    expect(runMimo).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails when the format-repair retry modifies the workspace", async () => {
+    const diffPath = setupDiff("diff --git a/src/a.ts b/src/a.ts\n+change");
+    const runMimo = vi.fn()
+      .mockResolvedValueOnce(makeRunResult("Review looks fine, no JSON here."))
+      .mockResolvedValueOnce(makeRunResult(JSON.stringify({ verdict: "pass", findings: [] })));
+    const captureStatus = vi.fn()
+      .mockResolvedValueOnce(cleanStatus)
+      .mockResolvedValueOnce(cleanStatus)
+      .mockResolvedValueOnce({
+        short: " M src/a.ts",
+        dirty: true,
+        fingerprints: { "src/a.ts": { status: " M", contentHash: "after" } }
+      });
+
+    const result = await runReadOnlyDiffReview({
+      cwd: tmpDir,
+      diffPath: path.relative(tmpDir, diffPath),
+      runMimo,
+      captureStatus
+    });
+
+    expect(result).toMatchObject({ stage: "diff_check", outcome: "failed" });
+    expect(result.reason).toMatch(/modified files/);
+    expect(runMimo).toHaveBeenCalledTimes(2);
   });
 
   it("fails when blocker or major findings are present", async () => {

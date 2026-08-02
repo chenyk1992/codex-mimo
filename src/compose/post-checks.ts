@@ -19,6 +19,8 @@ export interface DiffAcceptanceInput {
   diffText?: string;
   signal?: AbortSignal;
   forbidCommits?: boolean;
+  /** Require the final HEAD to be a non-fast-forward merge rooted at gitHeadBefore. */
+  requireMergeTopology?: boolean;
   runGitDiffCheck?: (
     cwd: string,
     signal?: AbortSignal
@@ -131,6 +133,31 @@ export async function runDeterministicDiffAcceptance(
     }
   }
 
+  if (input.requireMergeTopology) {
+    const topologyFailure = validateMergeTopology(input);
+    if (topologyFailure) {
+      return {
+        stage: "diff_check",
+        outcome: "failed",
+        reason: topologyFailure,
+        suggestion: "Create exactly one non-fast-forward merge commit from the recorded starting HEAD, then rerun the diff check."
+      };
+    }
+
+    const committedOutOfScope = findOutOfScopeChangedFiles(
+      input.commitChanges!.changedFiles,
+      input.allowedPaths ?? []
+    );
+    if (committedOutOfScope.length > 0) {
+      return {
+        stage: "diff_check",
+        outcome: "failed",
+        reason: `Out-of-scope committed changes: ${committedOutOfScope.join(", ")}`,
+        suggestion: `Remove out-of-scope committed change ${committedOutOfScope[0]}, then rerun the diff check.`
+      };
+    }
+  }
+
   if (forbidCommits && input.commitChanges && input.commitChanges.commits.length > 0) {
     return {
       stage: "diff_check",
@@ -163,6 +190,33 @@ export async function runDeterministicDiffAcceptance(
   }
 
   return { stage: "diff_check", outcome: "passed" };
+}
+
+function validateMergeTopology(input: DiffAcceptanceInput): string | undefined {
+  const before = input.gitHeadBefore?.oid;
+  const after = input.gitHeadAfter?.oid;
+  const changes = input.commitChanges;
+  if (!before || !after || before === after) {
+    return "Merge topology evidence is missing a distinct before and after HEAD.";
+  }
+  if (!changes) {
+    return "Merge topology evidence is missing commit details.";
+  }
+  const parents = changes.afterParentOids;
+  if (!parents || parents.length !== 2 || parents[0] !== before || parents[0] === parents[1]) {
+    return "Final HEAD is not a non-fast-forward merge whose first parent is the recorded starting HEAD.";
+  }
+  const oids = changes.commitOids;
+  if (!oids || oids.length === 0 || oids.at(-1) !== after) {
+    return "Merge topology evidence does not include the final merge commit.";
+  }
+  if (oids.length !== changes.commits.length) {
+    return "Merge topology evidence has inconsistent commit identifiers.";
+  }
+  if (changes.changedFiles.length === 0) {
+    return "Merge commit did not produce any changed files.";
+  }
+  return undefined;
 }
 
 export function detectReadOnlyViolationFiles(

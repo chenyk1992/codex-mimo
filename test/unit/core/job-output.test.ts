@@ -89,6 +89,35 @@ describe("job output helpers", () => {
     expect(summarizeJobOutput(output)).toBe("Use the compact delivery path.");
   });
 
+  it("skips generic English and Chinese openings when a later conclusion exists", () => {
+    const english = [
+      "I have all the context I need to continue.",
+      "",
+      "## Conclusion",
+      "",
+      "The callback needs a bounded write-scope check."
+    ].join("\n");
+    const chinese = [
+      "现在我已经对代码库有了完整的了解。",
+      "",
+      "最终结论：应当修复回调路径解析。"
+    ].join("\n");
+
+    expect(summarizeJobOutput(english)).toBe("The callback needs a bounded write-scope check.");
+    expect(summarizeJobOutput(chinese)).toBe("最终结论：应当修复回调路径解析。");
+  });
+
+  it("uses a synthesized findings heading when it carries the final conclusion", () => {
+    const output = [
+      "I have all the context I need.",
+      "",
+      "## Synthesized findings — resume writes are blocked before acceptance."
+    ].join("\n");
+
+    expect(summarizeJobOutput(output))
+      .toBe("Synthesized findings — resume writes are blocked before acceptance.");
+  });
+
   it("skips Markdown separators and prefers an inline verdict", () => {
     const output = [
       "---",

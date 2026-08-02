@@ -236,6 +236,42 @@ describe("job definition registry", () => {
     expect(diff).toContain("+export const untracked = true;");
   });
 
+  it("freezes the exact current diff for Compose review instead of leaving diff selection to the workflow", async () => {
+    const cwd = initGitRepo();
+    fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+    fs.writeFileSync(
+      path.join(cwd, "src", "untracked.ts"),
+      "export const untracked = true;\n",
+      "utf8"
+    );
+
+    const definition = getJobDefinition("compose");
+    const request: JobRequestByKind["compose"] = { cwd, workflow: "review", since: "HEAD" };
+    const prompt = await definition.buildPrompt(request, ACTIVE_SIGNAL);
+    const args = definition.buildMimoArgs(request, prompt);
+    const diffFile = prompt.files.find((file) => path.extname(file) === ".diff")!;
+    const promptFile = prompt.files.find((file) => path.extname(file) === ".md")!;
+
+    expect(fs.readFileSync(diffFile, "utf8")).toContain(
+      "diff --git a/src/untracked.ts b/src/untracked.ts"
+    );
+    expect(fs.readFileSync(promptFile, "utf8")).toContain(
+      "Review only the exact current diff against base HEAD"
+    );
+    expect(fs.readFileSync(promptFile, "utf8")).toContain(
+      "Do not search for or use historical .codex-mimo diff artifacts."
+    );
+    expect(prompt.immutableAttachments).toEqual([expect.objectContaining({
+      path: diffFile,
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      base: "HEAD"
+    })]);
+    expect(fs.readFileSync(promptFile, "utf8")).toContain(
+      prompt.immutableAttachments![0].sha256
+    );
+    expect(args).toEqual(expect.arrayContaining(["--file", diffFile]));
+  });
+
   it("freezes a large non-ASCII review diff as the exact prompt attachment", async () => {
     const cwd = initGitRepo();
     fs.writeFileSync(path.join(cwd, "app.ts"), `// 中文差异\n${"变更内容".repeat(3_000)}\n`, "utf-8");
@@ -252,6 +288,11 @@ describe("job definition registry", () => {
     const promptFile = prompt.files.find((file) => path.extname(file) === ".md")!;
     expect(fs.readFileSync(diffFile, "utf-8")).toBe(expected.diff);
     expect(fs.readFileSync(promptFile, "utf-8")).toContain("base HEAD");
+    expect(prompt.immutableAttachments).toEqual([expect.objectContaining({
+      path: diffFile,
+      base: "HEAD",
+      head: expect.stringMatching(/^[a-f0-9]{40}$/)
+    })]);
     expect(prompt.message).not.toContain(expected.diff);
     expect(args).toEqual(expect.arrayContaining(["--file", diffFile]));
     expect(args).not.toContain("--model");
@@ -270,7 +311,7 @@ describe("job definition registry", () => {
     const prompt = await definition.buildPrompt(request, ACTIVE_SIGNAL);
     const args = definition.buildMimoArgs(request, prompt);
 
-    expect(prompt.files).toHaveLength(1);
+    expect(prompt.files).toHaveLength(2);
     expect(args).toEqual(expect.arrayContaining(["--file", "ci.log"]));
     expect(args).not.toContain("--model");
     expect(args.filter((item) => item === "--file")).toHaveLength(2);
@@ -508,6 +549,59 @@ describe("job finalization", () => {
     expect(runDiffCheck).toHaveBeenCalledOnce();
   });
 
+  it("allows expected commits through the default diff check for Compose merge", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "merge",
+      task: "Merge the feature branch",
+      acceptance: {
+        build: ["npm run build"],
+        test: ["npm test"],
+        diffCheck: true
+      }
+    };
+    const runDiffAcceptanceSelfCheck = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const,
+      summary: { changedFileCount: 1, samplePaths: ["src/app.ts"] }
+    }));
+    const runReadOnlyDiffReview = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const
+    }));
+    const runDevelopmentAcceptance = vi.fn(async (
+      _cwd: string,
+      _plan: unknown,
+      options?: { runDiffCheck?: (cwd: string, signal?: AbortSignal) => Promise<unknown> }
+    ) => {
+      await options!.runDiffCheck!(cwd, ACTIVE_SIGNAL);
+      return passingAcceptanceResult();
+    });
+
+    await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("compose", request),
+      request,
+      run: { stdout: '{"type":"message","text":"merged"}\\n', stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "merged", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      diff: { changedFiles: ["src/app.ts"], diffStat: "1 file changed", diff: "diff --git a/src/app.ts" },
+      verification: [],
+      deps: {
+        runDevelopmentAcceptance,
+        runDiffAcceptanceSelfCheck,
+        runReadOnlyDiffReview,
+        writeComposeReport: () => undefined
+      }
+    });
+
+    expect(runDiffAcceptanceSelfCheck).toHaveBeenCalledWith(expect.objectContaining({
+      forbidCommits: false,
+      requireMergeTopology: true
+    }));
+  });
+
   it("pauses native fix-ci before execution when host acceptance is missing", async () => {
     const cwd = tempDir();
     const result = await preflightWriteJobAcceptance({
@@ -677,7 +771,8 @@ describe("job finalization", () => {
       events: [{ type: "message", text: "done", raw: {} }],
       executionCallback: { invocationId: "inv", outcome: "completed" },
       changeDetection: {
-        files: ["src/App.java", "out/App.class"],
+        files: ["src/App.java"],
+        artifactFiles: ["out/App.class"],
         candidates: [],
         status: "complete",
         sources: ["git_fingerprint", "scope_manifest"]
@@ -688,7 +783,8 @@ describe("job finalization", () => {
 
     expect(outcome).toMatchObject({
       status: "completed",
-      changedFiles: ["src/App.java", "out/App.class"]
+      changedFiles: ["src/App.java"],
+      artifactFiles: ["out/App.class"]
     });
     expect(runDevelopmentAcceptance).toHaveBeenCalledOnce();
   });
@@ -725,7 +821,8 @@ describe("job finalization", () => {
       events: [{ type: "message", text: "done", raw: {} }],
       executionCallback: { invocationId: "inv", outcome: "completed" },
       changeDetection: {
-        files: ["src/App.java", "out/App.class"],
+        files: ["src/App.java"],
+        artifactFiles: ["out/App.class"],
         candidates: [],
         status: "complete",
         sources: ["git_fingerprint", "scope_manifest"]
@@ -934,6 +1031,62 @@ describe("job finalization", () => {
 
     expect(runReadOnlyDiffReview).not.toHaveBeenCalled();
     expect(outcome).toMatchObject({ status: "completed" });
+  });
+
+  it("treats Compose fix-ci restoration to a net-zero baseline as no_diff", async () => {
+    const cwd = tempDir();
+    const request: JobRequestByKind["compose"] = {
+      cwd,
+      workflow: "fix-ci",
+      task: "Restore the target file to the passing baseline",
+      acceptance: {
+        build: ["node -e process.exit(0)"],
+        test: ["node -e process.exit(0)"],
+        diffCheck: true
+      }
+    };
+    const runReadOnlyDiffReview = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const
+    }));
+
+    const outcome = await getJobDefinition("compose").finalize({
+      signal: ACTIVE_SIGNAL,
+      job: makeJob("compose", request),
+      request,
+      run: { stdout: '{"type":"message","text":"restored"}\n', stderr: "", exitCode: 0, pid: 1 },
+      events: [{ type: "message", text: "restored", raw: {} }],
+      executionCallback: { invocationId: "inv", outcome: "completed" },
+      diff: { changedFiles: [], diffStat: "", diff: "" },
+      commitChanges: { commits: [], changedFiles: [] },
+      changeDetection: {
+        files: ["src/target.ts"],
+        candidates: [],
+        status: "complete",
+        sources: ["tool_use"]
+      },
+      verification: [],
+      deps: {
+        executeVerification: async () => ({ exitCode: 0, stdout: "ok", stderr: "" }),
+        runDiffAcceptanceSelfCheck: async () => ({
+          stage: "diff_check",
+          outcome: "passed",
+          summary: { changedFileCount: 1, samplePaths: ["src/target.ts"] }
+        }),
+        runReadOnlyDiffReview,
+        writeComposeReport: () => undefined
+      }
+    });
+
+    expect(outcome).toMatchObject({
+      status: "completed",
+      acceptance: {
+        stages: expect.arrayContaining([
+          expect.objectContaining({ stage: "diff_check", outcome: "not_applicable" })
+        ])
+      }
+    });
+    expect(runReadOnlyDiffReview).not.toHaveBeenCalled();
   });
 
   it("fails diff_check when workspace changes exist but no usable diff artifact can be produced", async () => {

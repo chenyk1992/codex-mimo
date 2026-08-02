@@ -25,6 +25,10 @@ export interface GitHeadSnapshot {
 export interface GitCommitChangeSnapshot {
   commits: string[];
   changedFiles: string[];
+  /** Full object IDs in commit order, used for workflow-specific topology checks. */
+  commitOids?: string[];
+  /** Parent object IDs of the final HEAD after the job. */
+  afterParentOids?: string[];
 }
 
 export interface GitCaptureOptions {
@@ -282,14 +286,14 @@ export async function captureGitCommitChanges(
   after: GitHeadSnapshot | undefined,
   options: GitCaptureOptions = {}
 ): Promise<GitCommitChangeSnapshot> {
-  if (!before || !after || before.oid === after.oid || !after.oid) {
-    return { commits: [], changedFiles: [] };
+  if (!before || !after || !after.oid) {
+    return { commits: [], changedFiles: [], commitOids: [], afterParentOids: [] };
   }
   const commitRange = before.oid ? `${before.oid}..${after.oid}` : after.oid;
   const fileArgs = before.oid
     ? ["diff", "--name-only", before.oid, after.oid]
     : ["ls-tree", "-r", "--name-only", after.oid];
-  const [commits, files] = await Promise.all([
+  const [commits, commitOids, files, afterParents] = await Promise.all([
     execa(
       "git",
       gitArgs(cwd, ["log", "--oneline", "--reverse", commitRange]),
@@ -297,13 +301,25 @@ export async function captureGitCommitChanges(
     ),
     execa(
       "git",
+      gitArgs(cwd, ["log", "--format=%H", "--reverse", commitRange]),
+      gitCommandOptions(cwd, options)
+    ),
+    execa(
+      "git",
       gitArgs(cwd, fileArgs),
+      gitCommandOptions(cwd, options)
+    ),
+    execa(
+      "git",
+      gitArgs(cwd, ["show", "-s", "--format=%P", after.oid]),
       gitCommandOptions(cwd, options)
     )
   ]);
   return {
     commits: parseChangedFiles(commits.stdout),
-    changedFiles: parseChangedFiles(files.stdout)
+    changedFiles: parseChangedFiles(files.stdout),
+    commitOids: parseChangedFiles(commitOids.stdout),
+    afterParentOids: afterParents.stdout.trim().split(/\s+/).filter(Boolean)
   };
 }
 

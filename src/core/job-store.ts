@@ -50,6 +50,7 @@ export interface CreateJobInput {
   chainId?: string | null;
   sliceId?: string | null;
   notificationTarget?: NotificationTarget;
+  executionWorkspaceLease?: import("./jobs.js").ExecutionWorkspaceLease;
 }
 
 export interface JobStoreOptions {
@@ -62,6 +63,15 @@ export type JobUpdatePatch = Partial<Omit<
 >> & {
   quietSince?: string | null;
 };
+
+/**
+ * The callback receives the current on-disk record while its per-job lock is held.
+ * Use this for read-modify-write changes that must not lose fields written by another
+ * worker or recovery process.
+ */
+export type JobAuthoritativeMutator = (
+  existing: JobRecord
+) => JobUpdatePatch | Promise<JobUpdatePatch>;
 
 export function resolveJobDir(cwd: string): string {
   return path.join(cwd, ".codex-mimo", "jobs");
@@ -116,6 +126,7 @@ export function createJobStore(cwd: string, options: JobStoreOptions = {}): {
         progressWarningMs: readProgressWarningFromRequest(input.request),
         progressTimeoutMs: readProgressTimeoutFromRequest(input.request),
         notificationTarget: input.notificationTarget,
+        ...(input.executionWorkspaceLease ? { executionWorkspaceLease: input.executionWorkspaceLease } : {}),
         logFile: paths.logFile,
         eventsFile: paths.eventsFile,
         signalsFile: paths.signalsFile,
@@ -239,6 +250,30 @@ export async function updateJobAuthoritative(
   return persistAuthoritativeRecord(cwd, updated, options.maxJobs ?? DEFAULT_MAX_JOBS);
 }
 
+/**
+ * Atomically read and update one authoritative job record across processes.
+ *
+ * `updateJobAuthoritative` deliberately remains a simple patch writer because
+ * transitionJob already owns this same lock during its multi-file transition
+ * protocol. Call this helper whenever a patch depends on fields read from the
+ * current record.
+ */
+export async function mutateJobAuthoritative(
+  cwd: string,
+  jobId: string,
+  mutate: JobAuthoritativeMutator,
+  options: JobStoreOptions = {}
+): Promise<JobRecord> {
+  const lockKey = resolveJobPaths(cwd, jobId).jobFile;
+  return withProcessLock(lockKey, async () => {
+    const existing = readJob(cwd, jobId);
+    if (!existing) throw new Error(`Job not found: ${jobId}`);
+    const patch = await mutate(existing);
+    const updated = applyJobPatch(existing, patch);
+    return persistAuthoritativeRecord(cwd, updated, options.maxJobs ?? DEFAULT_MAX_JOBS);
+  });
+}
+
 export async function savePendingJobTransition(
   cwd: string,
   jobId: string,
@@ -317,6 +352,25 @@ export async function clearPendingJobTransition(
   return persistAuthoritativeRecord(cwd, updated);
 }
 
+function applyJobPatch(existing: JobRecord, patch: JobUpdatePatch): JobRecord {
+  const updated: JobRecord = {
+    ...existing,
+    ...patch,
+    id: existing.id,
+    kind: existing.kind,
+    cwd: existing.cwd,
+    createdAt: existing.createdAt,
+    updatedAt: nowIso()
+  };
+  if (Object.prototype.hasOwnProperty.call(patch, "phase") && patch.phase === undefined) {
+    delete updated.phase;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "quietSince") && patch.quietSince === null) {
+    delete updated.quietSince;
+  }
+  return updated;
+}
+
 function assertValidJobId(jobId: string): void {
   if (!isValidJobId(jobId)) {
     throw new Error(`Invalid job id: ${jobId}`);
@@ -350,6 +404,11 @@ function isJobRecord(value: unknown, expectedJobId: string): value is JobRecord 
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string" &&
     Array.isArray(value.changedFiles) &&
+    isOptionalStringArray(value.artifactFiles) &&
+    isOptionalReviewInput(value.reviewInput) &&
+    isOptionalExecutionWorkspace(value.executionWorkspace) &&
+    isOptionalExecutionWorkspaceLease(value.executionWorkspaceLease) &&
+    isOptionalMergeTransaction(value.mergeTransaction) &&
     Array.isArray(value.verification) &&
     isOptionalExecutionCallback(value.executionCallback) &&
     isOptionalAssessment(value.assessment) &&
@@ -504,6 +563,7 @@ function transitionRecordPatch(
     ...(transition.completedAt !== undefined ? { completedAt: transition.completedAt } : {}),
     ...(transition.sessionId !== undefined ? { sessionId: transition.sessionId } : {}),
     ...(transition.changedFiles !== undefined ? { changedFiles: transition.changedFiles } : {}),
+    ...(transition.artifactFiles !== undefined ? { artifactFiles: transition.artifactFiles } : {}),
     ...(transition.verification !== undefined ? { verification: transition.verification } : {}),
     ...(transition.acceptance !== undefined ? { acceptance: transition.acceptance } : {}),
     ...(transition.executionCallback !== undefined
@@ -598,6 +658,7 @@ function isPendingJobTransition(
       !isOptionalTimestamp(value.completedAt) ||
       !isOptionalNullableString(value.sessionId) ||
       !isOptionalStringArray(value.changedFiles) ||
+      !isOptionalStringArray(value.artifactFiles) ||
       !isOptionalVerificationArray(value.verification) ||
       !isOptionalAcceptance(value.acceptance) ||
       !isOptionalExecutionCallback(value.executionCallback) ||
@@ -676,6 +737,130 @@ function isOptionalExecutionCallback(value: unknown): boolean {
     isOptionalNullableString(value.sessionId) &&
     isOptionalTimestamp(value.receivedAt) &&
     isOptionalString(value.error);
+}
+
+function isOptionalReviewInput(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value) ||
+      !Object.keys(value).every((key) => REVIEW_INPUT_KEYS.has(key)) ||
+      !Array.isArray(value.attachments) ||
+      (value.status !== "verified_before_run" &&
+        value.status !== "verified" &&
+        value.status !== "modified")) {
+    return false;
+  }
+  return value.attachments.every((attachment) =>
+    isRecord(attachment) &&
+    Object.keys(attachment).every((key) => IMMUTABLE_PROMPT_ATTACHMENT_KEYS.has(key)) &&
+    isNonEmptyString(attachment.path) &&
+    typeof attachment.sha256 === "string" &&
+    /^[a-f0-9]{64}$/i.test(attachment.sha256) &&
+    isOptionalString(attachment.base) &&
+    isOptionalString(attachment.head)
+  );
+}
+
+function isOptionalExecutionWorkspace(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value) ||
+      !Object.keys(value).every((key) => EXECUTION_WORKSPACE_KEYS.has(key)) ||
+      !isAbsoluteNonEmptyPath(value.path) ||
+      (value.kind !== "git_worktree" && value.kind !== "copy") ||
+      (value.status !== "prepared" && value.status !== "retained" &&
+        value.status !== "promoted" && value.status !== "disposed") ||
+      value.isolationGuarantee !== "cwd_relative_write_containment" ||
+      (value.journalPath !== undefined && !isAbsoluteNonEmptyPath(value.journalPath)) ||
+      !isOptionalRepositoryRelativePathArray(value.conflictPaths) ||
+      !isOptionalString(value.reason) ||
+      (value.mode !== undefined && value.mode !== "persistent") ||
+      !isOptionalString(value.branch) ||
+      (value.resumable !== undefined && value.resumable !== true)) {
+    return false;
+  }
+  return true;
+}
+
+function isOptionalExecutionWorkspaceLease(value: unknown): boolean {
+  if (value === undefined) return true;
+  return isRecord(value) && Object.keys(value).every((key) => EXECUTION_WORKSPACE_LEASE_KEYS.has(key)) &&
+    value.mode === "persistent" && isNonEmptyString(value.jobId) && isValidJobId(value.jobId) &&
+    isAbsoluteNonEmptyPath(value.controlRoot) && isAbsoluteNonEmptyPath(value.executionRoot) &&
+    isAbsoluteNonEmptyPath(value.ownerMetadataPath) && isNonEmptyString(value.ownerToken) &&
+    isUuid(value.ownerToken) && value.branch === `codex-mimo/worktree/${value.jobId}` &&
+    typeof value.createdAt === "string" && isTimestamp(value.createdAt) &&
+    typeof value.controlRoot === "string" && typeof value.executionRoot === "string" &&
+    isDistinctWorkspacePath(value.controlRoot, value.executionRoot);
+}
+
+function isOptionalMergeTransaction(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value) || !Object.keys(value).every((key) => MERGE_TRANSACTION_KEYS.has(key)) ||
+      !isUuid(value.transactionId) || !isNonEmptyString(value.sourceRef) ||
+      !isNonEmptyString(value.targetRef) || !isGitObjectId(value.sourceOid) ||
+      !isGitObjectId(value.targetOid) ||
+      (value.status !== "prepared" && value.status !== "already_integrated" &&
+        value.status !== "merged" && value.status !== "published" && value.status !== "retained")) {
+    return false;
+  }
+  return (value.mergeOid === undefined || isGitObjectId(value.mergeOid)) &&
+    isOptionalString(value.integrationRef) &&
+    (value.journalPath === undefined || isAbsoluteNonEmptyPath(value.journalPath));
+}
+
+function isGitObjectId(value: unknown): value is string {
+  return typeof value === "string" && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(value);
+}
+
+const REVIEW_INPUT_KEYS = new Set(["attachments", "status"]);
+const IMMUTABLE_PROMPT_ATTACHMENT_KEYS = new Set(["path", "sha256", "base", "head"]);
+const EXECUTION_WORKSPACE_KEYS = new Set([
+  "path",
+  "kind",
+  "status",
+  "isolationGuarantee",
+  "journalPath",
+  "conflictPaths",
+  "reason", "mode", "branch", "resumable"
+]);
+const MERGE_TRANSACTION_KEYS = new Set([
+  "transactionId", "sourceRef", "targetRef", "sourceOid", "targetOid", "status",
+  "mergeOid", "integrationRef", "journalPath"
+]);
+const EXECUTION_WORKSPACE_LEASE_KEYS = new Set(["mode", "jobId", "controlRoot", "executionRoot", "ownerMetadataPath", "ownerToken", "branch", "createdAt"]);
+
+function isAbsoluteNonEmptyPath(value: unknown): boolean {
+  return isNonEmptyString(value) &&
+    (path.isAbsolute(value) || path.win32.isAbsolute(value) || path.posix.isAbsolute(value));
+}
+
+function isDistinctWorkspacePath(controlRoot: string, executionRoot: string): boolean {
+  const outside = (relative: string) => relative === ".." ||
+    relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+  return outside(path.relative(controlRoot, executionRoot)) &&
+    outside(path.relative(executionRoot, controlRoot));
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function isOptionalRepositoryRelativePathArray(value: unknown): boolean {
+  return value === undefined ||
+    (Array.isArray(value) && value.every(isRepositoryRelativePath));
+}
+
+function isRepositoryRelativePath(value: unknown): boolean {
+  if (!isNonEmptyString(value) ||
+      path.isAbsolute(value) || path.win32.isAbsolute(value) || path.posix.isAbsolute(value) ||
+      /^[a-z]:/i.test(value)) {
+    return false;
+  }
+  return !value.split(/[\\/]+/).some((segment) => segment === "..");
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 const EXECUTION_CALLBACK_KEYS = new Set([

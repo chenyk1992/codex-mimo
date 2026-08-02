@@ -41,7 +41,7 @@ describe("git diff helpers", () => {
       { signal: controller.signal }
     );
 
-    expect(mockedExeca).toHaveBeenCalledTimes(9);
+    expect(mockedExeca).toHaveBeenCalledTimes(11);
     for (const call of mockedExeca.mock.calls) {
       expect(call[2]).toMatchObject({ cancelSignal: controller.signal });
     }
@@ -263,7 +263,17 @@ describe("git diff helpers", () => {
       })
       .mockResolvedValueOnce({
         exitCode: 0,
+        stdout: "1672c89",
+        stderr: ""
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
         stdout: "src/app.ts\ntest/app.test.ts",
+        stderr: ""
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: "",
         stderr: ""
       });
 
@@ -275,12 +285,20 @@ describe("git diff helpers", () => {
       )
     ).resolves.toEqual({
       commits: ["1672c89 feat: initial implementation"],
-      changedFiles: ["src/app.ts", "test/app.test.ts"]
+      changedFiles: ["src/app.ts", "test/app.test.ts"],
+      commitOids: ["1672c89"],
+      afterParentOids: []
     });
     expect(mockedExeca).toHaveBeenNthCalledWith(
-      2,
+      3,
       "git",
       ["-c", "safe.directory=E:/repo", "ls-tree", "-r", "--name-only", "1672c89"],
+      { cwd: "E:/repo" }
+    );
+    expect(mockedExeca).toHaveBeenNthCalledWith(
+      4,
+      "git",
+      ["-c", "safe.directory=E:/repo", "show", "-s", "--format=%P", "1672c89"],
       { cwd: "E:/repo" }
     );
   });
@@ -294,7 +312,17 @@ describe("git diff helpers", () => {
       })
       .mockResolvedValueOnce({
         exitCode: 0,
+        stdout: "7770acb\n1672c89",
+        stderr: ""
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
         stdout: "src/pricing.js\ntest/pricing.test.js",
+        stderr: ""
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: "2662087 9b15d72",
         stderr: ""
       });
 
@@ -309,7 +337,9 @@ describe("git diff helpers", () => {
         "7770acb test: add discount code test cases",
         "1672c89 feat: add discount code support"
       ],
-      changedFiles: ["src/pricing.js", "test/pricing.test.js"]
+      changedFiles: ["src/pricing.js", "test/pricing.test.js"],
+      commitOids: ["7770acb", "1672c89"],
+      afterParentOids: ["2662087", "9b15d72"]
     });
     expect(mockedExeca).toHaveBeenNthCalledWith(
       1,
@@ -319,6 +349,12 @@ describe("git diff helpers", () => {
     );
     expect(mockedExeca).toHaveBeenNthCalledWith(
       2,
+      "git",
+      ["-c", "safe.directory=E:/repo", "log", "--format=%H", "--reverse", "2662087..1672c89"],
+      { cwd: "E:/repo" }
+    );
+    expect(mockedExeca).toHaveBeenNthCalledWith(
+      3,
       "git",
       ["-c", "safe.directory=E:/repo", "diff", "--name-only", "2662087", "1672c89"],
       { cwd: "E:/repo" }

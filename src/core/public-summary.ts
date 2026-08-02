@@ -9,10 +9,20 @@ const KNOWN_OPERATOR_ERROR_SUMMARIES: Readonly<Record<string, string>> = {
   slice_plan_invalid: "MiMoCode slice plan was invalid.",
   slice_failed: "MiMoCode slice chain failed.",
   prompt_identity_mismatch: "MiMoCode prompt identity did not match the job query.",
+  review_attachment_modified:
+    "MiMoCode review input changed during execution, so the review was rejected.",
   callback_session_mismatch: "MiMoCode completion callback session did not match the run session.",
   event_session_mismatch: "MiMoCode JSONL session identity changed during the run.",
   write_scope_violation: "MiMoCode changed files outside the allowed write scope.",
-  acceptance_command_unavailable: "MiMoCode acceptance command is unavailable in this workspace."
+  promotion_conflict:
+    "The control workspace changed during isolated execution; promotion needs input.",
+  promotion_apply_failed:
+    "MiMoCode changes could not be safely promoted from the isolated workspace.",
+  isolation_recovery_required:
+    "An interrupted isolated execution workspace was retained and needs review before recovery.",
+  acceptance_command_unavailable: "MiMoCode acceptance command is unavailable in this workspace.",
+  acceptance_config_missing:
+    "MiMoCode needs explicit acceptance commands before it can continue."
 };
 
 export type PublicSummaryContext =
@@ -66,6 +76,8 @@ function summaryFor(context: PublicSummaryContext): string {
   }
 
   if (context.type === "signal") {
+    const operatorSummary = knownOperatorErrorSummary(context.errorCode);
+    if (operatorSummary && isOperatorAttentionKind(context.kind)) return operatorSummary;
     if (context.kind === "verification_started") return "Verification started.";
     if (context.kind === "verification_finished") return "Verification finished.";
     if (context.kind === "milestone") return "MiMoCode reported progress.";
@@ -84,6 +96,8 @@ function summaryFor(context: PublicSummaryContext): string {
 
   if (context.type === "job") {
     if (context.status === "running") return runningSummary(context.phase);
+    const operatorSummary = knownOperatorErrorSummary(context.errorCode);
+    if (operatorSummary && isOperatorAttentionStatus(context.status)) return operatorSummary;
     if (context.status === "failed") {
       return knownOperatorErrorSummary(context.errorCode) ?? statusSummary("failed");
     }
@@ -110,6 +124,22 @@ function summaryFor(context: PublicSummaryContext): string {
 function knownOperatorErrorSummary(errorCode?: string): string | undefined {
   if (!errorCode) return undefined;
   return KNOWN_OPERATOR_ERROR_SUMMARIES[errorCode];
+}
+
+function isOperatorAttentionKind(kind: Extract<PublicSummaryContext, { type: "signal" }> ["kind"]): boolean {
+  return kind === "needs_input" ||
+    kind === "blocked" ||
+    kind === "stalled" ||
+    kind === "failed" ||
+    kind === "timeout";
+}
+
+function isOperatorAttentionStatus(status: JobStatus): boolean {
+  return status === "needs_input" ||
+    status === "blocked" ||
+    status === "stalled" ||
+    status === "failed" ||
+    status === "timeout";
 }
 
 function runningSummary(phase?: JobPhase): string {

@@ -103,27 +103,31 @@ function workerDependencies(input: {
       evidence: "slice-chain fixture"
     }),
     spawnNotificationWorker: () => 999,
-    runMimoStreaming: (cwd, args, options) => runMimoCliStreaming(cwd, args, {
-      ...options,
-      env: {
+    runMimoStreaming: (cwd, args, options) => {
+      const fakeEnv = {
         ...options.env,
         FAKE_MIMO_MODE: mode,
         FAKE_MIMO_CALLBACK: callback ? "1" : "0",
         FAKE_MIMO_FINAL_TEXT: "Slice work completed from fake MiMo."
-      },
-      spawnProcess: (spawnCwd, _mimoArgs, env) => {
-        const child = spawn(process.execPath, [fakeMimo], {
-          cwd: spawnCwd,
-          env,
-          stdio: ["ignore", "pipe", "pipe"],
-          windowsHide: true
-        });
-        children.add(child);
-        child.once("exit", () => children.delete(child));
-        return child;
-      },
-      terminateProcessTree: async (_pid, child) => { child.kill(); }
-    })
+      };
+      return runMimoCliStreaming(cwd, args, {
+        ...options,
+        env: fakeEnv,
+        allowEnv: [...(options.allowEnv ?? []), ...Object.keys(fakeEnv).filter((name) => name.startsWith("FAKE_MIMO_"))],
+        spawnProcess: (spawnCwd, _mimoArgs, env) => {
+          const child = spawn(process.execPath, [fakeMimo], {
+            cwd: spawnCwd,
+            env,
+            stdio: ["ignore", "pipe", "pipe"],
+            windowsHide: true
+          });
+          children.add(child);
+          child.once("exit", () => children.delete(child));
+          return child;
+        },
+        terminateProcessTree: async (_pid, child) => { child.kill(); }
+      });
+    }
   };
 }
 

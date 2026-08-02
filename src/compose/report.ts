@@ -4,7 +4,7 @@ import type { NormalizedMimoEvent } from "./events.js";
 import type { ComposeWorkflowName } from "./workflow.js";
 import type { VerificationResult } from "./verify.js";
 import type { GitDiffSnapshot, GitHeadSnapshot, GitStatusSnapshot } from "../git/diff.js";
-import type { ExecutionCallbackSummary, JobFailureCause, JobReportPaths, JobVerification } from "../core/jobs.js";
+import type { ExecutionCallbackSummary, JobFailureCause, JobReportPaths, JobVerification, MergeTransactionSummary } from "../core/jobs.js";
 import type { TerminationReason } from "../mimo/streaming-runner.js";
 import { publicProgressSummary } from "../core/public-summary.js";
 import { redactDiagnosticText } from "../core/job-output.js";
@@ -40,6 +40,7 @@ export interface ComposeReport {
   error?: string;
   errorCode?: string;
   failureCauses?: JobFailureCause[];
+  mergeTransaction?: MergeTransactionSummary;
   reportPaths: ComposeReportPaths;
 }
 
@@ -64,6 +65,7 @@ export interface CreateComposeReportInput {
   error?: string;
   errorCode?: string;
   failureCauses?: JobFailureCause[];
+  mergeTransaction?: MergeTransactionSummary;
   reportDir: string;
   eventsDir: string;
   diffsDir: string;
@@ -127,6 +129,7 @@ export function createComposeReport(input: CreateComposeReportInput): ComposeRep
     ...(input.failureCauses && input.failureCauses.length > 0
       ? { failureCauses: input.failureCauses }
       : {}),
+    ...(input.mergeTransaction ? { mergeTransaction: { ...input.mergeTransaction } } : {}),
     reportPaths: {
       json: path.join(input.reportDir, `${input.id}.json`),
       markdown: path.join(input.reportDir, `${input.id}.md`),
@@ -230,6 +233,20 @@ export function renderMarkdownReport(report: ComposeReport): string {
         ""
       );
     }
+  }
+
+  if (report.mergeTransaction) {
+    lines.push(
+      "## Merge Transaction",
+      "",
+      `Status: \`${report.mergeTransaction.status}\``,
+      `Source: \`${report.mergeTransaction.sourceRef}\` at \`${report.mergeTransaction.sourceOid}\``,
+      `Target: \`${report.mergeTransaction.targetRef}\` at \`${report.mergeTransaction.targetOid}\``,
+      ...(report.mergeTransaction.mergeOid ? [`Merge commit: \`${report.mergeTransaction.mergeOid}\``] : []),
+      ...(report.mergeTransaction.integrationRef ? [`Integration ref: \`${report.mergeTransaction.integrationRef}\``] : []),
+      ...(report.mergeTransaction.journalPath ? [`Journal: \`${report.mergeTransaction.journalPath}\``] : []),
+      ""
+    );
   }
 
   lines.push(
@@ -362,4 +379,32 @@ export function writeComposeReport(report: ComposeReport): void {
     report.events.map((event) => JSON.stringify(event)).join("\n") + "\n",
     "utf-8"
   );
+}
+
+/** Best-effort post-finalization augmentation for host-owned merge evidence. */
+export function updateComposeReportMergeTransaction(
+  reportPath: string | undefined,
+  mergeTransaction: MergeTransactionSummary,
+  terminal?: {
+    status: ComposeReportStatus;
+    errorCode?: string;
+    changedFiles?: string[];
+    gitHeadAfter?: GitHeadSnapshot;
+    gitCommits?: string[];
+  }
+): void {
+  if (!reportPath || !fs.existsSync(reportPath)) return;
+  const parsed = JSON.parse(fs.readFileSync(reportPath, "utf8")) as ComposeReport;
+  if (!parsed || !parsed.reportPaths || parsed.workflow !== "merge") return;
+  writeComposeReport({
+    ...parsed,
+    ...(terminal ? {
+      status: terminal.status,
+      ...(terminal.errorCode ? { errorCode: terminal.errorCode, error: terminal.errorCode } : {}),
+      ...(terminal.changedFiles ? { changedFiles: [...terminal.changedFiles] } : {}),
+      ...(terminal.gitHeadAfter ? { gitHeadAfter: terminal.gitHeadAfter } : {}),
+      ...(terminal.gitCommits ? { gitCommits: [...terminal.gitCommits] } : {})
+    } : {}),
+    mergeTransaction: { ...mergeTransaction }
+  });
 }

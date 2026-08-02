@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mimoCompose } from "../../src/codex/tools.js";
 import { readJob } from "../../src/core/job-store.js";
@@ -63,5 +64,28 @@ describe("mimo_compose", () => {
     });
     expect(result.status).toBe("queued");
     expect(finished).toBe(false);
+  });
+
+  it("canonicalizes short merge branch names before persisting the launch request", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mimo-compose-"));
+    dirs.push(cwd);
+    execFileSync("git", ["init"], { cwd, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.test"], { cwd });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd });
+    fs.writeFileSync(path.join(cwd, "a.txt"), "base\n");
+    execFileSync("git", ["add", "."], { cwd });
+    execFileSync("git", ["commit", "-m", "base"], { cwd, stdio: "ignore" });
+    const targetRef = execFileSync("git", ["branch", "--show-current"], { cwd, encoding: "utf8" }).trim();
+    execFileSync("git", ["checkout", "-b", "feature"], { cwd, stdio: "ignore" });
+    fs.writeFileSync(path.join(cwd, "a.txt"), "feature\n");
+    execFileSync("git", ["commit", "-am", "feature"], { cwd, stdio: "ignore" });
+    execFileSync("git", ["checkout", targetRef], { cwd, stdio: "ignore" });
+    const result = await mimoCompose({
+      cwd, workflow: "merge", task: "Merge it.", sourceRef: "feature", targetRef,
+      allowedPaths: ["a.txt"]
+    }, { env: {}, spawnJobSupervisor: () => 123 });
+    const request = readJob(cwd, result.jobId)!.request as Record<string, unknown>;
+    expect(request).toMatchObject({ sourceRef: "refs/heads/feature", targetRef: `refs/heads/${targetRef}` });
+    expect((request.mergeSnapshot as { sourceRef: string }).sourceRef).toBe("refs/heads/feature");
   });
 });

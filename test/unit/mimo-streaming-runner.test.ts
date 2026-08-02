@@ -58,7 +58,8 @@ describe("streaming MiMo CLI runner", () => {
           env: {
             CODEX_MIMO_COMMAND: command,
             ARG_CAPTURE_FILE: captured
-          }
+          },
+          allowEnv: ["ARG_CAPTURE_FILE"]
         });
 
         expect(fs.existsSync(marker)).toBe(false);
@@ -179,6 +180,34 @@ describe("streaming MiMo CLI runner", () => {
       PYTHONUTF8: "1",
       PYTHONIOENCODING: "utf-8"
     });
+  });
+
+  it("uses command overrides only in the host and returns a redacted environment audit", async () => {
+    let seenEnv: NodeJS.ProcessEnv | undefined;
+    const result = await runMimoCliStreaming("E:/project/app", ["run"], {
+      baseEnv: {
+        PATH: "C:/Windows/System32",
+        CODEX_MIMO_COMMAND: "mimo-host-only",
+        WEBHOOK_SECRET: "never-child",
+        OPENAI_API_KEY: "provider-key"
+      },
+      env: { CODEX_MIMO_CALLBACK_TOKEN: "callback-token" },
+      spawnProcess: (_cwd, _args, env, selection) => {
+        seenEnv = env;
+        expect(selection.command).toBe("mimo-host-only");
+        const child = makeChild(6541);
+        queueMicrotask(() => child.emit("close", 0));
+        return child;
+      }
+    });
+
+    expect(seenEnv?.CODEX_MIMO_COMMAND).toBeUndefined();
+    expect(seenEnv?.WEBHOOK_SECRET).toBeUndefined();
+    expect(seenEnv?.OPENAI_API_KEY).toBe("provider-key");
+    expect(result.environmentAudit).toMatchObject({ policy: "compat" });
+    expect(result.environmentAudit?.passedNames).toContain("OPENAI_API_KEY");
+    expect(JSON.stringify(result.environmentAudit)).not.toContain("provider-key");
+    expect(JSON.stringify(result.environmentAudit)).not.toContain("callback-token");
   });
 
   it("omits protected environment keys after merging the parent and callback environment", async () => {

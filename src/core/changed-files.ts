@@ -8,7 +8,7 @@ import type {
   GitDiffSnapshot,
   GitStatusSnapshot
 } from "../git/diff.js";
-import { normalizeRepositoryPath } from "./path-scope.js";
+import { isPathWithinAllowedScope, normalizeRepositoryPath } from "./path-scope.js";
 import { isRuntimeArtifactPath } from "./runtime-paths.js";
 
 const MAX_MANIFEST_FILES = 5_000;
@@ -22,6 +22,8 @@ export interface WorkspaceManifest {
 
 export interface ChangeDetectionResult {
   files: string[];
+  /** Verified outputs declared by acceptance.artifactPaths, kept separate from source changes. */
+  artifactFiles: string[];
   candidates: string[];
   status: ChangeDetectionStatus;
   sources: Array<"git_fingerprint" | "git_diff" | "git_commit" | "scope_manifest">;
@@ -65,6 +67,7 @@ export function detectChangedFiles(input: {
   manifestBefore?: WorkspaceManifest;
   manifestAfter?: WorkspaceManifest;
   toolUsePaths?: string[];
+  artifactPaths?: string[];
 }): ChangeDetectionResult {
   const sources: ChangeDetectionResult["sources"] = [];
   const verified: string[][] = [];
@@ -104,10 +107,14 @@ export function detectChangedFiles(input: {
     sources.push("scope_manifest");
   }
 
-  const files = excludeRuntime(mergeChangedFiles(...verified));
+  const detectedFiles = excludeRuntime(mergeChangedFiles(...verified));
+  const artifactFiles = input.artifactPaths?.length
+    ? detectedFiles.filter((file) => isPathWithinAllowedScope(file, input.artifactPaths!))
+    : [];
+  const files = detectedFiles.filter((file) => !artifactFiles.includes(file));
   const candidates = excludeRuntime(
     normalizeCandidatePaths(input.cwd, input.toolUsePaths ?? [])
-      .filter((file) => !files.includes(file))
+      .filter((file) => !detectedFiles.includes(file))
   );
   const manifestComplete = Boolean(
     input.manifestBefore?.complete && input.manifestAfter?.complete
@@ -123,6 +130,7 @@ export function detectChangedFiles(input: {
 
   return {
     files,
+    artifactFiles,
     candidates,
     status,
     sources: [...new Set(sources)],

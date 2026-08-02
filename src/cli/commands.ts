@@ -75,7 +75,7 @@ const VALUE_FLAGS = new Set([
   "--cwd", "--timeout-ms", "--idle-timeout-ms", "--notify", "--thread-id", "--url", "--secret-env",
   "--base", "--file", "--job-id", "--workflow", "--since", "--verify", "--report-dir",
   "--since-cursor", "--limit", "--min-level", "--level", "--build", "--test",
-  "--artifact-path", "--allowed-path"
+  "--artifact-path", "--allowed-path", "--source-ref", "--target-ref"
 ]);
 
 export async function runCli(args: readonly string[], dependencies: CliDependencies = {}): Promise<number> {
@@ -194,6 +194,9 @@ async function runWork(
   const since = parsed.takeValue("--since");
   const verification = parsed.takeValues("--verify");
   const reportDir = parsed.takeValue("--report-dir");
+  const sourceRef = parsed.takeValue("--source-ref");
+  const targetRef = parsed.takeValue("--target-ref");
+  const allowedPaths = parsed.takeValues("--allowed-path");
   const task = parsed.takeOptionalTask();
   parsed.assertConsumed();
   const input = parseComposeInput({
@@ -203,7 +206,10 @@ async function runWork(
     ...(file ? { file } : {}),
     ...(since ? { since } : {}),
     ...(verification.length > 0 ? { verification } : {}),
-    ...(reportDir ? { reportDir } : {})
+    ...(reportDir ? { reportDir } : {}),
+    ...(sourceRef ? { sourceRef } : {}),
+    ...(targetRef ? { targetRef } : {}),
+    ...(allowedPaths.length ? { allowedPaths } : {})
   });
   return (dependencies.mimoCompose ?? defaultMimoCompose)(input);
 }

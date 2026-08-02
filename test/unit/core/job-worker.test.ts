@@ -7,7 +7,12 @@ import { Readable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BoundJobDefinition } from "../../../src/core/job-definitions.js";
 import { runJobWorker, type JobWorkerDependencies } from "../../../src/core/job-worker.js";
-import { readJob, createJobStore, resolveJobStateFile } from "../../../src/core/job-store.js";
+import {
+  readJob,
+  createJobStore,
+  resolveJobStateFile,
+  updateJobAuthoritative
+} from "../../../src/core/job-store.js";
 import {
   requestJobCancellation,
   transitionJob,
@@ -27,7 +32,12 @@ import {
   type StreamingRunResult
 } from "../../../src/mimo/streaming-runner.js";
 import type { MimoProcessSelection } from "../../../src/mimo/run-json.js";
-import { writeExecutionEvidence } from "../../../src/core/job-execution-evidence.js";
+import {
+  readExecutionEvidence,
+  writeExecutionEvidence
+} from "../../../src/core/job-execution-evidence.js";
+import { createImmutablePromptAttachment } from "../../../src/mimo/prompt-transport.js";
+import { captureMergeSnapshot } from "../../../src/git/merge-transaction.js";
 
 const tempDirs: string[] = [];
 
@@ -99,6 +109,58 @@ function seedActualImplementJob(cwd: string): JobRecord {
   });
 }
 
+function seedIsolatedImplementJob(cwd: string, allowedPaths = ["tracked.txt"]): JobRecord {
+  return createJobStore(cwd).create({
+    kind: "implement",
+    task: "Update the tracked source file.",
+    request: {
+      cwd,
+      task: "Update the tracked source file.",
+      allowWrite: true,
+      batchMode: "single",
+      allowedPaths,
+      acceptance: {
+        ...PASSING_ACCEPTANCE,
+        artifactPaths: ["out/**"]
+      }
+    }
+  });
+}
+
+/**
+ * Keep the real definition and Git capture/finalization path so these tests
+ * exercise the production isolation branch. The injected stream/hook merely
+ * stand in for the external MiMo process.
+ */
+function actualWorkerDeps(overrides: Partial<JobWorkerDependencies> = {}): JobWorkerDependencies {
+  const deps = workerDeps(overrides);
+  delete deps.bindJobDefinition;
+  delete deps.captureStatus;
+  delete deps.captureHead;
+  delete deps.captureDiff;
+  delete deps.captureCommitChanges;
+  return deps;
+}
+
+function removeRetainedExecutionWorkspace(job: JobRecord): void {
+  const executionPath = job.executionWorkspace?.path;
+  if (!executionPath) return;
+  const parent = path.dirname(executionPath);
+  const temporaryRoot = path.resolve(os.tmpdir());
+  const relative = path.relative(temporaryRoot, parent);
+  if (!path.basename(parent).startsWith("codex-mimo-execution-") ||
+      relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`Refusing to remove unexpected retained workspace: ${executionPath}`);
+  }
+  fs.rmSync(parent, { recursive: true, force: true });
+}
+
+function isUnderWorkspace(root: string, target: string | undefined): boolean {
+  if (!target) return false;
+  const relative = path.relative(path.resolve(root), path.resolve(target));
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
 function hook(callback: MimoHookCallbackSummary | null = completedCallback): HookCallbackController {
   return {
     invocationId: "inv-worker",
@@ -109,6 +171,7 @@ function hook(callback: MimoHookCallbackSummary | null = completedCallback): Hoo
     env: { HOOK_ENV: "yes" },
     bindRunSession: vi.fn(),
     getRunSession: vi.fn(() => undefined),
+    getReceivedCallback: vi.fn(() => callback),
     getDiagnostics: vi.fn(() => []),
     waitForCallback: vi.fn(async () => callback),
     close: vi.fn(async () => undefined)
@@ -159,7 +222,109 @@ function workerDeps(overrides: Partial<JobWorkerDependencies> = {}): JobWorkerDe
   };
 }
 
+function immutableReviewDefinition(diffFile: string): BoundJobDefinition {
+  const attachment = createImmutablePromptAttachment(diffFile, {
+    base: "HEAD",
+    head: "abc"
+  });
+  return {
+    kind: "review",
+    executionPolicy: { agent: "codex-mimo-readonly", writesAllowed: false },
+    buildPrompt: vi.fn(async () => ({
+      message: "Review the frozen diff.",
+      files: [diffFile],
+      immutableAttachments: [attachment]
+    })),
+    buildMimoArgs: vi.fn(() => ["run", "--format", "json", "review"]),
+    finalize: vi.fn(async () => ({
+      status: "completed",
+      summary: "Review complete.",
+      verification: []
+    }))
+  };
+}
+
 describe("runJobWorker", () => {
+  it("records verified frozen review input in the job and execution evidence", async () => {
+    const cwd = tempWorkspace();
+    const diff = path.join(cwd, "review.diff");
+    fs.writeFileSync(diff, "diff --git a/a b/a\n", "utf8");
+    const job = createJobStore(cwd).create({
+      kind: "review",
+      task: "Review the change",
+      request: { cwd, base: "HEAD" }
+    });
+    const bound = immutableReviewDefinition(diff);
+
+    await runJobWorker(cwd, job.id, workerDeps({
+      bindJobDefinition: vi.fn(() => bound)
+    }));
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "completed",
+      reviewInput: { status: "verified", attachments: [expect.objectContaining({ path: diff })] }
+    });
+    expect(readExecutionEvidence(readJob(cwd, job.id)!)).toMatchObject({
+      reviewInput: { status: "verified", attachments: [expect.objectContaining({ sha256: expect.any(String) })] }
+    });
+  });
+
+  it("rejects a frozen review diff changed before MiMoCode starts", async () => {
+    const cwd = tempWorkspace();
+    const diff = path.join(cwd, "review.diff");
+    fs.writeFileSync(diff, "diff --git a/a b/a\n", "utf8");
+    const bound = immutableReviewDefinition(diff);
+    fs.writeFileSync(diff, "tampered before start\n", "utf8");
+    const job = createJobStore(cwd).create({
+      kind: "review",
+      task: "Review the change",
+      request: { cwd, base: "HEAD" }
+    });
+    const deps = workerDeps({ bindJobDefinition: vi.fn(() => bound) });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "review_attachment_modified",
+      reviewInput: { status: "modified" }
+    });
+    expect(deps.runMimoStreaming).not.toHaveBeenCalled();
+  });
+
+  it("rejects a frozen review diff changed while MiMoCode runs", async () => {
+    const cwd = tempWorkspace();
+    const diff = path.join(cwd, "review.diff");
+    fs.writeFileSync(diff, "diff --git a/a b/a\n", "utf8");
+    const bound = immutableReviewDefinition(diff);
+    const job = createJobStore(cwd).create({
+      kind: "review",
+      task: "Review the change",
+      request: { cwd, base: "HEAD" }
+    });
+    const deps = workerDeps({
+      bindJobDefinition: vi.fn(() => bound),
+      runMimoStreaming: vi.fn(async (_cwd, _args, options) => {
+        await options.onStart?.(321);
+        fs.writeFileSync(diff, "tampered while running\n", "utf8");
+        await options.onLine?.('{"type":"text","text":"Review complete.","sessionID":"ses_worker"}');
+        return completedRun;
+      })
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "failed",
+      errorCode: "review_attachment_modified",
+      reviewInput: { status: "modified" }
+    });
+    expect(bound.finalize).not.toHaveBeenCalled();
+    expect(readExecutionEvidence(readJob(cwd, job.id)!)).toMatchObject({
+      reviewInput: { status: "modified" }
+    });
+  });
+
   it("fingerprints declared ignored artifacts without widening the write hook", async () => {
     const cwd = gitWorkspace();
     fs.writeFileSync(path.join(cwd, ".gitignore"), "out/\n", "utf8");
@@ -203,7 +368,8 @@ describe("runJobWorker", () => {
 
     const finalizeContext = vi.mocked(bound.finalize).mock.calls[0][0];
     expect(finalizeContext.changeDetection).toMatchObject({
-      files: ["out/App.class"],
+      files: [],
+      artifactFiles: ["out/App.class"],
       status: "complete",
       sources: ["git_fingerprint", "scope_manifest"]
     });
@@ -214,9 +380,9 @@ describe("runJobWorker", () => {
   });
 
   it.each([
-    ["compose worktree", "compose", { workflow: "worktree" }, true],
+    ["compose worktree", "compose", { workflow: "worktree" }, false],
     ["compose merge", "compose", { workflow: "merge" }, false],
-    ["resumed worktree", "resume", { checkpoint: { workflow: "worktree" } }, true]
+    ["resumed worktree", "resume", { checkpoint: { workflow: "worktree" } }, false]
   ] as const)(
     "scopes external-directory permission for %s",
     async (_label, kind, request, expected) => {
@@ -1394,10 +1560,12 @@ describe("runJobWorker", () => {
       }
     });
     const deps = workerDeps({
-      runMimoStreaming: async (_cwd, _args, options) => {
+      runMimoStreaming: async (runCwd, _args, options) => {
         await options.onStart?.(654);
-        fs.writeFileSync(lock, '{"pid":2,"startedAt":2}\n', "utf8");
-        fs.writeFileSync(path.join(cwd, "tracked.txt"), "after\n", "utf8");
+        const executionLock = path.join(runCwd, ".mimocode", ".cron-lock");
+        fs.mkdirSync(path.dirname(executionLock), { recursive: true });
+        fs.writeFileSync(executionLock, '{"pid":2,"startedAt":2}\n', "utf8");
+        fs.writeFileSync(path.join(runCwd, "tracked.txt"), "after\n", "utf8");
         await options.onLine?.('{"type":"text","text":"Implemented."}');
         return { ...completedRun, pid: 654 };
       }
@@ -1446,6 +1614,389 @@ describe("runJobWorker", () => {
     });
   });
 
+  it("runs a real implement definition in an isolated Git worktree and promotes only allowed sources", async () => {
+    const cwd = gitWorkspace();
+    const headBefore = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+    const branchBefore = execFileSync("git", ["branch", "--show-current"], { cwd, encoding: "utf8" }).trim();
+    const job = seedIsolatedImplementJob(cwd);
+    let executionCwd: string | undefined;
+    const deps = actualWorkerDeps({
+      runMimoStreaming: async (runCwd, args, options) => {
+        executionCwd = runCwd;
+        expect(path.resolve(runCwd)).not.toBe(path.resolve(cwd));
+        expect(JSON.stringify(args)).not.toContain(cwd);
+        await options.onStart?.(654);
+        fs.writeFileSync(path.join(runCwd, "tracked.txt"), "isolated update\n", "utf8");
+        fs.mkdirSync(path.join(runCwd, "out"), { recursive: true });
+        fs.writeFileSync(path.join(runCwd, "out", "generated.txt"), "artifact\n", "utf8");
+        await options.onLine?.('{"type":"text","text":"Implemented and verified.","sessionID":"ses_worker"}');
+        return { ...completedRun, pid: 654 };
+      }
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    const stored = readJob(cwd, job.id)!;
+    expect(executionCwd).toBeDefined();
+    expect(fs.readFileSync(path.join(cwd, "tracked.txt"), "utf8")).toBe("isolated update\n");
+    expect(fs.existsSync(path.join(cwd, "out", "generated.txt"))).toBe(false);
+    expect(stored).toMatchObject({
+      status: "completed",
+      changedFiles: ["tracked.txt"],
+      artifactFiles: ["out/generated.txt"],
+      executionWorkspace: { status: "disposed", kind: "git_worktree" }
+    });
+    expect(fs.existsSync(stored.executionWorkspace!.path)).toBe(false);
+    expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim()).toBe(headBefore);
+    expect(execFileSync("git", ["branch", "--show-current"], { cwd, encoding: "utf8" }).trim()).toBe(branchBefore);
+    expect(isUnderWorkspace(cwd, stored.reportPaths.executionEvidence)).toBe(true);
+    expect(isUnderWorkspace(cwd, stored.reportPaths.result)).toBe(true);
+  });
+
+  it("runs default compose worktree in a retained bridge-owned worktree without external-directory access", async () => {
+    const cwd = gitWorkspace();
+    const localAppData = tempWorkspace();
+    vi.stubEnv("LOCALAPPDATA", localAppData);
+    const controlHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+    const controlBranch = execFileSync("git", ["branch", "--show-current"], { cwd, encoding: "utf8" }).trim();
+    const job = createJobStore(cwd).create({
+      kind: "compose", task: "Edit only the isolated source.",
+      request: { cwd, workflow: "worktree", task: "Edit only the isolated source.", allowedPaths: ["tracked.txt"] }
+    });
+    const createHook = vi.fn(async () => hook({
+      ...completedCallback,
+      sessionId: "ses_persistent",
+      finalText: JSON.stringify({ verdict: "pass", summary: "Isolated edit complete.", findings: [], changedFiles: ["tracked.txt"], tests: [] })
+    }));
+    const deps = actualWorkerDeps({
+      createHookCallbackController: createHook,
+      runMimoStreaming: async (runCwd, args, options) => {
+        expect(path.resolve(runCwd)).not.toBe(path.resolve(cwd));
+        expect(JSON.stringify(args)).not.toContain(cwd);
+        await options.onStart?.(654);
+        fs.writeFileSync(path.join(runCwd, "tracked.txt"), "persistent update\n", "utf8");
+        await options.onLine?.('{"type":"text","text":"Done.","sessionID":"ses_persistent"}');
+        return { ...completedRun, pid: 654 };
+      }
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    const stored = readJob(cwd, job.id)!;
+    expect(createHook).toHaveBeenCalledWith(expect.not.objectContaining({ allowExternalDirectory: true }));
+    expect(stored).toMatchObject({ status: "completed", executionWorkspace: { status: "retained", mode: "persistent", resumable: true, branch: `codex-mimo/worktree/${job.id}` } });
+    expect(stored.executionWorkspaceLease?.ownerToken).toEqual(expect.any(String));
+    expect(fs.readFileSync(path.join(cwd, "tracked.txt"), "utf8")).toBe("before\n");
+    expect(fs.readFileSync(path.join(stored.executionWorkspace!.path, "tracked.txt"), "utf8")).toBe("persistent update\n");
+    expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).toString().trim()).toBe(controlHead);
+    expect(execFileSync("git", ["branch", "--show-current"], { cwd, encoding: "utf8" }).toString().trim()).toBe(controlBranch);
+    execFileSync("git", ["worktree", "remove", "--force", stored.executionWorkspace!.path], { cwd, stdio: "ignore" });
+    execFileSync("git", ["branch", "-D", stored.executionWorkspace!.branch!], { cwd, stdio: "ignore" });
+  });
+
+  it("runs default compose merge in a detached worktree and publishes only an integration branch", async () => {
+    const cwd = gitWorkspace();
+    const targetRef = execFileSync("git", ["branch", "--show-current"], { cwd, encoding: "utf8" }).trim();
+    const targetOid = execFileSync("git", ["rev-parse", targetRef], { cwd, encoding: "utf8" }).trim();
+    execFileSync("git", ["checkout", "-b", "feature"], { cwd, stdio: "ignore" });
+    fs.writeFileSync(path.join(cwd, "tracked.txt"), "feature\n", "utf8");
+    execFileSync("git", ["add", "tracked.txt"], { cwd });
+    execFileSync("git", ["commit", "-m", "feature"], { cwd, stdio: "ignore" });
+    const sourceOid = execFileSync("git", ["rev-parse", "feature"], { cwd, encoding: "utf8" }).trim();
+    execFileSync("git", ["checkout", targetRef], { cwd, stdio: "ignore" });
+    const mergeSnapshot = captureMergeSnapshot(cwd, { sourceRef: "feature", targetRef });
+    const job = createJobStore(cwd).create({
+      kind: "compose", task: "Merge the feature safely.",
+      request: { cwd, workflow: "merge", task: "Merge the feature safely.", sourceRef: "refs/heads/feature", targetRef: `refs/heads/${targetRef}`, allowedPaths: ["tracked.txt"], mergeSnapshot }
+    });
+    const deps = actualWorkerDeps({
+      runMimoStreaming: async (runCwd, _args, options) => {
+        expect(path.resolve(runCwd)).not.toBe(path.resolve(cwd));
+        await options.onStart?.(654);
+        await options.onLine?.('{"type":"text","text":"Resolved and staged.","sessionID":"ses_worker"}');
+        return { ...completedRun, pid: 654 };
+      }
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    const stored = readJob(cwd, job.id)!;
+    expect(stored).toMatchObject({
+      status: "completed",
+      executionWorkspace: { status: "disposed", kind: "git_worktree" },
+      mergeTransaction: {
+        status: "published", sourceOid, targetOid,
+        integrationRef: `refs/heads/codex-mimo/merge/${job.id}`,
+        mergeOid: expect.any(String), journalPath: expect.any(String)
+      }
+    });
+    expect(execFileSync("git", ["rev-parse", targetRef], { cwd, encoding: "utf8" }).trim()).toBe(targetOid);
+    expect(execFileSync("git", ["branch", "--show-current"], { cwd, encoding: "utf8" }).trim()).toBe(targetRef);
+    expect(execFileSync("git", ["rev-parse", stored.mergeTransaction!.integrationRef!], { cwd, encoding: "utf8" }).trim())
+      .toBe(stored.mergeTransaction!.mergeOid);
+    expect(JSON.stringify(stored)).not.toContain("ownerToken");
+    const report = JSON.parse(fs.readFileSync(stored.reportPaths!.json!, "utf8"));
+    const evidence = JSON.parse(fs.readFileSync(stored.reportPaths!.executionEvidence!, "utf8"));
+    expect(report.gitHeadAfter.oid).toBe(stored.mergeTransaction!.mergeOid);
+    expect(report.gitCommits).toEqual([stored.mergeTransaction!.mergeOid]);
+    expect(evidence.terminal).toMatchObject({ status: "completed", gitHeadAfter: { oid: stored.mergeTransaction!.mergeOid }, gitCommits: [stored.mergeTransaction!.mergeOid] });
+
+    // Simulate a process stop after the guarded CAS metadata write but before
+    // the terminal transition. Recovery must not invoke MiMoCode or retry CAS.
+    await updateJobAuthoritative(cwd, job.id, {
+      status: "running", phase: "finalizing", pid: null, processIdentity: null,
+      mergeTransaction: { ...stored.mergeTransaction!, status: "merged" }
+    });
+    const recoveryRun = vi.fn(async () => { throw new Error("MiMoCode must not rerun after publication"); });
+    await runJobWorker(cwd, job.id, actualWorkerDeps({ runMimoStreaming: recoveryRun }));
+    expect(recoveryRun).not.toHaveBeenCalled();
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "completed",
+      mergeTransaction: {
+        status: "published", mergeOid: stored.mergeTransaction!.mergeOid,
+        integrationRef: stored.mergeTransaction!.integrationRef,
+        journalPath: stored.mergeTransaction!.journalPath
+      }
+    });
+  }, 15_000);
+
+  it("completes an already-integrated merge without starting MiMoCode and writes no-op evidence", async () => {
+    const cwd = gitWorkspace();
+    const targetRef = execFileSync("git", ["branch", "--show-current"], { cwd, encoding: "utf8" }).trim();
+    execFileSync("git", ["branch", "feature"], { cwd });
+    fs.writeFileSync(path.join(cwd, "tracked.txt"), "target advance\n", "utf8");
+    execFileSync("git", ["add", "tracked.txt"], { cwd });
+    execFileSync("git", ["commit", "-m", "target advance"], { cwd, stdio: "ignore" });
+    const snapshot = captureMergeSnapshot(cwd, { sourceRef: "feature", targetRef });
+    const job = createJobStore(cwd).create({
+      kind: "compose", task: "No-op merge.",
+      request: { cwd, workflow: "merge", task: "No-op merge.", sourceRef: "refs/heads/feature", targetRef: `refs/heads/${targetRef}`, allowedPaths: ["tracked.txt"], mergeSnapshot: snapshot }
+    });
+    const run = vi.fn(async () => { throw new Error("already-integrated merge must not run MiMoCode"); });
+
+    await runJobWorker(cwd, job.id, actualWorkerDeps({ runMimoStreaming: run }));
+
+    const stored = readJob(cwd, job.id)!;
+    expect(run).not.toHaveBeenCalled();
+    expect(stored).toMatchObject({
+      status: "completed",
+      mergeTransaction: { status: "already_integrated" },
+      executionWorkspace: { status: "disposed" },
+      reportPaths: { json: expect.any(String), markdown: expect.any(String), executionEvidence: expect.any(String) }
+    });
+    expect(fs.existsSync(stored.reportPaths!.json!)).toBe(true);
+    expect(fs.existsSync(stored.reportPaths!.executionEvidence!)).toBe(true);
+  });
+
+  it("retains an isolated workspace after a failed run without polluting its control workspace", async () => {
+    const cwd = gitWorkspace();
+    const job = seedIsolatedImplementJob(cwd);
+    const deps = actualWorkerDeps({
+      runMimoStreaming: async (runCwd, _args, options) => {
+        await options.onStart?.(654);
+        fs.writeFileSync(path.join(runCwd, "tracked.txt"), "failed isolated update\n", "utf8");
+        return { ...completedRun, exitCode: 1, pid: 654 };
+      }
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    const stored = readJob(cwd, job.id)!;
+    expect(stored).toMatchObject({
+      status: "failed",
+      executionWorkspace: { status: "retained", kind: "git_worktree" }
+    });
+    expect(fs.readFileSync(path.join(cwd, "tracked.txt"), "utf8")).toBe("before\n");
+    expect(fs.readFileSync(path.join(stored.executionWorkspace!.path, "tracked.txt"), "utf8"))
+      .toBe("failed isolated update\n");
+    removeRetainedExecutionWorkspace(stored);
+  });
+
+  it("fails closed with precise promotion conflicts when the control workspace changes during execution", async () => {
+    const cwd = gitWorkspace();
+    const job = seedIsolatedImplementJob(cwd);
+    const deps = actualWorkerDeps({
+      runMimoStreaming: async (runCwd, _args, options) => {
+        await options.onStart?.(654);
+        fs.writeFileSync(path.join(runCwd, "tracked.txt"), "execution copy\n", "utf8");
+        fs.writeFileSync(path.join(cwd, "tracked.txt"), "control edit\n", "utf8");
+        await options.onLine?.('{"type":"text","text":"Implemented and verified.","sessionID":"ses_worker"}');
+        return { ...completedRun, pid: 654 };
+      }
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    const stored = readJob(cwd, job.id)!;
+    expect(stored).toMatchObject({
+      status: "needs_input",
+      errorCode: "promotion_conflict",
+      executionWorkspace: {
+        status: "retained",
+        conflictPaths: ["tracked.txt"]
+      }
+    });
+    expect(fs.readFileSync(path.join(cwd, "tracked.txt"), "utf8")).toBe("control edit\n");
+    expect(fs.readFileSync(path.join(stored.executionWorkspace!.path, "tracked.txt"), "utf8"))
+      .toBe("execution copy\n");
+    removeRetainedExecutionWorkspace(stored);
+  });
+
+  it("does not promote an out-of-scope write from an isolated execution workspace", async () => {
+    const cwd = gitWorkspace();
+    const job = seedIsolatedImplementJob(cwd);
+    const deps = actualWorkerDeps({
+      runMimoStreaming: async (runCwd, _args, options) => {
+        await options.onStart?.(654);
+        fs.writeFileSync(path.join(runCwd, "unscoped.txt"), "must stay isolated\n", "utf8");
+        await options.onLine?.('{"type":"text","text":"Implemented and verified.","sessionID":"ses_worker"}');
+        return { ...completedRun, pid: 654 };
+      }
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    const stored = readJob(cwd, job.id)!;
+    expect(stored).toMatchObject({
+      status: "failed",
+      errorCode: "write_scope_violation",
+      executionWorkspace: { status: "retained" }
+    });
+    expect(fs.existsSync(path.join(cwd, "unscoped.txt"))).toBe(false);
+    expect(fs.readFileSync(path.join(stored.executionWorkspace!.path, "unscoped.txt"), "utf8"))
+      .toBe("must stay isolated\n");
+    removeRetainedExecutionWorkspace(stored);
+  });
+
+  it("rejects an isolated write resume that commits even without host acceptance", async () => {
+    const cwd = gitWorkspace();
+    const job = createJobStore(cwd).create({
+      kind: "resume",
+      task: "Continue the isolated change.",
+      request: {
+        cwd,
+        jobId: "parent-job",
+        task: "Continue the isolated change.",
+        executionPolicy: { agent: "build", writesAllowed: true },
+        requireAcceptance: false
+      }
+    });
+    const deps = actualWorkerDeps({
+      runMimoStreaming: async (runCwd, _args, options) => {
+        await options.onStart?.(654);
+        fs.writeFileSync(path.join(runCwd, "tracked.txt"), "committed isolated update\n", "utf8");
+        execFileSync("git", ["add", "tracked.txt"], { cwd: runCwd });
+        execFileSync("git", ["commit", "-m", "isolated commit"], { cwd: runCwd, stdio: "ignore" });
+        await options.onLine?.('{"type":"text","text":"Resume completed.","sessionID":"ses_worker"}');
+        return { ...completedRun, pid: 654 };
+      }
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    const stored = readJob(cwd, job.id)!;
+    expect(stored).toMatchObject({
+      status: "failed",
+      errorCode: "commit_not_allowed",
+      executionWorkspace: { status: "retained", kind: "git_worktree" }
+    });
+    expect(fs.readFileSync(path.join(cwd, "tracked.txt"), "utf8")).toBe("before\n");
+    removeRetainedExecutionWorkspace(stored);
+  });
+
+  it.each(["prepared", "retained", "promoted"] as const)(
+    "requires input rather than reconciling %s isolated execution evidence",
+    async (workspaceStatus) => {
+      const cwd = gitWorkspace();
+      const job = seedIsolatedImplementJob(cwd);
+      const running = (await transitionJob(cwd, job.id, {
+        status: "running",
+        phase: "finalizing",
+        summary: "interrupted",
+        pid: null
+      })).job;
+      const retainedParent = tempWorkspace();
+      const retainedPath = path.join(retainedParent, "workspace");
+      fs.mkdirSync(retainedPath);
+      const withWorkspace = await updateJobAuthoritative(cwd, job.id, {
+        executionWorkspace: {
+          path: retainedPath,
+          kind: "git_worktree",
+          status: workspaceStatus,
+          isolationGuarantee: "cwd_relative_write_containment"
+        }
+      });
+      expect(withWorkspace.executionWorkspace?.status).toBe(workspaceStatus);
+      writeExecutionEvidence(readJob(cwd, job.id)!, {
+        reconciliationAttempts: 0,
+        run: { exitCode: 0 },
+        executionCallback: { invocationId: "inv-recovery", outcome: "completed" },
+        changeDetection: {
+          files: ["tracked.txt"],
+          candidates: [],
+          status: "complete",
+          sources: ["git_diff"]
+        },
+        commandEvidence: [],
+        finalRepositoryFingerprint: "fingerprint"
+      }, "Interrupted isolated result.");
+      if (workspaceStatus === "prepared") {
+        await requestJobCancellation(cwd, job.id);
+      }
+      const deps = actualWorkerDeps();
+
+      await runJobWorker(cwd, running.id, deps);
+
+      expect(readJob(cwd, job.id)).toMatchObject({
+        status: "needs_input",
+        errorCode: "isolation_recovery_required",
+        executionWorkspace: { status: workspaceStatus }
+      });
+      expect(deps.runMimoStreaming).not.toHaveBeenCalled();
+    }
+  );
+
+  it("remaps a fix-ci attachment into the execution workspace before building MiMo arguments", async () => {
+    const cwd = gitWorkspace();
+    const logFile = path.join(cwd, "ci.log");
+    fs.writeFileSync(logFile, "failing build output\n", "utf8");
+    const job = createJobStore(cwd).create({
+      kind: "fix-ci",
+      task: "Fix the failing build.",
+      request: {
+        cwd,
+        file: logFile,
+        task: "Fix the failing build.",
+        allowedPaths: ["tracked.txt"],
+        acceptance: PASSING_ACCEPTANCE
+      }
+    });
+    const deps = actualWorkerDeps({
+      runMimoStreaming: async (runCwd, args, options) => {
+        const serialized = JSON.stringify(args);
+        expect(serialized).not.toContain(cwd);
+        const attachments = args.flatMap((argument, index) =>
+          argument === "--file" && args[index + 1] ? [args[index + 1]] : []
+        );
+        expect(attachments).not.toHaveLength(0);
+        expect(attachments.every((attachment) => isUnderWorkspace(runCwd, attachment))).toBe(true);
+        expect(attachments.some((attachment) =>
+          fs.readFileSync(attachment, "utf8") === "failing build output\n"
+        )).toBe(true);
+        await options.onStart?.(654);
+        await options.onLine?.('{"type":"text","text":"Fixed and verified.","sessionID":"ses_worker"}');
+        return { ...completedRun, pid: 654 };
+      }
+    });
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      status: "completed",
+      executionWorkspace: { status: "disposed", kind: "git_worktree" }
+    });
+  });
+
   it.each([
     [null, "callback_missing"],
     [{ ...completedCallback, outcome: "error" as const, error: "hook failed" }, "callback_error"],
@@ -1481,6 +2032,93 @@ describe("runJobWorker", () => {
       ? { status, pid: null, errorCode: "idle_timeout" }
       : { status, pid: null };
     expect(readJob(cwd, job.id)).toMatchObject(expected);
+  });
+
+  it.each([
+    ["process_timeout", "timeout", "timeout"],
+    ["idle_timeout", "timeout", "idle_timeout"],
+    ["user_cancelled", "cancelled", "cancelled"],
+    ["host_abort", "failed", "mimo_exit_nonzero"]
+  ] as const)("does not wait for session.post after %s", async (terminationReason, status, errorCode) => {
+    const cwd = tempWorkspace();
+    const job = seedActualImplementJob(cwd);
+    const controller = hook();
+    controller.getReceivedCallback = vi.fn(() => null);
+    controller.waitForCallback = vi.fn(() => new Promise<MimoHookCallbackSummary | null>(() => {}));
+    const deps = workerDeps({
+      createHookCallbackController: async () => controller,
+      runMimoStreaming: async () => ({ ...completedRun, exitCode: 124, terminationReason })
+    });
+    delete deps.bindJobDefinition;
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(controller.waitForCallback).not.toHaveBeenCalled();
+    expect(controller.close).toHaveBeenCalledOnce();
+    expect(readJob(cwd, job.id)).toMatchObject({ status, errorCode });
+    expect(fs.readFileSync(readJob(cwd, job.id)!.logFile, "utf8"))
+      .toContain("MiMoCode job diagnostic recorded.");
+  });
+
+  it("preserves an already received scope guard when a process timeout wins", async () => {
+    const cwd = tempWorkspace();
+    const job = seedActualImplementJob(cwd);
+    const controller = hook({
+      ...completedCallback,
+      guardFailure: {
+        code: "write_scope_violation",
+        sessionId: "ses_worker",
+        path: "src/out-of-scope.ts"
+      }
+    });
+    controller.waitForCallback = vi.fn(() => new Promise<MimoHookCallbackSummary | null>(() => {}));
+    const deps = workerDeps({
+      createHookCallbackController: async () => controller,
+      runMimoStreaming: async () => ({
+        ...completedRun,
+        exitCode: 124,
+        terminationReason: "process_timeout"
+      })
+    });
+    delete deps.bindJobDefinition;
+
+    await runJobWorker(cwd, job.id, deps);
+
+    expect(controller.getReceivedCallback).toHaveBeenCalledOnce();
+    expect(controller.waitForCallback).not.toHaveBeenCalled();
+    const stored = readJob(cwd, job.id)!;
+    expect(stored).toMatchObject({
+      status: "timeout",
+      errorCode: "timeout",
+      executionCallback: {
+        outcome: "completed",
+        sessionId: "ses_worker"
+      }
+    });
+    expect(stored.failureCauses).toEqual(expect.arrayContaining([{
+        code: "write_scope_violation",
+        stage: "scope_check",
+        suggestion: "Blocked path: src/out-of-scope.ts"
+    }]));
+  });
+
+  it("waits for session.post after a normal zero-exit run", async () => {
+    const cwd = tempWorkspace();
+    const job = seedJob(cwd, "plan");
+    const controller = hook();
+    let resolveCallback!: (value: MimoHookCallbackSummary | null) => void;
+    controller.waitForCallback = vi.fn(() => new Promise<MimoHookCallbackSummary | null>((resolve) => {
+      resolveCallback = resolve;
+    }));
+    const deps = workerDeps({ createHookCallbackController: async () => controller });
+    const worker = runJobWorker(cwd, job.id, deps);
+    await vi.waitFor(() => expect(controller.waitForCallback).toHaveBeenCalledOnce());
+    expect(readJob(cwd, job.id)).toMatchObject({ status: "running" });
+
+    resolveCallback(completedCallback);
+    await worker;
+
+    expect(readJob(cwd, job.id)).toMatchObject({ status: "completed" });
   });
 
   it("passes idleTimeoutMs from the request into the streaming runner", async () => {
@@ -2004,6 +2642,52 @@ describe("runJobWorker", () => {
             status: "complete",
             sources: ["git_fingerprint"]
           }
+        }
+      });
+    });
+
+    it("preserves an already received scope guard when progress timeout finalizes", async () => {
+      const cwd = tempWorkspace();
+      const job = createJobStore(cwd).create({
+        kind: "implement",
+        task: "Stall with scope guard",
+        request: {
+          cwd,
+          progressTimeoutMs: 5_000,
+          progressWarningMs: 1_000,
+          idleTimeoutMs: 0
+        }
+      });
+      const controller = hook({
+        ...completedCallback,
+        guardFailure: {
+          code: "write_scope_violation",
+          sessionId: "ses_worker",
+          path: "src/out-of-scope.ts"
+        }
+      });
+      const harness = progressMonitorHarness({
+        createHookCallbackController: async () => controller,
+        terminateOwnedProcess: vi.fn(() => ({ status: "not_running" as const, evidence: "gone" }))
+      });
+
+      const worker = runJobWorker(cwd, job.id, harness.deps);
+      const { emitLines } = await harness.whenReady;
+      await emitLines(['{"type":"text","text":"waiting"}']);
+      await harness.advance(6_000);
+      await worker;
+
+      expect(controller.waitForCallback).not.toHaveBeenCalled();
+      expect(readJob(cwd, job.id)).toMatchObject({
+        status: "stalled",
+        failureCauses: [{
+          code: "write_scope_violation",
+          stage: "scope_check",
+          suggestion: "Blocked path: src/out-of-scope.ts"
+        }],
+        executionCallback: {
+          outcome: "completed",
+          sessionId: "ses_worker"
         }
       });
     });

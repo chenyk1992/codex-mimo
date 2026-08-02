@@ -119,7 +119,9 @@ const WORK_SCHEMAS: Record<string, Record<string, unknown>> = {
     verification,
     reportDir: string,
     batchMode,
-    allowedPaths: { type: "array", items: string }
+    allowedPaths: { type: "array", items: string },
+    sourceRef: string,
+    targetRef: string
   }, ["cwd", "workflow"])
 };
 
@@ -369,6 +371,20 @@ describe("lightweight plugin validator", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("mimo_review input schema must match the canonical contract");
+  });
+
+  it.each(["sourceRef", "targetRef"])("rejects mimo_compose without %s", (field) => {
+    const root = createPluginFixture("---\nname: mimocode\ndescription: Use MiMoCode.\n---", {
+      mutateTools: (tools) => {
+        const compose = tools.find((tool) => tool.name === "mimo_compose")!;
+        delete (compose.inputSchema.properties as Record<string, unknown>)[field];
+      }
+    });
+
+    const result = runValidator(root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("mimo_compose input schema must match the canonical contract");
   });
 
   it.each(["mimo_status", "mimo_result"] as const)(

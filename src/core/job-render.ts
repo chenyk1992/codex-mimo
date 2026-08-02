@@ -77,6 +77,7 @@ export function renderJobStatus(
       ...(job.errorCode !== undefined ? { errorCode: job.errorCode } : {})
     }),
     changedFiles: [...job.changedFiles],
+    ...(job.artifactFiles?.length ? { artifactFiles: [...job.artifactFiles] } : {}),
     ...(job.cancellationRequestedAt ? { cancellationRequested: true as const } : {}),
     ...(job.executionCallback ? { executionCallback: publicExecutionCallback(job) } : {}),
     progress: (options.progress ?? []).map(() => publicProgressSummary({
@@ -137,6 +138,13 @@ export function renderCompactJobResult(
   const result: CompactJobResult = {
     status: job.status,
     changedFiles: job.changedFiles.map(compactFilePath),
+    ...(job.artifactFiles?.length
+      ? { artifactFiles: job.artifactFiles.map(compactFilePath) }
+      : {}),
+    ...(job.executionWorkspace
+      ? { executionWorkspace: publicExecutionWorkspace(job.executionWorkspace) }
+      : {}),
+    ...(job.mergeTransaction ? { mergeTransaction: { ...job.mergeTransaction } } : {}),
     tests,
     failure,
     reportPath: compactReportPath(job, semantic
@@ -198,6 +206,17 @@ function publicReconciliation(
   };
 }
 
+function publicExecutionWorkspace(
+  workspace: NonNullable<JobRecord["executionWorkspace"]>
+): NonNullable<CompactJobResult["executionWorkspace"]> {
+  return {
+    ...workspace,
+    ...(workspace.conflictPaths
+      ? { conflictPaths: workspace.conflictPaths.map(compactFilePath) }
+      : {})
+  };
+}
+
 export function isSemanticResultJob(job: JobRecord): boolean {
   if (job.kind === "plan" || job.kind === "review") return true;
   if (job.kind !== "compose" || typeof job.request !== "object" || job.request === null) {
@@ -232,6 +251,11 @@ export function renderJobResult(
   return {
     ...compact,
     changedFiles: [...job.changedFiles],
+    ...(job.artifactFiles?.length ? { artifactFiles: [...job.artifactFiles] } : {}),
+    ...(job.executionWorkspace
+      ? { executionWorkspace: publicExecutionWorkspace(job.executionWorkspace) }
+      : {}),
+    ...(job.mergeTransaction ? { mergeTransaction: { ...job.mergeTransaction } } : {}),
     tests: compactAcceptanceTests(job).map((test) => ({
       ...test,
       command: compactLine(redactDiagnosticText(test.command))
@@ -333,6 +357,8 @@ function fitCompactResult(input: CompactJobResult): CompactJobResult {
   const result: CompactJobResult = {
     ...input,
     changedFiles: [...input.changedFiles],
+    ...(input.artifactFiles ? { artifactFiles: [...input.artifactFiles] } : {}),
+    ...(input.executionWorkspace ? { executionWorkspace: { ...input.executionWorkspace } } : {}),
     tests: [...input.tests],
     ...(input.failure ? { failure: { ...input.failure } } : {})
   };
@@ -341,14 +367,17 @@ function fitCompactResult(input: CompactJobResult): CompactJobResult {
   delete result.summary;
   result.tests = result.tests.slice(0, MAX_COMPACT_TESTS);
   result.changedFiles = compactFiles(result.changedFiles, MAX_COMPACT_FILES);
+  if (result.artifactFiles) result.artifactFiles = compactFiles(result.artifactFiles, MAX_COMPACT_FILES);
   if (compactBytes(result) <= COMPACT_RESULT_MAX_BYTES) return result;
 
   result.tests = firstResultPerStage(result.tests);
   result.changedFiles = compactFiles(input.changedFiles, 10);
+  if (input.artifactFiles) result.artifactFiles = compactFiles(input.artifactFiles, 10);
   if (result.failure?.failedTests) result.failure.failedTests = result.failure.failedTests.slice(0, 3);
   if (compactBytes(result) <= COMPACT_RESULT_MAX_BYTES) return result;
 
   result.changedFiles = compactFiles(input.changedFiles, 1);
+  if (input.artifactFiles) result.artifactFiles = compactFiles(input.artifactFiles, 1);
   result.tests = result.tests.slice(0, 1);
   if (result.failure) {
     result.failure.reason = result.failure.reason.slice(0, 240);

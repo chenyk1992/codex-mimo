@@ -17,7 +17,7 @@ import {
 import { launchJob, type LaunchJobDependencies } from "../core/job-launcher.js";
 import { advanceJobChainAfterChild, bindJobDefinition } from "../core/job-definitions.js";
 import {
-  captureRepositoryFingerprint,
+  captureResumeConflictCheck,
   detectResumeConflict,
   readJobCheckpoint,
   RESUMABLE_FAILURE_CODES,
@@ -72,6 +72,8 @@ import {
   recordContextToolCall
 } from "../core/context-overhead.js";
 import { workflowRequiresDevelopmentAcceptance } from "../compose/workflow.js";
+import { reopenPersistentGitWorktree } from "../git/worktree.js";
+import { captureMergeSnapshot } from "../git/merge-transaction.js";
 
 const WAIT_CHECK_INTERVAL_MS = 1_000;
 
@@ -140,11 +142,23 @@ export async function mimoFixCi(input: unknown, deps: LaunchJobDependencies = {}
 export async function mimoCompose(input: unknown, deps: LaunchJobDependencies = {}) {
   const parsed = parseComposeInput(input);
   const { notify, ...request } = parsed;
+  const mergeSnapshot = parsed.workflow === "merge"
+    ? captureMergeSnapshot(parsed.cwd, { sourceRef: parsed.sourceRef!, targetRef: parsed.targetRef! })
+    : undefined;
   return launchJob({
     kind: "compose",
     cwd: parsed.cwd,
     task: parsed.task ?? `Run ${parsed.workflow} workflow.`,
-    request,
+    request: {
+      ...request,
+      ...(mergeSnapshot ? {
+        // Persist exactly the canonical local refs that were pinned, so a
+        // short public branch name never disagrees with the durable snapshot.
+        sourceRef: mergeSnapshot.sourceRef,
+        targetRef: mergeSnapshot.targetRef,
+        mergeSnapshot
+      } : {})
+    },
     notify
   }, deps);
 }
@@ -155,10 +169,12 @@ export interface MimoResumeDependencies extends LaunchJobDependencies {
     expectedIdentity: string | null | undefined
   ) => ProcessIdentityVerification;
   readCheckpoint?: typeof readJobCheckpoint;
-  captureFingerprint?: (cwd: string, checkpoint: JobCheckpoint) => Promise<string>;
+  captureFingerprint?: (cwd: string, checkpoint: JobCheckpoint) =>
+    Promise<string | Awaited<ReturnType<typeof captureResumeConflictCheck>>>;
 }
 
 function isResumableParent(parent: JobRecord): boolean {
+  if (parent.status === "completed" && parent.executionWorkspaceLease?.mode === "persistent") return true;
   if (
     parent.status === "needs_input" ||
     parent.status === "blocked" ||
@@ -316,14 +332,21 @@ export async function mimoResume(input: unknown, deps: MimoResumeDependencies = 
     throw new Error(`resume_context_missing: Job ${parent.id} has no session or checkpoint.`);
   }
 
+  const persistentLease = resumeSource.executionWorkspaceLease ?? parent.executionWorkspaceLease;
+  if (persistentLease) {
+    try {
+      reopenPersistentGitWorktree(persistentLease);
+    } catch {
+      throw new Error("persistent_worktree_unavailable: Persistent worktree lease could not be validated.");
+    }
+  }
   if (checkpoint) {
-    const captureFingerprint = deps.captureFingerprint ??
-      ((cwd, saved) => captureRepositoryFingerprint(
-        cwd,
-        [...saved.contextFiles, ...saved.changedFiles]
-      ));
-    const currentFingerprint = await captureFingerprint(parent.cwd, checkpoint);
-    const conflict = detectResumeConflict(checkpoint, { repositoryFingerprint: currentFingerprint });
+    const captureFingerprint = deps.captureFingerprint ?? captureResumeConflictCheck;
+    const captured = await captureFingerprint(persistentLease?.executionRoot ?? parent.cwd, checkpoint);
+    const current = typeof captured === "string"
+      ? { repositoryFingerprint: captured }
+      : captured;
+    const conflict = detectResumeConflict(checkpoint, current);
     if (conflict) {
       throw new Error(`resume_conflict: ${JSON.stringify(conflict)}`);
     }
@@ -387,6 +410,7 @@ export async function mimoResume(input: unknown, deps: MimoResumeDependencies = 
         }
       : {}),
     request,
+    ...(persistentLease ? { executionWorkspaceLease: persistentLease } : {}),
     ...(chainResume
       ? { notificationTarget: null }
       : notify === undefined

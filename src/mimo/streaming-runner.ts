@@ -3,7 +3,12 @@ import { EventEmitter } from "node:events";
 import { execa } from "execa";
 import readline from "node:readline";
 import type { Readable } from "node:stream";
-import { withUtf8ProcessEnv } from "../core/encoding.js";
+import {
+  buildMimoExecutionEnv,
+  omitEnvironmentVariables,
+  type BuildMimoExecutionEnvOptions,
+  type MimoExecutionEnvironmentAudit
+} from "../core/encoding.js";
 import {
   terminatePosixProcessGroup,
   type AsyncProcessGroupTerminationOptions,
@@ -27,6 +32,7 @@ export interface StreamingRunResult {
   exitCode: number;
   pid: number | null;
   terminationReason?: TerminationReason;
+  environmentAudit?: MimoExecutionEnvironmentAudit;
 }
 
 export class StreamingProcessStartError extends Error {
@@ -79,7 +85,13 @@ export interface StreamingRunOptions {
   pipeDrainGraceMs?: number;
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
+  /** Allows tests and embedders to provide a stable parent environment. */
+  baseEnv?: NodeJS.ProcessEnv;
   omitEnv?: readonly string[];
+  environmentPolicy?: BuildMimoExecutionEnvOptions["policy"];
+  provider?: string;
+  allowEnv?: readonly string[];
+  requiredCredentialNames?: readonly string[];
   platform?: NodeJS.Platform;
   onLine?: (line: string) => void;
   onStderr?: (chunk: string) => void;
@@ -211,11 +223,27 @@ export async function runMimoCliStreaming(
   options: StreamingRunOptions = {}
 ): Promise<StreamingRunResult> {
   const platform = options.platform ?? process.platform;
-  const childEnv = withUtf8ProcessEnv(options.env, {
-    omit: options.omitEnv,
-    platform
-  });
-  const selection = resolveMimoProcessSelection(childEnv, platform);
+  // Command selection happens in the host only. The command override is then
+  // removed from the child environment together with host-only credentials.
+  const commandEnvironment = omitEnvironmentVariables(
+    { ...(options.baseEnv ?? process.env), ...(options.env ?? {}) },
+    options.omitEnv,
+    { caseInsensitive: platform === "win32" }
+  );
+  const selection = resolveMimoProcessSelection(commandEnvironment, platform);
+  const executionEnvironment = buildMimoExecutionEnv(
+    options.baseEnv ?? process.env,
+    options.env,
+    {
+      platform,
+      policy: options.environmentPolicy,
+      provider: options.provider,
+      allowEnv: options.allowEnv,
+      requiredCredentialNames: options.requiredCredentialNames,
+      omit: options.omitEnv
+    }
+  );
+  const childEnv = executionEnvironment.env;
   const child = (options.spawnProcess ?? defaultSpawn)(cwd, args, childEnv, selection);
   const stdoutParts: string[] = [];
   const stderrParts: string[] = [];
@@ -453,7 +481,8 @@ export async function runMimoCliStreaming(
       stderr: stderrParts.join(""),
       exitCode,
       pid: child.pid ?? null,
-      terminationReason
+      terminationReason,
+      environmentAudit: executionEnvironment.audit
     };
   } finally {
     clearTerminationTimers();

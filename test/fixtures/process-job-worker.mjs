@@ -29,9 +29,13 @@ await runJobWorker(cwd, jobId, {
       FAKE_MIMO_CHECKPOINT_FILE: process.env.FAKE_MIMO_CHECKPOINT_FILE,
       FAKE_MIMO_INVOCATIONS_FILE: process.env.FAKE_MIMO_INVOCATIONS_FILE
     },
+    allowEnv: [
+      "FAKE_MIMO_MODE", "FAKE_MIMO_CALLBACK", "FAKE_MIMO_TREE",
+      "FAKE_MIMO_CHECKPOINT_FILE", "FAKE_MIMO_INVOCATIONS_FILE"
+    ],
     spawnProcess: (childCwd, _mimoArgs, env) => spawn(process.execPath, [fakeMimo], {
       cwd: childCwd,
-      env: { ...process.env, ...env },
+      env,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       detached: process.platform !== "win32"

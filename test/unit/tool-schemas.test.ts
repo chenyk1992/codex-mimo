@@ -92,7 +92,7 @@ describe("work tool schemas", () => {
     expect(Object.keys(FixCiInput.shape).sort()).toEqual(["acceptance", "allowedPaths", "cwd", "file", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
     expect(Object.keys(ResumeInput.shape).sort()).toEqual(["acceptance", "allowedPaths", "cwd", "idleTimeoutMs", "jobId", "notify", "progressTimeoutMs", "progressWarningMs", "task", "timeoutMs"]);
     expect(Object.keys(ComposeInputShape).sort()).toEqual([
-      "acceptance", "allowedPaths", "batchMode", "cwd", "file", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "reportDir", "since", "task", "timeoutMs", "verification", "workflow"
+      "acceptance", "allowedPaths", "batchMode", "cwd", "file", "idleTimeoutMs", "notify", "progressTimeoutMs", "progressWarningMs", "reportDir", "since", "sourceRef", "targetRef", "task", "timeoutMs", "verification", "workflow"
     ]);
   });
 
@@ -106,6 +106,18 @@ describe("work tool schemas", () => {
       .toThrow(/requires.*file/i);
     expect(parseComposeInput({ cwd: "E:/project", workflow: "review" }))
       .toMatchObject({ workflow: "review" });
+  });
+
+  it("requires bounded local merge inputs only for the merge workflow", () => {
+    expect(() => parseComposeInput({ cwd: "E:/project", workflow: "merge", task: "merge" }))
+      .toThrow(/sourceRef/i);
+    expect(parseComposeInput({
+      cwd: "E:/project", workflow: "merge", task: "merge",
+      sourceRef: "feature", targetRef: "main", allowedPaths: ["src/**"]
+    })).toMatchObject({ workflow: "merge", sourceRef: "feature", targetRef: "main" });
+    expect(() => parseComposeInput({
+      cwd: "E:/project", workflow: "dev", task: "x", sourceRef: "feature"
+    })).toThrow(/only by workflow merge/i);
   });
 
   it("keeps the wait polling interval private", () => {
@@ -292,6 +304,8 @@ describe("work tool schemas", () => {
     (workflow) => {
       const input = workflow === "fix-ci"
         ? { cwd: "E:/project", workflow, file: "ci.log", batchMode: "sliced" as const }
+        : workflow === "merge"
+          ? { cwd: "E:/project", workflow, task: "run workflow", sourceRef: "feature", targetRef: "main", allowedPaths: ["src/**"], batchMode: "sliced" as const }
         : { cwd: "E:/project", workflow, task: "run workflow", batchMode: "sliced" as const };
       expect(parseComposeInput(input)).not.toHaveProperty("batchMode");
     }

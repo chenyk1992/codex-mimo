@@ -14,7 +14,14 @@ import type { StreamingRunResult } from "../mimo/streaming-runner.js";
 import { renameWithWindowsRetry } from "./atomic-file.js";
 import type { ChangeDetectionResult } from "./changed-files.js";
 import { redactDiagnosticText } from "./job-output.js";
-import type { ExecutionCallbackSummary, JobFailureCause, JobRecord } from "./jobs.js";
+import type {
+  ExecutionCallbackSummary,
+  ExecutionWorkspaceSummary,
+  JobFailureCause,
+  JobRecord,
+  MergeTransactionSummary,
+  ReviewInputIntegrity
+} from "./jobs.js";
 
 export interface JobExecutionEvidence {
   version: 1;
@@ -26,6 +33,15 @@ export interface JobExecutionEvidence {
   eventSessionMismatch?: true;
   failureCauses?: JobFailureCause[];
   executionCallback?: ExecutionCallbackSummary;
+  reviewInput?: ReviewInputIntegrity;
+  executionWorkspace?: ExecutionWorkspaceSummary;
+  mergeTransaction?: MergeTransactionSummary;
+  terminal?: {
+    status: JobRecord["status"];
+    errorCode?: string;
+    gitHeadAfter?: GitHeadSnapshot;
+    gitCommits?: string[];
+  };
   gitStatusBefore?: GitStatusSnapshot;
   gitStatusAfter?: GitStatusSnapshot;
   gitHeadBefore?: GitHeadSnapshot;
@@ -101,6 +117,31 @@ export function updateExecutionEvidenceAttempts(
   attempts: number
 ): JobExecutionEvidence {
   const updated = { ...evidence, reconciliationAttempts: attempts };
+  writeJsonAtomically(resolveExecutionEvidencePath(job), updated);
+  return updated;
+}
+
+export function updateExecutionEvidenceWorkspace(
+  job: JobRecord,
+  evidence: JobExecutionEvidence,
+  executionWorkspace: ExecutionWorkspaceSummary
+): JobExecutionEvidence {
+  const updated = { ...evidence, executionWorkspace: { ...executionWorkspace } };
+  writeJsonAtomically(resolveExecutionEvidencePath(job), updated);
+  return updated;
+}
+
+export function updateExecutionEvidenceMergeTransaction(
+  job: JobRecord,
+  evidence: JobExecutionEvidence,
+  mergeTransaction: MergeTransactionSummary,
+  terminal?: JobExecutionEvidence["terminal"]
+): JobExecutionEvidence {
+  const updated = {
+    ...evidence,
+    mergeTransaction: { ...mergeTransaction },
+    ...(terminal ? { terminal: { ...terminal, ...(terminal.gitCommits ? { gitCommits: [...terminal.gitCommits] } : {}) } } : {})
+  };
   writeJsonAtomically(resolveExecutionEvidencePath(job), updated);
   return updated;
 }

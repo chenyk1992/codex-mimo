@@ -26,6 +26,7 @@ const {
   recoverPendingTransition,
   requestJobCancellation,
   transitionJob,
+  transitionJobAfterGuardedAction,
   updateRunningJobObservation
 } = transitionApi;
 const tempDirs: string[] = [];
@@ -130,6 +131,21 @@ describe("job transitions", () => {
     expect(readJob(cwd, job.id)).toMatchObject({
       status: "completed",
       assessment: "needs_review"
+    });
+  });
+
+  it("persists declared artifact files separately from changedFiles", async () => {
+    const { cwd, job } = await seedRunningJob();
+    await transitionJob(cwd, job.id, {
+      status: "completed",
+      summary: "done",
+      changedFiles: ["src/App.java"],
+      artifactFiles: ["build/classes/App.class"]
+    });
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      changedFiles: ["src/App.java"],
+      artifactFiles: ["build/classes/App.class"]
     });
   });
 
@@ -478,6 +494,7 @@ describe("job transitions", () => {
     ["completedAt", (pending: Record<string, unknown>) => { pending.completedAt = 42; }],
     ["sessionId", (pending: Record<string, unknown>) => { pending.sessionId = 42; }],
     ["changedFiles", (pending: Record<string, unknown>) => { pending.changedFiles = [42]; }],
+    ["artifactFiles", (pending: Record<string, unknown>) => { pending.artifactFiles = [42]; }],
     ["verification", (pending: Record<string, unknown>) => { pending.verification = [{}]; }],
     ["execution callback", (pending: Record<string, unknown>) => {
       pending.executionCallback = { invocationId: "i", outcome: "unknown" };
@@ -633,6 +650,80 @@ describe("job transitions", () => {
       cancellationRequestedAt: expect.any(String)
     });
     expect(readJobSignals(resolveJobPaths(cwd, jobId).signalsFile).signals).toHaveLength(0);
+  });
+
+  it("does not run a guarded action when cancellation wins the job lock", async () => {
+    const { cwd, jobId } = seedJob("running");
+    const action = vi.fn(() => ({ summary: "must not persist" }));
+
+    await requestJobCancellation(cwd, jobId);
+
+    await expect(transitionJobAfterGuardedAction(cwd, jobId, {
+      status: "completed",
+      summary: "late completion"
+    }, action)).rejects.toThrow(/cancellation.*requested/i);
+
+    expect(action).not.toHaveBeenCalled();
+    expect(readJob(cwd, jobId)).toMatchObject({
+      status: "running",
+      cancellationRequestedAt: expect.any(String)
+    });
+    expect(readJob(cwd, jobId)).not.toHaveProperty("pendingTransition");
+  });
+
+  it("commits guarded metadata and completion before a competing cancellation can win", async () => {
+    const { cwd, jobId } = seedJob("running");
+    let actionStarted!: () => void;
+    let releaseAction!: () => void;
+    const started = new Promise<void>((resolve) => { actionStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseAction = resolve; });
+    const executionWorkspace = {
+      path: "C:/temp/codex-mimo-execution/workspace",
+      kind: "copy" as const,
+      status: "promoted" as const,
+      isolationGuarantee: "cwd_relative_write_containment" as const,
+      journalPath: "C:/workspace/.codex-mimo/promotion-journal/receipt.json"
+    };
+
+    const guarded = transitionJobAfterGuardedAction(cwd, jobId, {
+      status: "completed",
+      summary: "promoted"
+    }, async () => {
+      actionStarted();
+      await release;
+      return { executionWorkspace };
+    });
+    await started;
+
+    const cancellation = requestJobCancellation(cwd, jobId);
+    releaseAction();
+
+    const result = await guarded;
+    const cancellationResult = await cancellation;
+    expect(result.job).toMatchObject({
+      status: "completed",
+      executionWorkspace
+    });
+    expect(cancellationResult).toMatchObject({ status: "completed" });
+    expect(readJob(cwd, jobId)).toMatchObject({
+      status: "completed",
+      executionWorkspace
+    });
+  });
+
+  it("leaves a running job without a terminal intent when its guarded action fails", async () => {
+    const { cwd, jobId } = seedJob("running");
+
+    await expect(transitionJobAfterGuardedAction(cwd, jobId, {
+      status: "completed",
+      summary: "should not commit"
+    }, () => {
+      throw new Error("promotion failed");
+    })).rejects.toThrow("promotion failed");
+
+    expect(readJob(cwd, jobId)).toMatchObject({ status: "running" });
+    expect(readJob(cwd, jobId)).not.toHaveProperty("pendingTransition");
+    expect(readJobSignals(resolveJobPaths(cwd, jobId).signalsFile).signals).toEqual([]);
   });
 
   it("does not write artifacts for an illegal transition", async () => {

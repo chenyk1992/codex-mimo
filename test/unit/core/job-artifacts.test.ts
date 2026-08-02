@@ -38,6 +38,32 @@ afterEach(() => {
 });
 
 describe("writeJobArtifacts", () => {
+  it("records declared build artifacts separately from source changed files", () => {
+    const cwd = root();
+    const paths = writeJobArtifacts({
+      job: planJob(cwd),
+      status: "completed",
+      changedFiles: ["src/App.java"],
+      artifactFiles: ["build/classes/App.class"],
+      reviewInput: {
+        status: "verified",
+        attachments: [{ path: ".codex-mimo/inputs/review.diff", sha256: "a".repeat(64), base: "HEAD" }]
+      },
+      verification: [],
+      finalText: "done",
+      plan: false
+    });
+
+    const structural = JSON.parse(fs.readFileSync(paths.json!, "utf8"));
+    const markdown = fs.readFileSync(paths.markdown!, "utf8");
+    expect(structural.changedFiles).toEqual(["src/App.java"]);
+    expect(structural.artifactFiles).toEqual(["build/classes/App.class"]);
+    expect(structural.reviewInput).toMatchObject({ status: "verified" });
+    expect(markdown).toContain("## Artifact Files");
+    expect(markdown).toContain("build/classes/App.class");
+    expect(markdown).toContain("## Review Input Integrity");
+  });
+
   it("separates structural reports from complete semantic and verification artifacts", () => {
     const cwd = root();
     const finalText = "# Plan\n\nComplete plan body with token=artifact-secret.";

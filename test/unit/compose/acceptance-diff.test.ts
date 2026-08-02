@@ -107,6 +107,33 @@ describe("runDiffAcceptanceSelfCheck", () => {
     );
   });
 
+  it("runs the deterministic check for a clean merge workspace", async () => {
+    const runDeterministic = vi.fn(async () => ({
+      stage: "diff_check" as const,
+      outcome: "passed" as const
+    }));
+
+    await runDiffAcceptanceSelfCheck(
+      makeOptions({
+        requireMergeTopology: true,
+        gitHeadBefore: { oid: "before", short: "before", subject: "base" },
+        captureHead: vi.fn(async () => ({ oid: "merge", short: "merge", subject: "merge" })),
+        captureCommitChanges: vi.fn(async () => ({
+          commits: ["merge merge"],
+          commitOids: ["merge"],
+          afterParentOids: ["before", "feature"],
+          changedFiles: ["src/a.ts"]
+        })),
+        runDeterministic
+      })
+    );
+
+    expect(runDeterministic).toHaveBeenCalledWith(expect.objectContaining({
+      requireMergeTopology: true,
+      changedFiles: []
+    }));
+  });
+
   it("uses attributed job changes instead of unrelated pre-existing HEAD changes", async () => {
     const runDeterministic = vi.fn(async () => ({
       stage: "diff_check" as const,
@@ -190,6 +217,70 @@ describe("runDeterministicDiffAcceptance", () => {
 
     expect(result.outcome).toBe("failed");
     expect(result.reason).toMatch(/Unexpected commits/);
+  });
+
+  it("accepts only a complete non-fast-forward merge topology", async () => {
+    const result = await runDeterministicDiffAcceptance(
+      makeInput({
+        changedFiles: ["src/a.ts"],
+        allowedPaths: ["src/"],
+        gitHeadBefore: { oid: "before", short: "before", subject: "base" },
+        gitHeadAfter: { oid: "merge", short: "merge", subject: "merge feature" },
+        commitChanges: {
+          commits: ["merge merge feature"],
+          commitOids: ["merge"],
+          afterParentOids: ["before", "feature"],
+          changedFiles: ["src/a.ts"]
+        },
+        forbidCommits: false,
+        requireMergeTopology: true
+      })
+    );
+
+    expect(result).toMatchObject({ stage: "diff_check", outcome: "passed" });
+  });
+
+  it("fails closed when a merge request fast-forwards", async () => {
+    const result = await runDeterministicDiffAcceptance(
+      makeInput({
+        changedFiles: ["src/a.ts"],
+        gitHeadBefore: { oid: "before", short: "before", subject: "base" },
+        gitHeadAfter: { oid: "after", short: "after", subject: "feature" },
+        commitChanges: {
+          commits: ["after feature"],
+          commitOids: ["after"],
+          afterParentOids: ["before"],
+          changedFiles: ["src/a.ts"]
+        },
+        forbidCommits: false,
+        requireMergeTopology: true
+      })
+    );
+
+    expect(result.outcome).toBe("failed");
+    expect(result.reason).toMatch(/non-fast-forward merge/);
+  });
+
+  it("checks committed merge files against allowedPaths independently", async () => {
+    const result = await runDeterministicDiffAcceptance(
+      makeInput({
+        changedFiles: ["src/a.ts"],
+        allowedPaths: ["src/"],
+        gitHeadBefore: { oid: "before", short: "before", subject: "base" },
+        gitHeadAfter: { oid: "merge", short: "merge", subject: "merge feature" },
+        commitChanges: {
+          commits: ["merge merge feature"],
+          commitOids: ["merge"],
+          afterParentOids: ["before", "feature"],
+          changedFiles: ["src/a.ts", "README.md"]
+        },
+        forbidCommits: false,
+        requireMergeTopology: true
+      })
+    );
+
+    expect(result.outcome).toBe("failed");
+    expect(result.reason).toMatch(/Out-of-scope committed changes: README\.md/);
   });
 
   it("fails when conflict markers are present in the diff", async () => {

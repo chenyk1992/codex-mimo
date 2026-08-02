@@ -52,6 +52,7 @@ import {
 } from "../compose/events.js";
 import {
   captureGitDiff,
+  captureGitHead,
   captureGitReviewDiff,
   type GitCommitChangeSnapshot,
   type GitDiffSnapshot,
@@ -60,6 +61,7 @@ import {
 } from "../git/diff.js";
 import {
   preparePromptTransport,
+  createImmutablePromptAttachment,
   writePromptAttachment,
   type PromptTransportResult
 } from "../mimo/prompt-transport.js";
@@ -97,6 +99,7 @@ import type {
   JobReconciliationWarning,
   JobRecord,
   JobReportPaths,
+  ReviewInputIntegrity,
   JobStatus,
   JobVerification,
   JobVerificationDetails
@@ -116,6 +119,7 @@ import {
   markSliceRunning,
   markSliceTerminal,
   readJobChain,
+  resolveChainPath,
   readSliceManifestFromChain,
   selectNextReadySlice,
   unionChangedFiles,
@@ -125,10 +129,12 @@ import {
 } from "./job-chain.js";
 import {
   createJobStore,
+  mutateJobAuthoritative,
   readJob,
   updateJobAuthoritative,
   type CreateJobInput
 } from "./job-store.js";
+import { withProcessLock } from "./process-lock.js";
 import { spawnJobSupervisor } from "./job-process.js";
 import { transitionJob, type JobTransition } from "./job-transition.js";
 import { execa } from "execa";
@@ -228,6 +234,30 @@ const ResumeRequestSchema = CommonRequestSchema.extend({
   addArtifactScopeIssues(request.allowedPaths, request.acceptance?.artifactPaths, context);
 });
 
+const WorkspaceManifestEntrySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("directory"), path: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal("file"), path: z.string().min(1), size: z.number().int().nonnegative(), sha256: z.string().regex(/^[a-f0-9]{64}$/i) }).strict(),
+  z.object({ kind: z.literal("symlink"), path: z.string().min(1), target: z.string() }).strict()
+]);
+
+const MergeSnapshotSchema = z.object({
+  controlRoot: z.string().min(1),
+  sourceRef: z.string().regex(/^refs\/heads\/[^\s]+$/),
+  targetRef: z.string().regex(/^refs\/heads\/[^\s]+$/),
+  sourceOid: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i),
+  targetOid: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i),
+  currentBranch: z.string().min(1),
+  currentBranchOid: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i),
+  workspace: z.object({
+    rootPath: z.string().min(1),
+    entries: z.array(WorkspaceManifestEntrySchema)
+  }).strict(),
+  cachedPatchSha256: z.string().regex(/^[a-f0-9]{64}$/i),
+  refs: z.record(z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i)),
+  worktrees: z.array(z.string().min(1)),
+  alreadyIntegrated: z.boolean()
+}).strict();
+
 const ComposeRequestSchema = CommonRequestSchema.extend({
   workflow: z.enum(COMPOSE_WORKFLOW_NAMES),
   task: z.string().min(1).optional(),
@@ -237,7 +267,12 @@ const ComposeRequestSchema = CommonRequestSchema.extend({
   reportDir: z.string().min(1).optional(),
   acceptance: DevelopmentAcceptanceRequestSchema.optional(),
   allowedPaths: z.array(z.string().min(1)).optional(),
-  batchMode: BatchModeSchema.optional()
+  batchMode: BatchModeSchema.optional(),
+  sourceRef: z.string().min(1).optional(),
+  targetRef: z.string().min(1).optional(),
+  // Written only by the bridge immediately before queueing a merge job. It is
+  // not accepted by public tools and is fully revalidated from disk by workers.
+  mergeSnapshot: MergeSnapshotSchema.optional()
 }).superRefine((request, context) => {
   for (const message of validateComposeWorkflowInput(request)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message });
@@ -254,6 +289,22 @@ const ComposeRequestSchema = CommonRequestSchema.extend({
     return;
   }
   addArtifactScopeIssues(request.allowedPaths, request.acceptance?.artifactPaths, context);
+  if (request.workflow === "merge") {
+    if (!request.sourceRef || !request.targetRef || !request.allowedPaths?.length || !request.mergeSnapshot) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Merge jobs require pinned sourceRef, targetRef, allowedPaths, and mergeSnapshot." });
+    }
+    if (request.mergeSnapshot) {
+      if (path.resolve(request.mergeSnapshot.controlRoot) !== path.resolve(request.cwd) ||
+          path.resolve(request.mergeSnapshot.workspace.rootPath) !== path.resolve(request.cwd)) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: "Merge snapshot control root must match request.cwd." });
+      }
+      if (request.mergeSnapshot.sourceRef !== request.sourceRef || request.mergeSnapshot.targetRef !== request.targetRef) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: "Merge snapshot refs must match sourceRef and targetRef." });
+      }
+    }
+  } else if (request.sourceRef !== undefined || request.targetRef !== undefined || request.mergeSnapshot !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Merge transaction fields are valid only for workflow merge." });
+  }
 }).transform(normalizeComposeBatchMode);
 
 function addArtifactScopeIssues(
@@ -338,6 +389,8 @@ export interface JobExecutionFinalizeContext {
   run: StreamingRunResult;
   events: NormalizedMimoEvent[];
   executionCallback?: ExecutionCallbackSummary;
+  /** Immutable review attachment identity verified by the worker. */
+  reviewInput?: ReviewInputIntegrity;
   gitStatusBefore?: GitStatusSnapshot;
   gitStatusAfter?: GitStatusSnapshot;
   gitHeadBefore?: GitHeadSnapshot;
@@ -349,6 +402,10 @@ export interface JobExecutionFinalizeContext {
   finalRepositoryFingerprint?: string;
   reconciliationWarnings?: JobReconciliationWarning[];
   verification?: VerificationResult[];
+  /** The persistent workspace that owns reports/checkpoints. */
+  controlCwd?: string;
+  /** The transient workspace in which commands and Git checks ran. */
+  executionCwd?: string;
   deps?: JobFinalizeDependencies;
 }
 
@@ -400,15 +457,20 @@ const reviewDefinition: JobDefinition<"review", ReviewJobRequest> = {
   async buildPrompt(request, signal) {
     const base = request.base ?? "HEAD";
     const diff = await captureGitReviewDiff(request.cwd, base, { signal });
+    const head = await captureGitHead(request.cwd, { signal });
     const diffFile = diff.diff
       ? writePromptAttachment(diff.diff, { cwd: request.cwd, label: `review-${base}`, extension: ".diff" })
       : undefined;
+    const immutableAttachment = diffFile
+      ? createImmutablePromptAttachment(diffFile, { base, head: head.oid })
+      : undefined;
     const prompt = preparePromptTransport(reviewPrompt(diffFile
-      ? `Review the exact current diff against base ${base} attached as @${diffFile}.`
+      ? `Review the exact current diff against base ${base} attached as @${diffFile}. Its SHA-256 is ${immutableAttachment!.sha256}; captured HEAD is ${head.oid}.`
       : `No changes found against base ${base}.`), { cwd: request.cwd });
     return {
       ...prompt,
-      files: mergeChangedFiles(prompt.files, diffFile ? [diffFile] : [])
+      files: mergeChangedFiles(prompt.files, diffFile ? [diffFile] : []),
+      ...(immutableAttachment ? { immutableAttachments: [immutableAttachment] } : {})
     };
   },
   buildMimoArgs(request, prompt) {
@@ -482,14 +544,52 @@ const composeDefinition: JobDefinition<"compose", ComposeJobRequest> = {
       writesAllowed
     };
   },
-  async buildPrompt(request) {
+  async buildPrompt(request, signal) {
     const workflow = getComposeWorkflow(request.workflow);
-    return preparePromptTransport(buildComposePrompt({
+    if (workflow.name === "review") {
+      const base = request.since ?? "HEAD";
+      const diff = await captureGitReviewDiff(request.cwd, base, { signal });
+      const head = await captureGitHead(request.cwd, { signal });
+      const diffFile = diff.diff
+        ? writePromptAttachment(diff.diff, { cwd: request.cwd, label: `compose-review-${base}`, extension: ".diff" })
+        : undefined;
+      const immutableAttachment = diffFile
+        ? createImmutablePromptAttachment(diffFile, { base, head: head.oid })
+        : undefined;
+      const prompt = preparePromptTransport([
+        buildComposePrompt({
+          workflow,
+          task: request.task,
+          file: request.file
+        }),
+        "",
+        diffFile
+          ? `Review only the exact current diff against base ${base} attached as @${diffFile}. SHA-256: ${immutableAttachment!.sha256}; captured HEAD: ${head.oid}. Do not search for or use historical .codex-mimo diff artifacts.`
+          : `No changes found against base ${base}.`
+      ].join("\n"), { cwd: request.cwd });
+      return {
+        ...prompt,
+        files: mergeChangedFiles(prompt.files, [
+          ...(diffFile ? [diffFile] : []),
+          ...(request.file ? [request.file] : [])
+        ]),
+        ...(immutableAttachment ? { immutableAttachments: [immutableAttachment] } : {})
+      };
+    }
+    const prompt = preparePromptTransport(buildComposePrompt({
       workflow,
       task: request.task,
       file: request.file,
-      since: request.since
+      since: request.since,
+      sourceRef: request.sourceRef,
+      targetRef: request.targetRef,
+      sourceOid: request.mergeSnapshot?.sourceOid,
+      targetOid: request.mergeSnapshot?.targetOid
     }), { cwd: request.cwd });
+    return {
+      ...prompt,
+      files: mergeChangedFiles(prompt.files, request.file ? [request.file] : [])
+    };
   },
   buildMimoArgs(request, prompt) {
     const writesAllowed = getComposeWorkflow(request.workflow).writesAllowed;
@@ -498,7 +598,7 @@ const composeDefinition: JobDefinition<"compose", ComposeJobRequest> = {
       agent: writesAllowed ? "build" : CODEX_MIMO_READONLY_AGENT,
       message: prompt.message,
       title: `codex-mimo compose ${request.workflow}`,
-      files: mergeChangedFiles(prompt.files, request.file ? [request.file] : [])
+      files: prompt.files
     });
   },
   finalize: finalizeCompose
@@ -519,32 +619,39 @@ export function getJobDefinition<Kind extends JobKind>(
   return JOB_DEFINITIONS[kind];
 }
 
-const JOB_BINDERS: Record<JobKind, (job: JobRecord) => BoundJobDefinition> = {
-  plan: (job) => bind(job, PlanRequestSchema, planDefinition),
-  implement: (job) => bind(job, ImplementRequestSchema, implementDefinition),
-  review: (job) => bind(job, ReviewRequestSchema, reviewDefinition),
-  "fix-ci": (job) => bind(job, FixCiRequestSchema, fixCiDefinition),
-  resume: (job) => bind(job, ResumeRequestSchema, resumeDefinition),
-  compose: (job) => bind(job, ComposeRequestSchema, composeDefinition)
+const JOB_BINDERS: Record<JobKind, (job: JobRecord, options?: { runtimeCwd?: string }) => BoundJobDefinition> = {
+  plan: (job, options) => bind(job, PlanRequestSchema, planDefinition, options),
+  implement: (job, options) => bind(job, ImplementRequestSchema, implementDefinition, options),
+  review: (job, options) => bind(job, ReviewRequestSchema, reviewDefinition, options),
+  "fix-ci": (job, options) => bind(job, FixCiRequestSchema, fixCiDefinition, options),
+  resume: (job, options) => bind(job, ResumeRequestSchema, resumeDefinition, options),
+  compose: (job, options) => bind(job, ComposeRequestSchema, composeDefinition, options)
 };
 
-export function bindJobDefinition(job: JobRecord): BoundJobDefinition {
-  return JOB_BINDERS[job.kind](job);
+export function bindJobDefinition(
+  job: JobRecord,
+  options: { runtimeCwd?: string } = {}
+): BoundJobDefinition {
+  return JOB_BINDERS[job.kind](job, options);
 }
 
 function bind<Kind extends JobKind, Request extends { cwd: string }>(
   job: JobRecord,
   schema: z.ZodType<Request>,
-  definition: JobDefinition<Kind, Request>
+  definition: JobDefinition<Kind, Request>,
+  options: { runtimeCwd?: string } = {}
 ): BoundJobDefinition {
   const parsed = schema.safeParse(job.request);
   if (!parsed.success) {
     throw new Error(`Invalid ${job.kind} job request: ${parsed.error.issues.map((issue) => issue.message).join("; ")}`);
   }
-  const request = parsed.data;
-  if (request.cwd !== job.cwd || definition.kind !== job.kind) {
+  const storedRequest = parsed.data;
+  if (storedRequest.cwd !== job.cwd || definition.kind !== job.kind) {
     throw new Error(`Invalid ${job.kind} job request: stored job identity does not match the definition.`);
   }
+  const request = options.runtimeCwd
+    ? { ...storedRequest, cwd: options.runtimeCwd } as Request
+    : storedRequest;
   return {
     kind: definition.kind,
     executionPolicy: definition.executionPolicy(request),
@@ -578,7 +685,11 @@ function directDefinition<
     kind: input.kind,
     executionPolicy: () => ({ agent: input.agent, writesAllowed: input.writesAllowed }),
     async buildPrompt(request) {
-      return preparePromptTransport(input.prompt(request), { cwd: request.cwd });
+      const prompt = preparePromptTransport(input.prompt(request), { cwd: request.cwd });
+      return {
+        ...prompt,
+        files: mergeChangedFiles(prompt.files, input.files?.(request) ?? [])
+      };
     },
     buildMimoArgs(request, prompt) {
       return buildMimoRunArgs({
@@ -586,7 +697,7 @@ function directDefinition<
         agent: input.agent,
         message: prompt.message,
         title: input.title,
-        files: mergeChangedFiles(prompt.files, input.files?.(request) ?? [])
+        files: prompt.files
       });
     },
     async finalize(context) {
@@ -606,7 +717,9 @@ async function finalizeDirect<Request extends { cwd: string; acceptance?: Develo
   requireFinalText = false,
   requireAcceptance = context.job.kind === "implement"
 ): Promise<JobOutcome> {
-  const changedFiles = collectChangedFiles(context);
+  const changeDetection = collectChangeDetection(context);
+  const changedFiles = changeDetection.files;
+  const artifactFiles = changeDetection.artifactFiles;
   const initialOutcome = classifyRunOutcome(runEvidenceFromContext(context, {
     verification: [],
     ...(requireFinalText ? { requireFinalText: true } : {})
@@ -628,7 +741,8 @@ async function finalizeDirect<Request extends { cwd: string; acceptance?: Develo
     );
     return finalizeWithArtifacts(context, {
       ...missingOutcome,
-      changedFiles
+      changedFiles,
+      ...(artifactFiles.length ? { artifactFiles } : {})
     }, [], writesAllowed);
   }
 
@@ -682,6 +796,7 @@ async function finalizeDirect<Request extends { cwd: string; acceptance?: Develo
   return finalizeWithArtifacts(context, {
     ...outcome,
     changedFiles: writesAllowed ? changedFiles : readOnlyViolationFiles,
+    ...(writesAllowed && artifactFiles.length ? { artifactFiles } : {}),
     verification: compact,
     ...(acceptanceSummary ? { acceptance: acceptanceSummary } : {})
   }, verificationDetails, writesAllowed);
@@ -694,6 +809,7 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     hasConfiguredDevelopmentAcceptance(context.request.acceptance);
   const changeDetection = collectChangeDetection(context);
   const detectedChangedFiles = changeDetection.files;
+  const artifactFiles = changeDetection.artifactFiles;
   const readOnlyViolationFiles = detectReadOnlyViolationFiles(
     workflow.writesAllowed,
     detectedChangedFiles,
@@ -801,7 +917,7 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     id: context.job.id,
     createdAt: context.job.createdAt,
     workflow: workflow.name,
-    cwd: context.request.cwd,
+    cwd: context.controlCwd ?? context.request.cwd,
     requestedSkills: workflow.skillChain,
     status: composeStatus,
     events: context.events,
@@ -818,9 +934,9 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
     error: outcome.error,
     errorCode: outcome.errorCode,
     ...(outcome.causes && outcome.causes.length > 0 ? { failureCauses: outcome.causes } : {}),
-    reportDir: context.request.reportDir ?? path.join(context.request.cwd, ".codex-mimo", "reports"),
-    eventsDir: path.join(context.request.cwd, ".codex-mimo", "events"),
-    diffsDir: path.join(context.request.cwd, ".codex-mimo", "diffs")
+    reportDir: reportDirectoryFor(context),
+    eventsDir: path.join(reportWorkspaceFor(context), ".codex-mimo", "events"),
+    diffsDir: path.join(reportWorkspaceFor(context), ".codex-mimo", "diffs")
   });
 
   const baseReportPaths: JobReportPaths = {
@@ -836,6 +952,7 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
   try {
     checkpointPaths = await writeCheckpoint({
       job: context.job,
+      ...(context.executionCwd ? { sourceCwd: context.executionCwd } : {}),
       objective: context.job.task,
       changedFiles,
       acceptance: acceptanceSummary ?? outcome.acceptance,
@@ -843,8 +960,7 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
         ...context.job.reportPaths,
         ...baseReportPaths
       },
-      reportDir: context.request.reportDir ??
-        path.join(context.request.cwd, ".codex-mimo", "reports")
+      reportDir: reportDirectoryFor(context)
     });
   } catch {
     warnings.push({ code: "checkpoint_write_failed", stage: "checkpoint" });
@@ -860,11 +976,12 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
       status: outcome.status,
       ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
       changedFiles,
+      ...(artifactFiles.length ? { artifactFiles } : {}),
+      ...(context.reviewInput ? { reviewInput: context.reviewInput } : {}),
       verification: verificationDetails,
       finalText: finalTextFrom(context),
       plan: workflow.name === "plan",
-      reportDir: context.request.reportDir ??
-        path.join(context.request.cwd, ".codex-mimo", "reports"),
+      reportDir: reportDirectoryFor(context),
       existingReportPaths: reportPaths
     });
   } catch {
@@ -890,6 +1007,7 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
   return {
     ...outcome,
     changedFiles,
+    ...(artifactFiles.length ? { artifactFiles } : {}),
     verification: compact,
     ...(acceptanceSummary || outcome.acceptance
       ? { acceptance: acceptanceSummary ?? outcome.acceptance }
@@ -908,14 +1026,20 @@ async function finalizeCompose(context: JobFinalizeContext<ComposeJobRequest>): 
 function collectChangeDetection(
   context: JobFinalizeContext<{ cwd: string }>
 ): ChangeDetectionResult {
-  if (context.changeDetection) return context.changeDetection;
+  if (context.changeDetection) {
+    return {
+      ...context.changeDetection,
+      artifactFiles: context.changeDetection.artifactFiles ?? []
+    };
+  }
   return detectChangedFiles({
     cwd: context.request.cwd,
     gitStatusBefore: context.gitStatusBefore,
     gitStatusAfter: context.gitStatusAfter,
     diff: context.diff,
     commitChanges: context.commitChanges,
-    toolUsePaths: extractToolUseWritePaths(context.events)
+    toolUsePaths: extractToolUseWritePaths(context.events),
+    artifactPaths: readAcceptanceFromRequest(context.request)?.artifactPaths
   });
 }
 
@@ -1140,11 +1264,13 @@ async function finalizeWithArtifacts<Request extends { cwd: string }>(
   const writeArtifacts = context.deps?.writeJobArtifacts ?? writeJobArtifacts;
   const writeCheckpoint = context.deps?.writeJobCheckpoint ?? writeJobCheckpoint;
   const changedFiles = outcome.changedFiles ?? [];
+  const artifactFiles = outcome.artifactFiles ?? [];
   const warnings: JobReconciliationWarning[] = [];
   let checkpointPaths: JobReportPaths = {};
   try {
     checkpointPaths = await writeCheckpoint({
       job: context.job,
+      ...(context.executionCwd ? { sourceCwd: context.executionCwd } : {}),
       objective: context.job.task,
       changedFiles,
       acceptance: outcome.acceptance,
@@ -1163,6 +1289,8 @@ async function finalizeWithArtifacts<Request extends { cwd: string }>(
       status: outcome.status,
       ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
       changedFiles,
+      ...(artifactFiles.length ? { artifactFiles } : {}),
+      ...(context.reviewInput ? { reviewInput: context.reviewInput } : {}),
       verification: verificationDetails,
       finalText: finalTextFrom(context),
       ...(context.diff?.diff ? { diff: context.diff.diff } : {}),
@@ -1176,6 +1304,7 @@ async function finalizeWithArtifacts<Request extends { cwd: string }>(
   return {
     ...outcome,
     changedFiles,
+    ...(artifactFiles.length ? { artifactFiles } : {}),
     verification: outcome.verification ?? toCompactJobVerification(verificationDetails),
     reportPaths,
     reconciliation: reconciliationSummary(
@@ -1456,13 +1585,25 @@ async function runAcceptanceForFinalize<Request extends { cwd: string }>(
   return { result };
 }
 
+function reportWorkspaceFor(context: JobFinalizeContext<{ cwd: string }>): string {
+  return context.controlCwd ?? context.request.cwd;
+}
+
+function reportDirectoryFor(
+  context: JobFinalizeContext<{ cwd: string; reportDir?: string }>
+): string {
+  return context.controlCwd
+    ? path.join(context.controlCwd, ".codex-mimo", "reports")
+    : context.request.reportDir ?? path.join(context.request.cwd, ".codex-mimo", "reports");
+}
+
 function ensureDiffArtifact(
   context: JobFinalizeContext<{ cwd: string }>,
   diff: GitDiffSnapshot | undefined
 ): string | undefined {
   const text = diff?.diff?.trim();
   if (!text) return undefined;
-  const diffsDir = path.join(context.request.cwd, ".codex-mimo", "diffs");
+  const diffsDir = path.join(reportWorkspaceFor(context), ".codex-mimo", "diffs");
   try {
     fs.mkdirSync(diffsDir, { recursive: true });
     const diffPath = path.join(diffsDir, `${context.job.id}.diff`);
@@ -1534,6 +1675,8 @@ function createDefaultRunDiffCheck(
       expectedWritesAllowed: writesAllowed,
       gitHeadBefore: context.gitHeadBefore,
       signal,
+      forbidCommits: !isComposeMergeWorkflow(context.request),
+      requireMergeTopology: isComposeMergeWorkflow(context.request),
       ...(scopePaths ? { allowedPaths: scopePaths } : {})
     });
     if (selfCheck.outcome === "failed") {
@@ -1542,6 +1685,15 @@ function createDefaultRunDiffCheck(
 
     const changedFileCount = selfCheck.summary?.changedFileCount ?? 0;
     const hasWorkspaceChanges = changedFileCount > 0;
+    const hasNetDiff = hasUsableDiffFile(initialDiffPath) ||
+      Boolean(context.diff?.diff.trim());
+    const hasKnownCommitDelta = context.commitChanges !== undefined &&
+      (context.commitChanges.commits.length > 0 || context.commitChanges.changedFiles.length > 0);
+
+    if (isComposeFixCiWorkflow(context.request) && !hasNetDiff &&
+        context.commitChanges !== undefined && !hasKnownCommitDelta) {
+      return { stage: "diff_check", outcome: "not_applicable", reason: "no_diff" };
+    }
 
     if (!hasWorkspaceChanges && !hasUsableDiffFile(initialDiffPath)) {
       // Align with runReadOnlyDiffReview no_diff → not_applicable → passed.
@@ -1600,6 +1752,18 @@ function createDefaultRunDiffCheck(
     }
     return review;
   };
+}
+
+function isComposeMergeWorkflow(request: unknown): boolean {
+  return typeof request === "object" && request !== null &&
+    "workflow" in request &&
+    (request as { workflow?: unknown }).workflow === "merge";
+}
+
+function isComposeFixCiWorkflow(request: unknown): boolean {
+  return typeof request === "object" && request !== null &&
+    "workflow" in request &&
+    (request as { workflow?: unknown }).workflow === "fix-ci";
 }
 
 function recordReconciliationWarning(
@@ -1896,6 +2060,21 @@ export async function advanceJobChainAfterChild(input: {
     return { root: child, ignored: true };
   }
 
+  // A child worker and crash recovery can observe the same terminal child at the
+  // same time. Serialize the whole chain decision (chain state + root aggregate +
+  // next-child creation), not just the individual JSON writes.
+  return withProcessLock(
+    resolveChainPath(input.cwd, child.chainId!),
+    () => advanceJobChainAfterChildLocked(input, deps)
+  );
+}
+
+async function advanceJobChainAfterChildLocked(input: {
+  cwd: string;
+  child: JobRecord;
+}, deps: AdvanceJobChainAfterChildDependencies): Promise<AdvanceJobChainAfterChildResult> {
+  const child = input.child;
+
   const sliceState = mapChildStatusToSliceState(child.status);
   if (!sliceState) {
     return { root: child, ignored: true };
@@ -1925,7 +2104,8 @@ export async function advanceJobChainAfterChild(input: {
   const markTerminal = deps.markSliceTerminal ?? markSliceTerminal;
   const chain = markTerminal(input.cwd, child.chainId!, child.sliceId!, sliceState);
 
-  const changedFiles = unionChangedFiles(root.changedFiles, child.changedFiles);
+  const changedFiles = collectChainChangedFiles(input.cwd, root, chain, loadJob);
+  const artifactFiles = collectChainArtifactFiles(input.cwd, root, chain, loadJob);
   const verification = [...root.verification, ...child.verification];
   const acceptance = mergeAcceptanceSummaries(root.acceptance, child.acceptance);
   const reportPaths: JobReportPaths = {
@@ -1941,15 +2121,23 @@ export async function advanceJobChainAfterChild(input: {
   const writeCheckpoint = deps.writeRootCheckpoint ?? refreshRootChainCheckpoint;
   await writeCheckpoint({
     cwd: input.cwd,
-    root: { ...root, changedFiles, verification, acceptance, reportPaths },
+    root: { ...root, changedFiles, artifactFiles, verification, acceptance, reportPaths },
     chain,
     changedFiles
   });
 
+  // Persist the aggregate before deciding what to run next. The mutation rereads
+  // the authoritative record under its own cross-process lock, so a concurrent
+  // observer update cannot replace a previously aggregated file list.
+  const aggregatedRoot = await mutateJobAuthoritative(input.cwd, root.id, (existing) => ({
+    changedFiles: unionChangedFiles(existing.changedFiles, changedFiles),
+    artifactFiles: unionChangedFiles(existing.artifactFiles ?? [], artifactFiles)
+  }));
+
   const updateRoot = deps.updateRoot ?? updateJobAuthoritative;
   const transition = deps.transitionJob ?? transitionJob;
   const cancelPending = deps.markPendingSlicesCancelled ?? markPendingSlicesCancelled;
-  const freshRoot = loadJob(input.cwd, root.id) ?? root;
+  const freshRoot = loadJob(input.cwd, root.id) ?? aggregatedRoot;
 
   if (!canContinueChainOrchestration(freshRoot)) {
     cancelPending(input.cwd, chain.chainId);
@@ -1959,6 +2147,7 @@ export async function advanceJobChainAfterChild(input: {
         summary: `Cancelled ${root.id}.`,
         errorCode: "cancelled",
         changedFiles,
+        artifactFiles,
         verification,
         ...(acceptance ? { acceptance } : {}),
         reportPaths
@@ -1987,6 +2176,7 @@ export async function advanceJobChainAfterChild(input: {
       child,
       sliceState,
       changedFiles,
+      artifactFiles,
       verification,
       acceptance,
       reportPaths
@@ -2001,9 +2191,10 @@ export async function advanceJobChainAfterChild(input: {
 
   return startNextReadySliceOrFinalizeRoot({
     cwd: input.cwd,
-    root: { ...freshRoot, changedFiles, verification, acceptance, reportPaths },
+    root: { ...freshRoot, changedFiles, artifactFiles, verification, acceptance, reportPaths },
     chain,
     changedFiles,
+    artifactFiles,
     verification,
     acceptance,
     reportPaths,
@@ -2026,6 +2217,16 @@ export async function continueJobChainOrchestration(input: {
   cwd: string;
   chain: JobChainRecord;
 }, deps: AdvanceJobChainAfterChildDependencies = {}): Promise<AdvanceJobChainAfterChildResult> {
+  return withProcessLock(
+    resolveChainPath(input.cwd, input.chain.chainId),
+    () => continueJobChainOrchestrationLocked(input, deps)
+  );
+}
+
+async function continueJobChainOrchestrationLocked(input: {
+  cwd: string;
+  chain: JobChainRecord;
+}, deps: AdvanceJobChainAfterChildDependencies): Promise<AdvanceJobChainAfterChildResult> {
   const loadJob = deps.readJob ?? readJob;
   const loadChain = deps.readJobChain ?? readJobChain;
   const chain = loadChain(input.cwd, input.chain.chainId) ?? input.chain;
@@ -2052,7 +2253,8 @@ export async function continueJobChainOrchestration(input: {
     cwd: input.cwd,
     root,
     chain,
-    changedFiles: root.changedFiles,
+    changedFiles: collectChainChangedFiles(input.cwd, root, chain, loadJob),
+    artifactFiles: collectChainArtifactFiles(input.cwd, root, chain, loadJob),
     verification: root.verification,
     acceptance: root.acceptance,
     reportPaths: root.reportPaths ?? {},
@@ -2065,12 +2267,23 @@ async function startNextReadySliceOrFinalizeRoot(input: {
   root: JobRecord;
   chain: JobChainRecord;
   changedFiles: string[];
+  artifactFiles: string[];
   verification: JobVerification[];
   acceptance: JobAcceptanceSummary | undefined;
   reportPaths: JobReportPaths;
   deps: AdvanceJobChainAfterChildDependencies;
 }): Promise<AdvanceJobChainAfterChildResult> {
-  const { cwd, root, chain, changedFiles, verification, acceptance, reportPaths, deps } = input;
+  const {
+    cwd,
+    root,
+    chain,
+    changedFiles,
+    artifactFiles,
+    verification,
+    acceptance,
+    reportPaths,
+    deps
+  } = input;
   const transition = deps.transitionJob ?? transitionJob;
   const updateRoot = deps.updateRoot ?? updateJobAuthoritative;
   const loadManifest = deps.readSliceManifest ?? readSliceManifestFromChain;
@@ -2096,6 +2309,7 @@ async function startNextReadySliceOrFinalizeRoot(input: {
       error: "Slice chain manifest is missing after a completed child.",
       errorCode: "slice_failed",
       changedFiles,
+      artifactFiles,
       verification,
       ...(acceptance ? { acceptance } : {}),
       reportPaths
@@ -2117,6 +2331,7 @@ async function startNextReadySliceOrFinalizeRoot(input: {
         error: "Unable to rebuild slice child request for the next chain slice.",
         errorCode: "slice_failed",
         changedFiles,
+        artifactFiles,
         verification,
         ...(acceptance ? { acceptance } : {}),
         reportPaths
@@ -2150,6 +2365,7 @@ async function startNextReadySliceOrFinalizeRoot(input: {
       `Executing slice ${sliceIndex}/${manifest.slices.length}: ${nextSlice.title}`;
     const updatedRoot = await updateRoot(cwd, root.id, {
       changedFiles,
+      artifactFiles,
       verification,
       ...(acceptance ? { acceptance } : {}),
       reportPaths,
@@ -2180,6 +2396,7 @@ async function startNextReadySliceOrFinalizeRoot(input: {
     status: "completed",
     summary: `Completed ${chain.completedSliceIds.length} slice(s).`,
     changedFiles,
+    artifactFiles,
     verification,
     ...(acceptance ? { acceptance } : {}),
     reportPaths
@@ -2194,6 +2411,44 @@ async function startNextReadySliceOrFinalizeRoot(input: {
 
 function canContinueChainOrchestration(root: JobRecord): boolean {
   return root.status === "running" && !root.cancellationRequestedAt;
+}
+
+/**
+ * Rebuild the file aggregate from durable terminal children on every chain
+ * decision. This makes recovery and duplicate terminal notifications converge on
+ * the same root result even if an earlier process stopped between writes.
+ */
+function collectChainChangedFiles(
+  cwd: string,
+  root: JobRecord,
+  chain: JobChainRecord,
+  loadJob: typeof readJob
+): string[] {
+  const childFiles = Object.entries(chain.childJobIds)
+    .filter(([sliceId]) => isTerminalSliceState(chain.sliceStates[sliceId]))
+    .map(([, childJobId]) => loadJob(cwd, childJobId)?.changedFiles ?? []);
+  return unionChangedFiles(root.changedFiles, ...childFiles);
+}
+
+/**
+ * Build artifact output is tracked separately from source changes. Rebuild the
+ * root aggregate from durable terminal children so duplicate terminal delivery
+ * and crash recovery stay convergent without reclassifying artifacts as code.
+ */
+function collectChainArtifactFiles(
+  cwd: string,
+  root: JobRecord,
+  chain: JobChainRecord,
+  loadJob: typeof readJob
+): string[] {
+  const childFiles = Object.entries(chain.childJobIds)
+    .filter(([sliceId]) => isTerminalSliceState(chain.sliceStates[sliceId]))
+    .map(([, childJobId]) => loadJob(cwd, childJobId)?.artifactFiles ?? []);
+  return unionChangedFiles(root.artifactFiles ?? [], ...childFiles);
+}
+
+function isTerminalSliceState(state: SliceRuntimeState | undefined): boolean {
+  return state !== undefined && state !== "pending" && state !== "running";
 }
 
 function isTerminalJobStatus(status: JobStatus): boolean {
@@ -2236,6 +2491,7 @@ function buildRootAttentionTransition(input: {
   child: JobRecord;
   sliceState: Exclude<SliceRuntimeState, "pending" | "running">;
   changedFiles: string[];
+  artifactFiles: string[];
   verification: JobVerification[];
   acceptance: JobAcceptanceSummary | undefined;
   reportPaths: JobReportPaths;
@@ -2243,6 +2499,7 @@ function buildRootAttentionTransition(input: {
   const sliceLabel = input.child.sliceId ?? "slice";
   const base = {
     changedFiles: input.changedFiles,
+    artifactFiles: input.artifactFiles,
     verification: input.verification,
     ...(input.acceptance ? { acceptance: input.acceptance } : {}),
     reportPaths: input.reportPaths

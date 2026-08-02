@@ -40,6 +40,15 @@ describe("execution evidence", () => {
       reconciliationAttempts: 0,
       run: { exitCode: 0 },
       executionCallback: { invocationId: "inv-1", outcome: "completed" },
+      reviewInput: {
+        status: "verified",
+        attachments: [{
+          path: ".codex-mimo/inputs/review.diff",
+          sha256: "a".repeat(64),
+          base: "HEAD",
+          head: "b".repeat(40)
+        }]
+      },
       diff: {
         changedFiles: ["src/app.ts"],
         diffStat: "1 insertion(+)",
@@ -74,7 +83,8 @@ describe("execution evidence", () => {
         commandHash: expect.stringMatching(/^[a-f0-9]{64}$/)
       }],
       diff: { diff: "+token=[REDACTED]" },
-      commitChanges: { commits: ["abc token=[REDACTED]"] }
+      commitChanges: { commits: ["abc token=[REDACTED]"] },
+      reviewInput: { status: "verified", attachments: [expect.objectContaining({ base: "HEAD" })] }
     });
     expect(fs.readFileSync(saved.resultPath!, "utf8")).toBe("Done. token=[REDACTED]");
   });

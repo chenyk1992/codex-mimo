@@ -31,6 +31,10 @@ export interface BuildComposePromptInput {
   task?: string;
   file?: string;
   since?: string;
+  sourceRef?: string;
+  targetRef?: string;
+  sourceOid?: string;
+  targetOid?: string;
 }
 
 export interface ComposeWorkflowInput {
@@ -204,7 +208,7 @@ export function normalizeComposeBatchMode<
 }
 
 export function buildComposePrompt(input: BuildComposePromptInput): string {
-  const { workflow, task, file, since } = input;
+  const { workflow, task, file, since, sourceRef, targetRef, sourceOid, targetOid } = input;
   const lines: string[] = [];
   const objective = task?.trim() || defaultTaskForWorkflow(workflow.name);
 
@@ -219,6 +223,16 @@ export function buildComposePrompt(input: BuildComposePromptInput): string {
   lines.push("- Do not ask what to plan or implement unless the Objective is genuinely ambiguous.");
   lines.push("- Keep changes minimal and focused.");
   lines.push("- Do not commit, push, reset, or delete files.");
+  if (workflow.name === "worktree") {
+    lines.push("- The current working directory is the only bridge-owned worktree. Do not create, remove, switch, checkout, branch, reset, or otherwise manage Git worktrees or branches.");
+    lines.push("- Do not access the control workspace or any external directory; work only inside the current working directory.");
+  }
+  if (workflow.name === "merge") {
+    lines.push("- The current working directory is a clean, detached, bridge-owned merge worktree. Do not access the control workspace or any external directory.");
+    lines.push("- The bridge has already started the merge. Resolve content conflicts only; stage the resolved files, but never commit, checkout, reset, switch branches, alter refs, or create/remove worktrees.");
+    lines.push(`- Pinned source: ${sourceRef ?? "(bridge supplied)"}${sourceOid ? ` at ${sourceOid}` : ""}.`);
+    lines.push(`- Pinned target: ${targetRef ?? "(bridge supplied)"}${targetOid ? ` at ${targetOid}` : ""}.`);
+  }
   lines.push("- Record actions taken, verification evidence, and remaining risks.");
   lines.push("- On Windows: use PowerShell-compatible commands. Avoid `2>/dev/null`, `||`, `wc -l`, `grep`. Use `Get-Content -Encoding UTF8 | Measure-Object`, `Select-String`, and `Test-Path` instead.");
   lines.push("- On Windows Python commands: prefer UTF-8 mode (`PYTHONUTF8=1`, `PYTHONIOENCODING=utf-8`; in PowerShell set `$env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'`) so `Path.read_text()` does not default to cp936.");

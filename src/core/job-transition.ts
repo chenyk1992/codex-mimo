@@ -71,6 +71,16 @@ export interface JobTransitionDependencies {
   writeJobArtifacts?: (input: WriteJobArtifactsInput) => JobReportPaths;
 }
 
+/**
+ * Runs a side effect while the job's transition lock is held, then persists a
+ * normal transition without releasing that lock in between. The action must
+ * not change lifecycle state; it may return an authoritative metadata patch
+ * such as an execution-workspace promotion receipt.
+ */
+export type GuardedJobTransitionAction = (
+  job: JobRecord
+) => JobUpdatePatch | void | Promise<JobUpdatePatch | void>;
+
 type ProgressSignalKind = Exclude<JobSignalKind, AttentionSignalKind>;
 
 export type JobProgress = Omit<NewJobSignal, "jobId" | "kind" | "status"> & {
@@ -83,33 +93,86 @@ export async function transitionJob(
   transition: JobTransition,
   dependencies: JobTransitionDependencies = {}
 ): Promise<JobTransitionResult> {
-  return withProcessLock(resolveJobStateLock(cwd, jobId), async () => {
-    let existing = requireJob(cwd, jobId);
-    if (existing.pendingTransition) {
-      const sameRequest = pendingMatchesRequest(existing.pendingTransition, transition);
-      const recovered = await applyPendingTransition(
-        cwd,
-        existing,
-        existing.pendingTransition,
-        dependencies
-      );
-      if (sameRequest) return recovered;
-      existing = recovered.job;
-    }
+  return withProcessLock(
+    resolveJobStateLock(cwd, jobId),
+    () => transitionJobLocked(cwd, jobId, transition, dependencies)
+  );
+}
 
-    if (!LEGAL[existing.status].includes(transition.status)) {
-      throw new Error(`Illegal job transition ${existing.status} -> ${transition.status}`);
-    }
-    if (existing.cancellationRequestedAt && transition.status !== "cancelled") {
-      throw new Error(`Job ${jobId} cancellation was requested; only cancellation may finalize it.`);
-    }
+/**
+ * Atomically runs a guarded action and the following job transition under the
+ * same per-job process lock. A cancellation that wins the lock prevents the
+ * action from running; once the action starts, the following transition is
+ * committed before cancellation can observe the job again.
+ */
+export async function transitionJobAfterGuardedAction(
+  cwd: string,
+  jobId: string,
+  transition: JobTransition,
+  action: GuardedJobTransitionAction,
+  dependencies: JobTransitionDependencies = {}
+): Promise<JobTransitionResult> {
+  return withProcessLock(
+    resolveJobStateLock(cwd, jobId),
+    () => transitionJobLocked(cwd, jobId, transition, dependencies, action)
+  );
+}
 
-    const requested = ensureTransitionArtifacts(existing, transition, dependencies);
-    const pending = buildPendingTransition(existing, requested, transition);
-    const intentJob = await savePendingJobTransition(cwd, jobId, pending);
-    await dependencies.afterIntentPersisted?.();
-    return applyPendingTransition(cwd, intentJob, pending, dependencies);
-  });
+/** Caller must already hold resolveJobStateLock(cwd, jobId). */
+async function transitionJobLocked(
+  cwd: string,
+  jobId: string,
+  transition: JobTransition,
+  dependencies: JobTransitionDependencies,
+  action?: GuardedJobTransitionAction
+): Promise<JobTransitionResult> {
+  let existing = requireJob(cwd, jobId);
+  if (existing.pendingTransition) {
+    const sameRequest = pendingMatchesRequest(existing.pendingTransition, transition);
+    const recovered = await applyPendingTransition(
+      cwd,
+      existing,
+      existing.pendingTransition,
+      dependencies
+    );
+    if (sameRequest) return recovered;
+    existing = recovered.job;
+  }
+
+  if (!LEGAL[existing.status].includes(transition.status)) {
+    throw new Error(`Illegal job transition ${existing.status} -> ${transition.status}`);
+  }
+  if (existing.cancellationRequestedAt && transition.status !== "cancelled" &&
+      transition.errorCode !== "isolation_recovery_required") {
+    throw new Error(`Job ${jobId} cancellation was requested; only cancellation may finalize it.`);
+  }
+
+  if (action) {
+    const patch = await action(existing);
+    if (patch) {
+      assertGuardedActionPatchKeepsLifecycle(existing, patch);
+      existing = await updateJobAuthoritative(cwd, jobId, patch);
+    }
+  }
+
+  const requested = ensureTransitionArtifacts(existing, transition, dependencies);
+  const pending = buildPendingTransition(existing, requested, transition);
+  const intentJob = await savePendingJobTransition(cwd, jobId, pending);
+  await dependencies.afterIntentPersisted?.();
+  return applyPendingTransition(cwd, intentJob, pending, dependencies);
+}
+
+function assertGuardedActionPatchKeepsLifecycle(
+  job: JobRecord,
+  patch: JobUpdatePatch
+): void {
+  if (patch.status !== undefined && patch.status !== job.status) {
+    throw new Error("Guarded transition action must not change job status.");
+  }
+  if (patch.cancellationRequestedAt !== undefined &&
+      patch.cancellationRequestedAt !== job.cancellationRequestedAt) {
+    throw new Error("Guarded transition action must not change cancellation state.");
+  }
 }
 
 export async function appendJobProgress(
@@ -158,6 +221,7 @@ export async function updateRunningJobObservation(
     idleTimeoutMs?: number;
     quietSince?: string | null;
     changedFiles?: string[];
+    artifactFiles?: string[];
     executionCallback?: JobRecord["executionCallback"];
     reportPaths?: JobRecord["reportPaths"];
     reconciliation?: JobRecord["reconciliation"];
@@ -295,6 +359,7 @@ function buildPendingTransition(
       : { completedAt: transition.completedAt ?? timestamp }),
     ...(transition.sessionId !== undefined ? { sessionId: transition.sessionId } : {}),
     ...(transition.changedFiles !== undefined ? { changedFiles: transition.changedFiles } : {}),
+    ...(transition.artifactFiles !== undefined ? { artifactFiles: transition.artifactFiles } : {}),
     ...(transition.verification !== undefined ? { verification: transition.verification } : {}),
     ...(transition.acceptance !== undefined ? { acceptance: transition.acceptance } : {}),
     ...(transition.executionCallback !== undefined
@@ -395,6 +460,9 @@ function ensureTransitionArtifacts(
       status: transition.status,
       ...(transition.errorCode ? { errorCode: transition.errorCode } : {}),
       changedFiles: transition.changedFiles ?? job.changedFiles,
+      ...(transition.artifactFiles ?? job.artifactFiles
+        ? { artifactFiles: transition.artifactFiles ?? job.artifactFiles }
+        : {}),
       verification: [],
       compactVerification: transition.verification ?? job.verification,
       finalText: readSavedJobOutput(job) ?? "",

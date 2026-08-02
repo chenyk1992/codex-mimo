@@ -144,25 +144,29 @@ function workerDependencies(input: {
       evidence: "integration fixture"
     }),
     spawnNotificationWorker: () => 999,
-    runMimoStreaming: (cwd, args, options) => runMimoCliStreaming(cwd, args, {
-      ...options,
-      env: {
+    runMimoStreaming: (cwd, args, options) => {
+      const fakeEnv = {
         ...options.env,
         FAKE_MIMO_MODE: mode,
         FAKE_MIMO_CALLBACK: callback ? "1" : "0",
         FAKE_MIMO_FINAL_TEXT: finalText,
         ...(input.nestedText ? { FAKE_MIMO_NESTED_TEXT: "1" } : {}),
-        ...(input.secretProbeName ? { FAKE_MIMO_SECRET_PROBE_NAME: input.secretProbeName } : {}),
-        ...(input.secretProbeFile ? { FAKE_MIMO_SECRET_PROBE_FILE: input.secretProbeFile } : {})
-      },
-      spawnProcess: (spawnCwd, _mimoArgs, env) => spawn(process.execPath, [fakeMimo], {
-        cwd: spawnCwd,
-        env,
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true
-      }),
-      terminateProcessTree: async (_pid, child) => { child.kill(); }
-    })
+        ...(input.secretProbeName ? { FAKE_MIMO_PROBE_NAME: input.secretProbeName } : {}),
+        ...(input.secretProbeFile ? { FAKE_MIMO_PROBE_FILE: input.secretProbeFile } : {})
+      };
+      return runMimoCliStreaming(cwd, args, {
+        ...options,
+        env: fakeEnv,
+        allowEnv: [...(options.allowEnv ?? []), ...Object.keys(fakeEnv).filter((name) => name.startsWith("FAKE_MIMO_"))],
+        spawnProcess: (spawnCwd, _mimoArgs, env) => spawn(process.execPath, [fakeMimo], {
+          cwd: spawnCwd,
+          env,
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true
+        }),
+        terminateProcessTree: async (_pid, child) => { child.kill(); }
+      });
+    }
   };
 }
 
@@ -478,7 +482,11 @@ describe("unified background jobs", () => {
 
   it("automatically replaces a crashed job-worker, terminates its owned MiMo tree, and does not rerun it", async () => {
     const cwd = workspace();
-    const job = seed(cwd, "implement");
+    const job = createJobStore(cwd).create({
+      kind: "implement",
+      task: "integration task",
+      request: { ...requests(cwd).implement, timeoutMs: 60_000 }
+    });
     const checkpoint = path.join(cwd, "mimo-checkpoint.json");
     const invocations = path.join(cwd, "mimo-invocations.log");
     const workerPidFile = path.join(cwd, "job-worker.pid");

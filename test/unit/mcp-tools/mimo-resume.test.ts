@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,7 +16,8 @@ import {
 } from "../../../src/core/job-chain.js";
 import { getJobDefinition } from "../../../src/core/job-definitions.js";
 import { createJobStore, listJobs, readJob, updateJob, updateJobAuthoritative } from "../../../src/core/job-store.js";
-import type { JobRecord } from "../../../src/core/jobs.js";
+import { disposeGitExecutionWorkspace, preparePersistentGitWorktree } from "../../../src/git/worktree.js";
+import type { ExecutionWorkspaceLease, JobRecord } from "../../../src/core/jobs.js";
 import type { SliceManifest } from "../../../src/compose/slices.js";
 
 const ACTIVE_SIGNAL = new AbortController().signal;
@@ -138,6 +141,39 @@ describe("mimo_resume", () => {
       env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
     })).rejects.toThrow(message);
     expect(listJobs(cwd).map((job) => job.id)).toEqual([source.id]);
+  });
+
+  it("resumes a completed persistent Compose parent with its exact private worktree lease", async () => {
+    const { cwd, lease, prepared, source } = persistentComposeParent();
+    try {
+      const receipt = await mimoResume({ cwd, jobId: source.id, task: "Continue worktree changes" }, {
+        env: {}, spawnJobSupervisor: vi.fn().mockReturnValue(123)
+      });
+
+      expect(readJob(cwd, receipt.jobId)).toMatchObject({
+        kind: "resume",
+        parentJobId: source.id,
+        executionWorkspaceLease: lease
+      });
+    } finally {
+      disposeGitExecutionWorkspace(prepared);
+    }
+  });
+
+  it("fails closed before creating a child when a completed persistent Compose lease no longer matches disk ownership", async () => {
+    const { cwd, lease, prepared, source } = persistentComposeParent();
+    try {
+      updateJob(cwd, source.id, {
+        executionWorkspaceLease: { ...lease, ownerToken: crypto.randomUUID() }
+      });
+
+      await expect(mimoResume({ cwd, jobId: source.id, task: "Continue worktree changes" }, {
+        env: {}, spawnJobSupervisor: vi.fn()
+      })).rejects.toThrow("persistent_worktree_unavailable");
+      expect(listJobs(cwd).map((job) => job.id)).toEqual([source.id]);
+    } finally {
+      disposeGitExecutionWorkspace(prepared);
+    }
   });
 
   it.each([
@@ -386,6 +422,21 @@ describe("mimo_resume", () => {
     const child = readJob(cwd, receipt.jobId)!;
     expect(child.parentJobId).toBe(source.id);
     expect(child.request).toMatchObject({ sessionId: "ses_stalled" });
+  });
+
+  it("does not reject resume when only codex-mimo runtime files changed", async () => {
+    const cwd = tempWorkspace();
+    const source = await stalledParent(cwd, { sessionId: "ses_runtime" });
+    fs.mkdirSync(path.join(cwd, ".codex-mimo", "jobs"), { recursive: true });
+    fs.writeFileSync(path.join(cwd, ".codex-mimo", "jobs", "worker.log"), "later", "utf8");
+
+    const receipt = await mimoResume({ cwd, jobId: source.id }, {
+      env: {},
+      spawnJobSupervisor: vi.fn().mockReturnValue(123),
+      verifyProcess: () => ({ status: "not_running" as const, evidence: "gone" })
+    });
+
+    expect(readJob(cwd, receipt.jobId)?.parentJobId).toBe(source.id);
   });
 
   it("resumes timeout without session using checkpoint-only prompt", async () => {
@@ -699,4 +750,36 @@ function artifactPaths(cwd: string): string[] {
   return fs.readdirSync(root, { recursive: true })
     .map((entry) => String(entry).replaceAll("\\", "/"))
     .sort();
+}
+
+function persistentComposeParent(): {
+  cwd: string;
+  lease: ExecutionWorkspaceLease;
+  prepared: ReturnType<typeof preparePersistentGitWorktree>;
+  source: JobRecord;
+} {
+  const cwd = tempWorkspace();
+  execFileSync("git", ["init"], { cwd, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Test User"], { cwd, stdio: "ignore" });
+  fs.writeFileSync(path.join(cwd, ".gitignore"), ".codex-mimo/\n");
+  fs.writeFileSync(path.join(cwd, "tracked.txt"), "initial\n");
+  execFileSync("git", ["add", "."], { cwd, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd, stdio: "ignore" });
+  const source = createJobStore(cwd).create({
+    kind: "compose",
+    task: "Run worktree workflow",
+    request: { cwd, task: "Run worktree workflow", workflow: "worktree" }
+  });
+  const prepared = preparePersistentGitWorktree(cwd, source.id, { base: tempWorkspace() });
+  const { baseline: _baseline, ...lease } = prepared;
+  return {
+    cwd,
+    lease,
+    prepared,
+    source: updateJob(cwd, source.id, {
+      status: "completed",
+      executionWorkspaceLease: lease
+    })
+  };
 }

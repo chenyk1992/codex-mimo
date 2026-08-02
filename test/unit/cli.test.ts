@@ -111,6 +111,17 @@ describe("unified CLI work commands", () => {
     });
   });
 
+  it("passes short merge branch names and bounded scope through the CLI parser", async () => {
+    const result = await invoke([
+      "compose", "--cwd", cwd, "--workflow", "merge", "--source-ref", "feature",
+      "--target-ref", "main", "--allowed-path", "src/**", "Merge safely"
+    ]);
+    expect(result.exitCode).toBe(0);
+    expect(result.deps.mimoCompose).toHaveBeenCalledWith(expect.objectContaining({
+      workflow: "merge", sourceRef: "feature", targetRef: "main", allowedPaths: ["src/**"]
+    }));
+  });
+
   it("passes structured acceptance to fix-ci and resume", async () => {
     const fixCi = await invoke([
       "fix-ci",

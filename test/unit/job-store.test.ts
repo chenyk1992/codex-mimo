@@ -92,6 +92,15 @@ describe("job store", () => {
     });
   });
 
+  it("accepts old records without artifactFiles and persists the field when supplied", () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "implement", task: "artifact", request: {} });
+
+    expect(readJob(cwd, job.id)?.artifactFiles).toBeUndefined();
+    updateJob(cwd, job.id, { artifactFiles: ["build/classes/App.class"] });
+    expect(readJob(cwd, job.id)?.artifactFiles).toEqual(["build/classes/App.class"]);
+  });
+
   it("seeds idleTimeoutMs from the request when available", () => {
     const cwd = tempWorkspace();
 
@@ -344,6 +353,131 @@ describe("job store", () => {
     }), "utf-8");
 
     expect(() => readJob(cwd, job.id)).toThrow(/malformed job/i);
+  });
+
+  it("round-trips valid execution workspace and frozen review input metadata", () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "review", task: "Review", request: { cwd } });
+    const executionPath = path.join(cwd, ".codex-mimo", "execution", "workspace");
+    const journalPath = path.join(cwd, ".codex-mimo", "journals", "promotion.json");
+
+    updateJob(cwd, job.id, {
+      executionWorkspace: {
+        path: executionPath,
+        kind: "git_worktree",
+        status: "retained",
+        isolationGuarantee: "cwd_relative_write_containment",
+        journalPath,
+        conflictPaths: ["src/index.ts", "packages/core/file.ts"],
+        reason: "Control workspace changed during execution."
+      },
+      reviewInput: {
+        status: "verified",
+        attachments: [{
+          path: path.join(cwd, ".codex-mimo", "inputs", "review.diff"),
+          sha256: "a".repeat(64),
+          base: "HEAD",
+          head: "0123456789abcdef"
+        }]
+      }
+    });
+
+    expect(readJob(cwd, job.id)).toMatchObject({
+      executionWorkspace: {
+        path: executionPath,
+        status: "retained",
+        conflictPaths: ["src/index.ts", "packages/core/file.ts"]
+      },
+      reviewInput: {
+        status: "verified",
+        attachments: [expect.objectContaining({ sha256: "a".repeat(64) })]
+      }
+    });
+  });
+
+  it.each([
+    ["non-object", []],
+    ["empty path", { path: "", kind: "copy", status: "prepared", isolationGuarantee: "cwd_relative_write_containment" }],
+    ["relative path", { path: "workspace", kind: "copy", status: "prepared", isolationGuarantee: "cwd_relative_write_containment" }],
+    ["unknown kind", { path: "C:/workspace", kind: "other", status: "prepared", isolationGuarantee: "cwd_relative_write_containment" }],
+    ["unknown status", { path: "C:/workspace", kind: "copy", status: "deleted", isolationGuarantee: "cwd_relative_write_containment" }],
+    ["wrong guarantee", { path: "C:/workspace", kind: "copy", status: "prepared", isolationGuarantee: "sandboxed" }],
+    ["relative journal", { path: "C:/workspace", kind: "copy", status: "prepared", isolationGuarantee: "cwd_relative_write_containment", journalPath: "journal.json" }],
+    ["parent conflict", { path: "C:/workspace", kind: "copy", status: "retained", isolationGuarantee: "cwd_relative_write_containment", conflictPaths: ["src/../secret.ts"] }],
+    ["absolute conflict", { path: "C:/workspace", kind: "copy", status: "retained", isolationGuarantee: "cwd_relative_write_containment", conflictPaths: ["/secret.ts"] }],
+    ["drive-relative conflict", { path: "C:/workspace", kind: "copy", status: "retained", isolationGuarantee: "cwd_relative_write_containment", conflictPaths: ["C:secret.ts"] }],
+    ["empty conflict", { path: "C:/workspace", kind: "copy", status: "retained", isolationGuarantee: "cwd_relative_write_containment", conflictPaths: [""] }],
+    ["non-string reason", { path: "C:/workspace", kind: "copy", status: "prepared", isolationGuarantee: "cwd_relative_write_containment", reason: 7 }]
+  ])("rejects malformed persisted execution workspace metadata: %s", (_label, executionWorkspace) => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "implement", task: "Validate workspace", request: { cwd } });
+    fs.writeFileSync(resolveJobPaths(cwd, job.id).jobFile, JSON.stringify({
+      ...job,
+      executionWorkspace
+    }), "utf8");
+
+    expect(() => readJob(cwd, job.id)).toThrow(/malformed job/i);
+    expect(listJobs(cwd).map((entry) => entry.id)).not.toContain(job.id);
+  });
+
+  it.each([
+    ["invalid job id", () => ({ jobId: "../other" })],
+    ["missing creation timestamp", () => ({ createdAt: undefined })],
+    ["non-UUID owner token", () => ({ ownerToken: "not-a-uuid" })],
+    ["foreign branch", () => ({ branch: "codex-mimo/worktree/other-job" })],
+    ["execution root inside control root", () => ({ executionRoot: "C:/control/nested-worktree" })],
+    ["unknown field", () => ({ extra: true })]
+  ])("rejects malformed persisted persistent-worktree lease: %s", (_label, patch) => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "compose", task: "Worktree", request: { workflow: "worktree" } });
+    const lease = {
+      mode: "persistent" as const,
+      jobId: job.id,
+      controlRoot: "C:/control",
+      executionRoot: "C:/execution",
+      ownerMetadataPath: "C:/execution/.git/codex-mimo-execution-workspace.json",
+      ownerToken: "2b4a1a94-6d90-4c2d-baa5-6aed2da4c5a8",
+      branch: `codex-mimo/worktree/${job.id}`,
+      createdAt: "2026-08-02T00:00:00.000Z"
+    };
+    fs.writeFileSync(resolveJobPaths(cwd, job.id).jobFile, JSON.stringify({
+      ...job,
+      executionWorkspaceLease: { ...lease, ...patch(job.id) }
+    }), "utf8");
+
+    expect(() => readJob(cwd, job.id)).toThrow(/malformed job/i);
+    expect(listJobs(cwd).map((entry) => entry.id)).not.toContain(job.id);
+  });
+
+  it.each([
+    ["non-object", []],
+    ["attachments not array", { status: "verified", attachments: "review.diff" }],
+    ["empty attachment path", { status: "verified", attachments: [{ path: "", sha256: "a".repeat(64) }] }],
+    ["invalid hash", { status: "verified", attachments: [{ path: "review.diff", sha256: "short" }] }],
+    ["non-string base", { status: "verified", attachments: [{ path: "review.diff", sha256: "a".repeat(64), base: 1 }] }],
+    ["non-string head", { status: "verified", attachments: [{ path: "review.diff", sha256: "a".repeat(64), head: 1 }] }],
+    ["unknown status", { status: "pending", attachments: [{ path: "review.diff", sha256: "a".repeat(64) }] }]
+  ])("rejects malformed persisted review input metadata: %s", (_label, reviewInput) => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "review", task: "Validate review", request: { cwd } });
+    fs.writeFileSync(resolveJobPaths(cwd, job.id).jobFile, JSON.stringify({
+      ...job,
+      reviewInput
+    }), "utf8");
+
+    expect(() => readJob(cwd, job.id)).toThrow(/malformed job/i);
+    expect(listJobs(cwd).map((entry) => entry.id)).not.toContain(job.id);
+  });
+
+  it("keeps legacy records without execution workspace or review input metadata readable", () => {
+    const cwd = tempWorkspace();
+    const job = createJobStore(cwd).create({ kind: "implement", task: "Legacy", request: { cwd } });
+    const legacy = { ...job } as Record<string, unknown>;
+    delete legacy.executionWorkspace;
+    delete legacy.reviewInput;
+    fs.writeFileSync(resolveJobPaths(cwd, job.id).jobFile, JSON.stringify(legacy), "utf8");
+
+    expect(readJob(cwd, job.id)).toMatchObject({ id: job.id, status: "queued" });
   });
 
   it.each([

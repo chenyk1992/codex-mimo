@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyRunOutcome,
+  compactFailureCauses,
   detectUnacceptedTask,
   type RunEvidence
 } from "../../../src/core/job-outcome.js";
@@ -188,6 +189,44 @@ describe("run outcome classification", () => {
     expect(detectUnacceptedTask(finalText)).toBeUndefined();
   });
 
+  it("recognizes an explicit long terminal blocked status without scanning ordinary prose", () => {
+    const finalText = `${"Detailed diagnostic information.\n".repeat(80)}\nStatus: blocked because the requested implementation was not completed.`;
+
+    expect(classifyRunOutcome(evidence({ finalText }))).toMatchObject({
+      status: "failed",
+      errorCode: "semantic_failure"
+    });
+  });
+
+  it("keeps a report's blocked status ahead of a later authorization suggestion", () => {
+    const finalText = [
+      "# Execution report",
+      "",
+      ...Array.from({ length: 80 }, () => "Detailed diagnostic information."),
+      "",
+      "Status: blocked. The requested implementation was not completed.",
+      "",
+      "After you authorize the required access, I can continue from this point."
+    ].join("\n");
+
+    expect(classifyRunOutcome(evidence({ finalText }))).toMatchObject({
+      status: "failed",
+      errorCode: "semantic_failure"
+    });
+  });
+
+  it("does not treat a long explanatory completion as an unfinished task", () => {
+    const finalText = `${"Detailed diagnostic information.\n".repeat(80)}\nThis document explains why jobs can be blocked, but the requested implementation completed successfully.`;
+
+    expect(detectUnacceptedTask(finalText)).toBeUndefined();
+  });
+
+  it("does not inspect a long code block for terminal failure text", () => {
+    const finalText = `${"Detailed diagnostic information.\n".repeat(80)}\n\`\`\`text\nStatus: blocked\n\`\`\``;
+
+    expect(detectUnacceptedTask(finalText)).toBeUndefined();
+  });
+
   it("gives failed verification precedence over a nonzero exit", () => {
     expect(classifyRunOutcome(evidence({
       exitCode: 2,
@@ -287,6 +326,18 @@ describe("run outcome classification", () => {
 });
 
 describe("safety isolation outcome regressions", () => {
+  it("retains an unknown write scope violation when compacting failure causes", () => {
+    expect(compactFailureCauses([{
+      code: "write_scope_violation",
+      stage: "scope_check",
+      suggestion: "Blocked path: unknown"
+    }])).toContainEqual({
+      code: "write_scope_violation",
+      stage: "scope_check",
+      suggestion: "Blocked path: unknown"
+    });
+  });
+
   it("prefers runSessionId over callback sessionId", () => {
     const outcome = classifyRunOutcome(evidence({
       runSessionId: "ses-jsonl-primary",

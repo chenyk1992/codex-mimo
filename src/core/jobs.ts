@@ -1,4 +1,5 @@
 import type { NotificationErrorCode, NotificationTarget } from "../notify/types.js";
+import type { ImmutablePromptAttachment } from "../mimo/prompt-transport.js";
 import type { JobFailureCause, VerificationFailureKind } from "./safety-contracts.js";
 
 export type {
@@ -97,6 +98,51 @@ export interface JobReportPaths {
   executionEvidence?: string;
 }
 
+/** Durable proof of the frozen diff handed to a review run. */
+export interface ReviewInputIntegrity {
+  attachments: ImmutablePromptAttachment[];
+  status: "verified_before_run" | "verified" | "modified";
+}
+
+/** Auditable lifecycle of a bridge-owned transient execution workspace. */
+export interface ExecutionWorkspaceSummary {
+  path: string;
+  kind: "git_worktree" | "copy";
+  status: "prepared" | "retained" | "promoted" | "disposed";
+  isolationGuarantee: "cwd_relative_write_containment";
+  journalPath?: string;
+  conflictPaths?: string[];
+  reason?: string;
+  mode?: "persistent";
+  branch?: string;
+  resumable?: boolean;
+}
+
+/** Private owner material for a retained persistent Compose worktree. */
+export interface ExecutionWorkspaceLease {
+  mode: "persistent";
+  jobId: string;
+  controlRoot: string;
+  executionRoot: string;
+  ownerMetadataPath: string;
+  ownerToken: string;
+  branch: string;
+  createdAt: string;
+}
+
+/** Public, secret-free evidence for a bridge-owned merge transaction. */
+export interface MergeTransactionSummary {
+  transactionId: string;
+  sourceRef: string;
+  targetRef: string;
+  sourceOid: string;
+  targetOid: string;
+  status: "prepared" | "already_integrated" | "merged" | "published" | "retained";
+  mergeOid?: string;
+  integrationRef?: string;
+  journalPath?: string;
+}
+
 export interface JobChangeDetectionSummary {
   status: "complete" | "partial" | "unavailable";
   sources: Array<"git_fingerprint" | "git_diff" | "git_commit" | "scope_manifest">;
@@ -170,6 +216,11 @@ export type ArtifactAssessment = "needs_review" | "passed" | "failed";
 export interface CompactJobResult {
   status: JobStatus;
   changedFiles: string[];
+  /** Declared build/test outputs; omitted for records created before artifact classification. */
+  artifactFiles?: string[];
+  /** Bridge-owned execution directory retained or disposed for this job. */
+  executionWorkspace?: ExecutionWorkspaceSummary;
+  mergeTransaction?: MergeTransactionSummary;
   tests: CompactAcceptanceResult[];
   failure: CompactFailure | null;
   reportPath: string | null;
@@ -257,6 +308,7 @@ export interface JobTransitionFields {
   completedAt?: string;
   sessionId?: string | null;
   changedFiles?: string[];
+  artifactFiles?: string[];
   verification?: JobVerification[];
   acceptance?: JobAcceptanceSummary;
   executionCallback?: ExecutionCallbackSummary;
@@ -299,6 +351,14 @@ export interface JobRecord {
   completedAt?: string;
   summary?: string;
   changedFiles: string[];
+  /** Declared build/test outputs, distinct from the business/source net diff. */
+  artifactFiles?: string[];
+  /** Present only for native/Compose review jobs with a frozen diff attachment. */
+  reviewInput?: ReviewInputIntegrity;
+  executionWorkspace?: ExecutionWorkspaceSummary;
+  /** Never expose this field through status/result rendering. */
+  executionWorkspaceLease?: ExecutionWorkspaceLease;
+  mergeTransaction?: MergeTransactionSummary;
   verification: JobVerification[];
   acceptance?: JobAcceptanceSummary;
   executionCallback?: ExecutionCallbackSummary;
@@ -338,6 +398,7 @@ export interface JobStatusResult {
   sessionId: string | null;
   summary: string;
   changedFiles: string[];
+  artifactFiles?: string[];
   cancellationRequested?: true;
   executionCallback?: ExecutionCallbackSummary;
   progress: string[];

@@ -3,6 +3,7 @@ import { once } from "node:events";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   CALLBACK_HEADER,
@@ -98,7 +99,7 @@ describe("hook callback payload helpers", () => {
     expect(CALLBACK_HEADER).toBe("x-codex-mimo-callback-token");
   });
 
-  it("drops only stale unknown scope guards from completed callbacks", () => {
+  it("retains unknown scope guards from completed callbacks", () => {
     const completed = toExecutionCallbackEvidence("fallback", {
       invocationId: "hook-invocation",
       event: "session.post",
@@ -111,25 +112,45 @@ describe("hook callback payload helpers", () => {
         path: "unknown"
       }
     });
-    const failed = toExecutionCallbackEvidence("fallback", {
-      invocationId: "hook-invocation",
-      event: "session.post",
-      receivedAt: "2026-07-16T00:00:00.000Z",
-      sessionId: "ses-1",
-      outcome: "error",
-      guardFailure: {
-        code: "write_scope_violation",
-        sessionId: "ses-1",
-        path: "unknown"
-      }
-    });
-
-    expect(completed).not.toHaveProperty("failureCauses");
-    expect(failed.failureCauses).toEqual([{
+    expect(completed.failureCauses).toEqual([{
       code: "write_scope_violation",
       stage: "scope_check",
       suggestion: "Blocked path: unknown"
     }]);
+  });
+
+  it("allows a real nested MiMo write event whose file path is in scope", async () => {
+    const cwd = tempWorkspace();
+    const paths = writeHookConfig({
+      cwd,
+      invocationId: "implement-nested-write",
+      endpoint: "http://127.0.0.1:12345/mimo-hook",
+      token: "secret-token"
+    });
+    const previousAllowedPaths = process.env.CODEX_MIMO_ALLOWED_PATHS_JSON;
+    process.env.CODEX_MIMO_ALLOWED_PATHS_JSON = JSON.stringify(["src/allowed.ts"]);
+
+    try {
+      const hookModule = await import(pathToFileURL(paths.hookFile).href);
+      const hooks = await hookModule.default();
+      await hooks["session.pre"]({ sessionID: "ses-nested" });
+      const output: { cancel?: boolean; cancelReason?: string } = {};
+      await hooks["tool.execute.before"]({
+        sessionID: "ses-nested",
+        part: {
+          tool: "write",
+          state: { input: { file_path: "src/allowed.ts" } }
+        }
+      }, output);
+
+      expect(output).toEqual({});
+    } finally {
+      if (previousAllowedPaths === undefined) {
+        delete process.env.CODEX_MIMO_ALLOWED_PATHS_JSON;
+      } else {
+        process.env.CODEX_MIMO_ALLOWED_PATHS_JSON = previousAllowedPaths;
+      }
+    }
   });
 
   it("writes a callable MiMoCode plugin under a runtime config directory", () => {
@@ -586,6 +607,7 @@ describe("hook callback controller", () => {
       })
     });
     expect(childResponse.status).toBe(200);
+    expect(controller.getReceivedCallback()).toBeNull();
 
     const waitPromise = controller.waitForCallback();
     const raced = await Promise.race([
@@ -609,6 +631,10 @@ describe("hook callback controller", () => {
       })
     });
     expect(primaryResponse.status).toBe(200);
+    expect(controller.getReceivedCallback()).toMatchObject({
+      sessionId: "ses-primary",
+      outcome: "completed"
+    });
     const summary = await waitPromise;
     expect(summary?.sessionId).toBe("ses-primary");
     await controller.close();

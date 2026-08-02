@@ -19,7 +19,8 @@ import {
 } from "../../../src/core/job-chain.js";
 import {
   advanceJobChainAfterChild,
-  bootstrapWriteJobChain
+  bootstrapWriteJobChain,
+  continueJobChainOrchestration
 } from "../../../src/core/job-definitions.js";
 import { createJobStore, listJobs, readJob, updateJobAuthoritative } from "../../../src/core/job-store.js";
 import { transitionJob } from "../../../src/core/job-transition.js";
@@ -432,7 +433,7 @@ describe("advanceJobChainAfterChild", () => {
     expect(readDeliveries(advanced.root.notificationOutboxFile)).toHaveLength(0);
   });
 
-  it("aggregates changedFiles onto the root and finalizes when the last slice completes", async () => {
+  it("aggregates source changes and artifacts separately onto the root when the last slice completes", async () => {
     const cwd = tempWorkspace();
     const boot = await seedTwoSliceChain(cwd);
     const first = readJob(cwd, boot.childJobId)!;
@@ -444,7 +445,8 @@ describe("advanceJobChainAfterChild", () => {
     await transitionJob(cwd, first.id, {
       status: "completed",
       summary: "Slice 1 done.",
-      changedFiles: ["src/a.ts"]
+      changedFiles: ["src/a.ts"],
+      artifactFiles: ["build/a.js"]
     });
     const afterFirst = await advanceJobChainAfterChild(
       { cwd, child: readJob(cwd, first.id)! },
@@ -462,7 +464,8 @@ describe("advanceJobChainAfterChild", () => {
     await transitionJob(cwd, second.id, {
       status: "completed",
       summary: "Slice 2 done.",
-      changedFiles: ["src/b.ts", "src/a.ts"]
+      changedFiles: ["src/b.ts", "src/a.ts"],
+      artifactFiles: ["build/b.js", "build/a.js"]
     });
 
     const advanced = await advanceJobChainAfterChild(
@@ -476,11 +479,137 @@ describe("advanceJobChainAfterChild", () => {
     expect(advanced.rootTerminal).toBe(true);
     expect(advanced.root.status).toBe("completed");
     expect(advanced.root.changedFiles).toEqual(["src/a.ts", "src/b.ts"]);
+    expect(advanced.root.artifactFiles).toEqual(["build/a.js", "build/b.js"]);
+    expect(advanced.root.changedFiles).not.toContain("build/a.js");
+    expect(advanced.root.changedFiles).not.toContain("build/b.js");
     expect(advanced.deliveryCreated).toBe(true);
     expect(readDeliveries(advanced.root.notificationOutboxFile).some(
       (delivery) => delivery.jobId === advanced.root.id
     )).toBe(true);
     expect(second.notificationTarget).toBeUndefined();
+  });
+
+  it("keeps two slice artifact sets stable across duplicate terminal delivery and recovery", async () => {
+    const cwd = tempWorkspace();
+    const boot = await seedTwoSliceChain(cwd);
+    const first = readJob(cwd, boot.childJobId)!;
+    await transitionJob(cwd, first.id, {
+      status: "running",
+      summary: "running slice 1",
+      phase: "editing"
+    });
+    await transitionJob(cwd, first.id, {
+      status: "completed",
+      summary: "Slice 1 done.",
+      changedFiles: ["src/a.ts"],
+      artifactFiles: ["build/a.js"]
+    });
+    const afterFirst = await advanceJobChainAfterChild(
+      { cwd, child: readJob(cwd, first.id)! },
+      { writeRootCheckpoint: async () => undefined, spawnJobSupervisor: () => 1 }
+    );
+    const second = readJob(cwd, afterFirst.startedChildId!)!;
+    await transitionJob(cwd, second.id, {
+      status: "running",
+      summary: "running slice 2",
+      phase: "editing"
+    });
+    await transitionJob(cwd, second.id, {
+      status: "completed",
+      summary: "Slice 2 done.",
+      changedFiles: ["src/b.ts"],
+      artifactFiles: ["build/b.js"]
+    });
+
+    const completed = await advanceJobChainAfterChild(
+      { cwd, child: readJob(cwd, second.id)! },
+      { writeRootCheckpoint: async () => undefined, spawnJobSupervisor: () => 1 }
+    );
+    const duplicate = await advanceJobChainAfterChild(
+      { cwd, child: readJob(cwd, second.id)! },
+      { writeRootCheckpoint: async () => undefined, spawnJobSupervisor: () => 1 }
+    );
+    const recovered = await continueJobChainOrchestration(
+      { cwd, chain: readJobChain(cwd, boot.chainId)! },
+      { writeRootCheckpoint: async () => undefined, spawnJobSupervisor: () => 1 }
+    );
+
+    for (const result of [completed, duplicate, recovered]) {
+      expect(result.root.changedFiles).toEqual(["src/a.ts", "src/b.ts"]);
+      expect(result.root.artifactFiles).toEqual(["build/a.js", "build/b.js"]);
+      expect(result.root.changedFiles).not.toContain("build/a.js");
+      expect(result.root.changedFiles).not.toContain("build/b.js");
+    }
+  });
+
+  it("serializes concurrent terminal and recovery advances without dropping a child file", async () => {
+    const cwd = tempWorkspace();
+    const boot = await seedTwoSliceChain(cwd);
+    const first = readJob(cwd, boot.childJobId)!;
+    const second = createJobStore(cwd).create({
+      kind: "implement",
+      task: "Slice 2",
+      request: { cwd, task: "Slice 2", allowWrite: true, acceptance },
+      parentJobId: boot.root.id,
+      chainId: boot.chainId,
+      sliceId: "slice-2"
+    });
+    markSliceRunning(cwd, boot.chainId, "slice-2", second.id);
+
+    for (const [child, file, artifact] of [
+      [first, "src/a.ts", "build/a.js"],
+      [second, "src/b.ts", "build/b.js"]
+    ] as const) {
+      await transitionJob(cwd, child.id, {
+        status: "running",
+        summary: `running ${child.sliceId}`,
+        phase: "editing"
+      });
+      await transitionJob(cwd, child.id, {
+        status: "completed",
+        summary: `${child.sliceId} done`,
+        changedFiles: [file],
+        artifactFiles: [artifact]
+      });
+    }
+
+    let firstCheckpointReached!: () => void;
+    const firstCheckpoint = new Promise<void>((resolve) => {
+      firstCheckpointReached = resolve;
+    });
+    let releaseFirstCheckpoint!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseFirstCheckpoint = resolve;
+    });
+    let checkpointCalls = 0;
+    const writeRootCheckpoint = async () => {
+      if (checkpointCalls++ === 0) {
+        firstCheckpointReached();
+        await release;
+      }
+    };
+    const dependencies = { writeRootCheckpoint, spawnJobSupervisor: () => 1 };
+
+    const firstAdvance = advanceJobChainAfterChild(
+      { cwd, child: readJob(cwd, first.id)! },
+      dependencies
+    );
+    await firstCheckpoint;
+    const secondAdvance = advanceJobChainAfterChild(
+      { cwd, child: readJob(cwd, second.id)! },
+      dependencies
+    );
+    releaseFirstCheckpoint();
+    await Promise.all([firstAdvance, secondAdvance]);
+
+    const root = readJob(cwd, boot.root.id)!;
+    expect(root.status).toBe("completed");
+    expect(root.changedFiles).toEqual(["src/a.ts", "src/b.ts"]);
+    expect(root.artifactFiles).toEqual(["build/a.js", "build/b.js"]);
+    expect(root.changedFiles).not.toContain("build/a.js");
+    expect(root.changedFiles).not.toContain("build/b.js");
+    expect(readJobChain(cwd, boot.chainId)?.completedSliceIds.sort())
+      .toEqual(["slice-1", "slice-2"]);
   });
 
   it("on child failure leaves later slices pending, sets slice_failed, and notifies only the root", async () => {

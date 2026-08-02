@@ -16,8 +16,8 @@ Workflow definitions live in `src/compose/workflow.ts`.
 | `execute-plan` | `compose:execute -> compose:tdd -> compose:verify -> compose:review` | yes | file |
 | `review` | `compose:review -> compose:feedback` | no | optional base via `since` |
 | `parallel` | `compose:parallel -> compose:subagent -> compose:verify` | yes | task |
-| `worktree` | `compose:worktree` | yes | task |
-| `merge` | `compose:merge` | yes | task |
+| `worktree` | `compose:worktree` | yes | task; optional bounded `allowedPaths` |
+| `merge` | `compose:merge` | yes | `sourceRef`, `targetRef`, non-empty bounded `allowedPaths`; optional task |
 | `new-skill` | `compose:execute -> compose:verify` | yes | task |
 
 The upstream skill bundle does not contain a skill named `compose:new-skill`; the registry intentionally maps that workflow to `compose:execute` and `compose:verify`.
@@ -66,11 +66,36 @@ Rejected: bare `**`, absolute paths, `..`, UNC paths, and mid-path globs such as
 
 Build/test outputs use a separate optional scope, `acceptance.artifactPaths`, with the same bounded pattern syntax. Artifact paths are admitted only by post-run and diff auditing, never by the `write`/`edit` hook, and must not overlap `allowedPaths`. Declared ignored artifacts are fingerprinted and are not automatically deleted.
 
-The `worktree` workflow (and a Resume inherited from it) receives a run-scoped
-MiMoCode `external_directory=allow` permission so it can operate in the named
-sibling worktree. Other workflows preserve the caller's external-directory
-policy. Keep each worktree objective bounded to one explicit child path and
-branch, and verify the child topology after completion.
+The `worktree` workflow runs in a bridge-owned named worktree under the platform
+state directory. It never receives `external_directory=allow`, never promotes
+changes back to the control workspace, and remains available after completion
+for inspection or `mimo_resume`. The persisted owner lease is private and is
+not returned by `mimo_status`, `mimo_result`, or `mimo_jobs`. This is working-
+directory containment, not an OS sandbox: an absolute-path write by a process
+running as the same user is outside this guarantee.
+
+## Safe merge transaction
+
+`merge` accepts local branch names only and requires `sourceRef`, `targetRef`,
+and non-empty bounded `allowedPaths`. At launch the bridge pins both branch
+OIDs and the control workspace/ref topology. The worker creates a clean,
+detached bridge-owned worktree at the pinned target and starts
+`git merge --no-ff --no-commit` itself. MiMoCode may resolve and stage conflicts
+inside that worktree, but may not commit, move refs, switch branches, manage
+worktrees, or access the control workspace.
+
+After verification, the host rejects unresolved, unstaged, untracked,
+out-of-scope, HEAD-changing, or topology-drifting results; creates the merge
+commit with the pinned target/source as its exact two parents; and publishes it
+with a create-only CAS at `refs/heads/codex-mimo/merge/<jobId>`. The target ref
+and currently checked-out branch are never moved. `mergeTransaction` in the
+result/report records the pinned refs/OIDs, merge OID, integration ref, and
+journal path. If the source is already integrated, the job completes as a
+reported no-op without launching MiMoCode or publishing a ref.
+
+```json
+{ "workflow": "merge", "sourceRef": "feature/login", "targetRef": "main", "allowedPaths": ["src/login/**"], "task": "Resolve and validate the feature merge" }
+```
 
 ## Execution and Status
 

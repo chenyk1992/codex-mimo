@@ -185,7 +185,10 @@ export const ComposeInputShape = {
   ),
   reportDir: z.string().min(1).optional(),
   batchMode: BatchModeSchema.optional(),
-  allowedPaths: AllowedPathsSchema.optional()
+  allowedPaths: AllowedPathsSchema.optional(),
+  /** Required only for the bridge-owned merge transaction workflow. */
+  sourceRef: z.string().min(1).optional(),
+  targetRef: z.string().min(1).optional()
 };
 
 export const ComposeInput = z.object(ComposeInputShape).strict();
@@ -221,6 +224,15 @@ const ComposeInputWithWorkflowRequirements = ComposeInput.superRefine((input, co
     )) {
       context.addIssue({ code: z.ZodIssueCode.custom, message });
     }
+  }
+  if (input.workflow === "merge") {
+    if (!input.sourceRef?.trim()) context.addIssue({ code: z.ZodIssueCode.custom, message: "Workflow merge requires sourceRef." });
+    if (!input.targetRef?.trim()) context.addIssue({ code: z.ZodIssueCode.custom, message: "Workflow merge requires targetRef." });
+    for (const message of collectAllowedPathsIssues(input.allowedPaths, { required: true })) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message });
+    }
+  } else if (input.sourceRef !== undefined || input.targetRef !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "sourceRef and targetRef are supported only by workflow merge." });
   }
 });
 
