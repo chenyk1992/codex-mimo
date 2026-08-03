@@ -1,7 +1,7 @@
 {
   "$schema": "https://mimo.xiaomi.com/mimocode/config.json",
-  "model": "minimax-cn-coding-plan/MiniMax-M3",
-  "small_model": "minimax-cn-coding-plan/MiniMax-M3",
+  "model": "longcat/LongCat-2.0",
+  "small_model": "longcat/LongCat-2.0",
   "default_agent": "build",
   "share": "manual",
   "permission": {
@@ -29,15 +29,15 @@
   },
   "agent": {
     "general": {
-      "model": "minimax-cn-coding-plan/MiniMax-M2.7"
+      "model": "longcat/LongCat-2.0"
     },
     "explore": {
-      "model": "minimax-cn-coding-plan/MiniMax-M2.7"
+      "model": "longcat/LongCat-2.0"
     },
     "codex-reviewer": {
       "description": "Reviews code for correctness, security, maintainability, and missing tests.",
       "mode": "subagent",
-      "model": "minimax-cn-coding-plan/MiniMax-M2.7",
+      "model": "longcat/LongCat-2.0",
       "tools": {
         "write": false,
         "edit": false

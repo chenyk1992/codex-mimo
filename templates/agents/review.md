@@ -1,7 +1,7 @@
 ---
 description: Reviews code without editing files
 mode: subagent
-model: minimax-cn-coding-plan/MiniMax-M2.7
+model: longcat/LongCat-2.0
 tools:
   write: false
   edit: false
